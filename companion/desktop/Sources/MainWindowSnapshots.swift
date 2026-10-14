@@ -99,8 +99,13 @@ enum MainWindowSnapshots {
             // says the next file) → the fake's /v1/desktop/capture → what it did, back on the page's button.
             let notes = VoiceNotes.shared
             await evaluate("SamRabbitApp.show('home')")
-            // The ended conversation's panel lingers a few seconds: draw the note without it.
-            await pause(12.5)
+            // The ended conversation's panel lingers while the pointer is on it, and the press above left WebKit's
+            // pointer there (no exit ever comes): close it with its ×, as Samin would, and draw the note without it.
+            await press(".voice-panel .voice-btn[aria-label=\"Close\"]")
+            await pause(0.6)
+            if await evaluate("Boolean(document.querySelector('.voice-panel:not(.closing)'))") as? Bool == true {
+                problems.append("the ended conversation's panel didn't close")
+            }
             await press(".quick.note-quick")
             if !(await waitFor(5) { notes.isRecording }) { problems.append("the note didn't start from the page") }
             await pause(2.5)

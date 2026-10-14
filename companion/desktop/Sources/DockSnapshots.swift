@@ -45,6 +45,8 @@ enum DockSnapshots {
 
         let listening = DockVoiceSnapshot(phase: .listening, heard: "", caption: "", level: 0.55, wakeArmed: false)
         let idleVoice = DockVoiceSnapshot(phase: .idle, wakeArmed: true)
+        // 19–21, the voice note's bar and the Morning section (CONTRACTS-WAVE8 §D1, §D2): their own function below.
+        guard notesAndMorning(to: out, fixture: fixture, backdrop: wallpaper, idleVoice: idleVoice) else { return 1 }
 
         // 1. The pill.
         do {
@@ -239,66 +241,8 @@ enum DockSnapshots {
                 save(name, canvas, VStack { sheet }.frame(width: canvas.width, height: canvas.height))
             }
         }
-        // 19. The voice note's bar (CONTRACTS-WAVE8 §D1): recording after a tap and while ⌃⌥N is held, sending, sent
-        //     with what the bridge did, kept on this Mac while the bridge is away, and too short.
-        do {
-            let (_, ui) = fixture.make()
-            func note(_ phase: VoiceNoteSnapshot.Phase, _ line: String = "", _ detail: String = "", level: Double = 0,
-                      seconds: TimeInterval = 0) -> VoiceNoteSnapshot {
-                var note = VoiceNoteSnapshot()
-                note.phase = phase
-                note.line = line
-                note.detail = detail
-                note.level = level
-                note.startedAt = seconds > 0 ? Date().addingTimeInterval(-seconds) : nil
-                return note
-            }
-            let states = [
-                note(.recording(held: false), level: 0.62, seconds: 7.4),
-                note(.recording(held: true), level: 0.2, seconds: 2.2),
-                note(.sending, "On its way to your Mac’s bridge…"),
-                note(.sent, "Added to your journal", "“shipped the voice notes on the Mac today.”"),
-                {
-                    var kept = note(.sent, "Saved as a note", "Start it as a T3 task?")
-                    kept.offer = "Start as task"
-                    return kept
-                }(),
-                note(.queued, "Saved on this Mac", "The bridge isn’t running — it goes as soon as it can."),
-                note(.discarded, "Too short", "Hold ⌃⌥N while you talk, or tap it, talk, and tap again."),
-            ]
-            save("dock-19-note.png", CGSize(width: 760, height: 640), VStack(spacing: 16) {
-                ForEach(Array(states.enumerated()), id: \.offset) { _, state in
-                    DockNoteBar(note: state, scale: ui.pillScale, commands: DockCommands()).fixedSize()
-                }
-            }.padding(.bottom, 24))
-        }
-        // 20–21. Before noon, the list opens with the morning brief (CONTRACTS-WAVE8 §D2): the headline, what to do first
-        //        with its verbs, today's next events. Then after Draft reply (saved in Gmail, opened, nothing sent) and
-        //        Make task, with "Remind me" open on the clash and a failed try's note. At 8:20 today, whatever the time.
-        if let start = Calendar.current.date(bySettingHour: 8, minute: 20, second: 0, of: Date()),
-           let early = Fixture.load(now: start), let brief = early.brief {
-            do {
-                let (store, ui) = early.make()
-                ui.expanded = true
-                save("dock-20-morning.png", CGSize(width: 680, height: 1200), Stage { panel(store, ui, idleVoice) })
-            }
-            do {
-                let (store, ui) = early.make()
-                ui.expanded = true
-                let first = brief.section(.doFirst)?.items ?? []
-                if first.count == 3 {
-                    store.morning.act(first[0], "draft_reply")
-                    store.morning.act(first[1], "make_task")
-                    store.morning.showNote(DockStore.note(for: DockAPI.Failure(status: 502, code: "gmail_failed",
-                                                                               message: "Gmail didn’t answer. Nothing was changed.")),
-                                           for: first[2].id)
-                    store.morning.remindOpen = first[2].id
-                }
-                save("dock-21-morning-acted.png", CGSize(width: 680, height: 1200), Stage { panel(store, ui, idleVoice) })
-            }
-        }
         for path in written { print(path) }
-        return written.count == 21 ? 0 : 1
+        return written.count == 18 ? 0 : 1
     }
 
     /// A small label under a state (dev snapshots only).
@@ -400,6 +344,92 @@ enum DockSnapshots {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
             .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
+    }
+
+    /// 19–21 (CONTRACTS-WAVE8): the voice note's bar in each of its states, and before noon the list opening with the
+    /// morning brief, then after its actions. Printed and counted on their own (false: one didn't render).
+    private static func notesAndMorning(to out: URL, fixture: Fixture, backdrop: NSImage, idleVoice: DockVoiceSnapshot) -> Bool {
+        var written: [String] = []
+        func save(_ name: String, _ size: CGSize, _ content: some View) {
+            let renderer = ImageRenderer(content: SnapshotCanvas(size: size, backdrop: backdrop, content: content))
+            renderer.scale = 2
+            renderer.proposedSize = ProposedViewSize(size)
+            guard let cg = renderer.cgImage,
+                  let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else {
+                print("dock snapshots: could not render \(name)")
+                return
+            }
+            let url = out.appendingPathComponent(name)
+            do {
+                try png.write(to: url)
+                written.append(url.path)
+            } catch {
+                print("dock snapshots: could not write \(url.path)")
+            }
+        }
+        // 19. The voice note's bar (CONTRACTS-WAVE8 §D1): recording after a tap and while ⌃⌥N is held, sending, sent
+        //     with what the bridge did (its own outcomes: a journal line, a T3 task, a note with a suggestion), kept on
+        //     this Mac while the bridge is away, too short, and a note the bridge couldn't finish.
+        do {
+            let (_, ui) = fixture.make()
+            func note(_ phase: VoiceNoteSnapshot.Phase, _ line: String = "", _ detail: String = "", level: Double = 0,
+                      seconds: TimeInterval = 0) -> VoiceNoteSnapshot {
+                var note = VoiceNoteSnapshot()
+                note.phase = phase
+                note.line = line
+                note.detail = detail
+                note.level = level
+                note.startedAt = seconds > 0 ? Date().addingTimeInterval(-seconds) : nil
+                return note
+            }
+            let states = [
+                note(.recording(held: false), level: 0.62, seconds: 7.4),
+                note(.recording(held: true), level: 0.2, seconds: 2.2),
+                note(.sending, "On its way to your Mac’s bridge…"),
+                note(.sent, "Added to your journal", "“Put this in my journal: shipped the voice notes on the Mac today.”"),
+                note(.sent, "Started a T3 task", "Started “Fix the flaky long-poll test in the bridge suite” in SamRabbit."),
+                {
+                    var kept = note(.sent, "Saved as a note", "Start it as a T3 task?")
+                    kept.offer = "Start as task"
+                    return kept
+                }(),
+                note(.queued, "Saved on this Mac", "The bridge isn’t running — it goes as soon as it can."),
+                note(.discarded, "Too short", "Hold ⌃⌥N while you talk, or tap it, talk, and tap again."),
+                note(.failed, "The bridge couldn’t finish it", "Couldn't save it: T3 Code isn't connected."),
+            ]
+            save("dock-19-note.png", CGSize(width: 760, height: 820), VStack(spacing: 16) {
+                ForEach(Array(states.enumerated()), id: \.offset) { _, state in
+                    DockNoteBar(note: state, scale: ui.pillScale, commands: DockCommands()).fixedSize()
+                }
+            }.padding(.bottom, 24))
+        }
+        // 20–21. Before noon, the list opens with the morning brief (CONTRACTS-WAVE8 §D2): the headline, what to do first
+        //        with its verbs, today's next events. Then after Draft reply (saved in Gmail, opened, nothing sent) and
+        //        Make task, with "Remind me" open on the clash and a failed try's note. At 8:20 today, whatever the time.
+        if let start = Calendar.current.date(bySettingHour: 8, minute: 20, second: 0, of: Date()),
+           let early = Fixture.load(now: start), let brief = early.brief {
+            do {
+                let (store, ui) = early.make()
+                ui.expanded = true
+                save("dock-20-morning.png", CGSize(width: 680, height: 1200), Stage { panel(store, ui, idleVoice) })
+            }
+            do {
+                let (store, ui) = early.make()
+                ui.expanded = true
+                let first = brief.section(.doFirst)?.items ?? []
+                if first.count == 3 {
+                    store.morning.act(first[0], "draft_reply")
+                    store.morning.act(first[1], "make_task")
+                    store.morning.showNote(DockStore.note(for: DockAPI.Failure(status: 502, code: "gmail_failed",
+                                                                               message: "Gmail didn’t answer. Nothing was changed.")),
+                                           for: first[2].id)
+                    store.morning.remindOpen = first[2].id
+                }
+                save("dock-21-morning-acted.png", CGSize(width: 680, height: 1200), Stage { panel(store, ui, idleVoice) })
+            }
+        }
+        for path in written { print(path) }
+        return written.count == 3
     }
 
     private static func panel(_ store: DockStore, _ ui: DockUIState, _ voice: DockVoiceSnapshot) -> some View {
