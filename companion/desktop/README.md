@@ -3,7 +3,8 @@
 SamRabbit on the Mac: one window with what needs you across T3 Code, Claude Code and Codex (approve, answer,
 reply, stop, start a new task), every R1 / Watch / iPhone / Mac conversation live in one searchable timeline (what
 you said, the answers as they stream, GenUI cards, T3 updates, tool calls, screenshots and camera photos, the UIs
-the Mac generates), your calendar, your devices, and Talk — plus the Agent Dock when the window isn't in front.
+the Mac generates), your calendar, your devices, Talk, quick voice notes (⌃⌥N) and, until noon, the morning brief —
+plus the Agent Dock when the window isn't in front.
 
 ```
 R1 app ─▶ R1 runtime ─▶ Mac bridge (sync store) ─▶ SamRabbit.app  (WKWebView ◀─ /app/ + /v1/sync/*)
@@ -23,10 +24,12 @@ R1 app ─▶ R1 runtime ─▶ Mac bridge (sync store) ─▶ SamRabbit.app  (W
 A sidebar (the orb, **Talk**, and the views) and five views (CONTRACTS-WAVE7 §B; `web/app.js` routes them):
 
 - **Home** (⌘1, `web/home.js`): a greeting with "6 need you · 4 working · Next: …", the quick actions **New task**,
-  **Talk**, **Block time** (a popover: 15 min to 2 hr from now, a title; `POST /v1/desktop/calendar/block`) and
+  **Talk**, **Voice note** (see "Voice notes": the shell records it; while one records the button says "Send note 0:07"),
+  **Block time** (a popover: 15 min to 2 hr from now, a title; `POST /v1/desktop/calendar/block`) and
   **Journal note** (a sheet; the words go into today's Heptabase journal exactly as typed, only when you press Add:
   `POST /v1/desktop/journal`), the items that need you (an approval shows its command and its buttons right there),
   what is working, the next three events with Join, the R1 / iPhone / Watch / this Mac, and the latest conversation.
+  Until noon the **Morning brief** sits right under the greeting (see "Morning brief").
 - **Tasks** (⌘2, `web/tasks.js`): the whole agent inbox (`/v1/desktop/inbox`, the dock's long poll and rules:
   `web/inbox.js` mirrors `Sources/DockModels.swift`) in Needs you / Working / Recent, filtered by T3 · Claude ·
   Codex (with their needs-you counts). A row opens in the detail pane: its last messages (`/items/<id>`), every
@@ -217,6 +220,53 @@ memory: nothing is recorded and nothing plays out loud. `SAMRABBIT_NO_MIC=1` kee
 without echo cancellation (fixture mode). The fake sync server answers `/v1/desktop/assistant/*` with canned
 streamed turns (`dev/fake_assistant.py`: `POST /dev/assistant {mode}`, `POST /dev/announce {say}`).
 
+## Voice notes
+
+Say something and it is dealt with, no back and forth (CONTRACTS-WAVE8 §D1; `Sources/VoiceNote*.swift`):
+
+- **⌃⌥N** from any app (a `DockShortcutAction`, recorded anew in Agent Dock Settings like the others; Carbon delivers its
+  press and its release, no permission): **held**, it records while held and the release sends; **tapped**, it records
+  until the next tap, about 3 s of quiet after you spoke, or the 5-minute cap (nothing said for 12 s: nothing is sent).
+  The same tap from the pill's note button (next to the mic), **Voice Note** in the menu bar extra, the app menu, the
+  dock's menu and the Dock icon's menu, and Home's **Voice note**.
+- **The bar**: the pill becomes "Voice note 0:07 · Recording… ⌃⌥N to send" with the level, × (throw it away, or Esc once
+  the bar has the keys) and ↑ (send now, or ↩); then "Sending…", then "Sent ✓ — Added to your journal" (or "Started a T3
+  task", "On your calendar", "Saved as a note" with the bridge's suggestion as a button, "Start as task"). Like the voice
+  bar it shows through every hide. It never speaks, and nothing plays.
+- **The bridge does the work**: `POST /v1/desktop/capture` (a 16 kHz WAV, `X-SamRabbit-Capture` a UUID made when the
+  note started, so a retry is never a second note; `X-SamRabbit-Captured-At` with its offset; `X-SamRabbit-Source: mac`)
+  answers 202 at once; `GET /v1/desktop/capture/<id>?wait=8` says what it heard and did; a kept note's suggestion is
+  `POST /v1/desktop/captures/<id>/act {action}`. The bridge writes the journal only when you ask for the journal, in
+  your words.
+- **Nothing is lost**: the WAV goes into `~/Library/Application Support/SamRabbit/capture-outbox/` (0700, files 0600)
+  before it is sent and leaves once the bridge has it; when the bridge is down, too old or busy it waits ("Saved on this
+  Mac") and is tried again after 5 s, 30 s, 2 min, then every 10 min, and at once when the bridge answers again (a
+  notification then says what became of it). At most 50 notes, none older than a week. A development copy (another
+  bundle id) or a harness has its own folder (`capture-outbox-<bundle id>`), so the installed app never sends a test
+  recording; `SAMRABBIT_CAPTURE_OUTBOX` names another.
+- **One microphone**: no note during a conversation; while one records, "Hey Rabbit" waits and ⌃⌥Space does nothing.
+  The recorder is its own `AVAudioEngine` tap without voice processing (`VoiceNoteRecorder`); in fixture mode
+  (`SAMRABBIT_VOICE_FIXTURE`) it hears the fixture microphone's next file instead, and `SAMRABBIT_NO_MIC=1` keeps it off.
+- The log has ids, lengths, sizes and what the bridge made of a note, never what was said.
+
+## Morning brief
+
+The bridge builds one brief a day from Gmail, the calendar and the agents (CONTRACTS-WAVE8 §A3); the Mac shows it until
+noon: on Home (`web/morning.js`, the rules in `web/briefing.js`) and at the top of the Agent Dock's list
+(`Sources/DockMorning.swift`, the rules in `DockBriefing.swift`, the same as the page's).
+
+- The headline ("3 things need you · 4 meetings, first at 9:30 · 1 agent waiting"), **Do first** (each item's verbs are
+  its buttons: **Draft reply**, **Make task**, **Block time**, **Remind me** (in an hour, 2 PM, tonight, tomorrow 9 AM),
+  **Open**, plus Done and Dismiss), **Today** (the next events, a clash flagged), **Agents** (they open in Tasks or in the
+  dock's list) and **FYI**; Home also says what was read ("Read 105 emails · skipped 182 promotions").
+- `GET /v1/desktop/briefing` (the window every 5 minutes while it is on screen and when the summary's `briefing.revision`
+  moves; the dock from 05:00 to noon every 5 minutes and when its list opens), `POST …/briefing/items/<id>/act {action,
+  at?}`, `POST …/briefing/refresh` (Refresh / ↻). A result shows at once and rolls back with a note when the bridge says no.
+- **Draft reply** makes a Gmail **draft** on the bridge and opens it in the browser, in the item's own Google account
+  (`authuser`, so a personal thread doesn't open in the business mailbox). Nothing is ever sent from here: there is no
+  send.
+- Only today's brief, only before noon. `?morning=1` on the page's URL (dev shots) shows it at any hour.
+
 ## Agent Dock
 
 A floating glass pill with the agents that are waiting for you (CONTRACTS-WAVE6 §B, WAVE7 §B2):
@@ -256,9 +306,10 @@ T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, 
 - **Shortcuts** (Carbon `RegisterEventHotKey`, no Accessibility permission, shown in the menus): **⌃⌥Space** talk,
   **⌃⌥K** the list on the compose field (it also turns a dock that was turned off back on), **⌃⌥D** show / hide (hidden
   until pressed again; pressed while the dock is on another screen it comes to yours; it lifts a hide for a while,
-  "off" and stepping aside for the main window), **⌃⌥M** orb ↔ pill. Each can be recorded anew in **Agent Dock
+  "off" and stepping aside for the main window), **⌃⌥M** orb ↔ pill, **⌃⌥N** a voice note (held or tapped, see "Voice
+  notes"). Each can be recorded anew in **Agent Dock
   Settings…** (the dock's menu, the menu bar extra, the app menu): click it and press the new keys (Esc cancels; the
-  four are let go meanwhile so the keys reach the recorder). Each is registered exclusively, so it takes its keys from
+  shortcuts are let go meanwhile so the keys reach the recorder). Each is registered exclusively, so it takes its keys from
   every app while SamRabbit runs: a letter, digit or other key needs two of ⌃ ⌥ ⌘ (⇧ may come on top; ⌃ alone is a
   terminal's ⌃C / ⌃D / ⌃R, ⌥ alone types characters, ⌘ alone is an app's), F1–F12 need one of them (apps' keys and
   the keyboard's brightness and media keys), F13–F20 may stand alone; macOS's well-known shortcuts and duplicates
@@ -313,16 +364,22 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
   extra), draws Home, Tasks, Chats, Calendar and Settings (`window-*.png`, 2x), presses the page's Talk button with
   the mouse (a down and an up 110 ms apart, not a script's click; through the bridge to MacVoice in fixture mode: the
   WAV is the microphone, the reply is rendered silently into memory), draws the live transcript, presses the panel's
-  End while the reply streams, and writes `window-smoke.json` (what the bridge received, how many voice pushes, the
-  transcript). It refuses port 3780, a server that doesn't answer
+  End while the reply streams, then presses Home's Voice note (VoiceNotes with the fixture microphone's next file, sent
+  to the fake's capture route, the page's button following it: `window-note-*.png`), and writes `window-smoke.json`
+  (what the bridge received, how many voice pushes, the transcript, the note). Give it two WAVs (the question, then a
+  note) and `SAMRABBIT_CAPTURE_OUTBOX=<temp dir>`; `--base-url http://127.0.0.1:<fake>/app/?morning=1` draws the
+  morning brief at any hour. It refuses port 3780, a server that doesn't answer
   `/dev/inbox/fake`, the installed app's bundle id (build the copy with `--bundle-id`), and running without the
   fixture microphone. Make the WAV with `say -o ask.aiff "What's on my
   calendar this afternoon?"` and `afconvert -f WAVE -d LEI16@16000 -c 1 ask.aiff ask.wav` (nothing plays).
 - `--render-dock-snapshots <dir> [--dock-fixture dev/samples/inbox.json] [--dock-backdrop <image>]` draws the pill, its
   states, the list, an open approval, a question, the compose menus, the voice bar, a terminal session, a white page,
   the offline state, the orb, the "–", the dock on a screen at the top left (list below) and minimized in the bottom
-  right corner (list above), and the Settings sheet (at rest, recording, after a combination that went elsewhere) to PNGs from the fixtures and quits (no window, no screen access;
-  the glass is simulated by blurring the backdrop). Run it with `SAMRABBIT_NO_MIC=1`.
+  right corner (list above), the Settings sheet (at rest, recording, after a combination that went elsewhere), the voice
+  note's bar (recording tapped and held, sending, sent, kept with a suggestion, saved on this Mac, too short) and the
+  list's Morning section at 8:20 AM (`dev/samples/briefing.json`; then drafted, tasked, Remind me open and a failed
+  try) to PNGs from the fixtures and quits (no window, no screen access; the glass is simulated by blurring the
+  backdrop). Run it with `SAMRABBIT_NO_MIC=1`.
 - `SAMRABBIT_DOCK_SMOKE=<dir>` walks a running dev copy through open → expand → approve → new prompt → voice → hide →
   back without any synthetic click, logs what AppKit says about the windows at each step and draws each live state.
   It approves and creates a task, so it refuses to run unless the app points at the fake server: not the default
@@ -330,10 +387,10 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
 - `SAMRABBIT_DOCK_SMOKE_PLACES=1` (same guard, and never with the installed app's bundle id) leaves a running dev copy
   at the top left of its screen and opens the list, folds it to the orb and back, leaves it as the orb in the
   bottom-right corner with its list, hides and shows it as ⌃⌥D does, then from the menu, and puts it back in the
-  middle, logging the frames of both windows and what each of the four shortcuts registered as. The steps save the
+  middle, logging the frames of both windows and what each of the shortcuts registered as. The steps save the
   spot, the orb and the hide as a real move would; at the end the copy's own are put back. Give the dev copy other
   shortcuts first (`defaults write <dev bundle id> AgentDockShortcuts -dict talk "⌃⌥⇧F17" compose "⌃⌥⇧F18" showHide
-  "⌃⌥⇧F19" minimize "⌃⌥⇧F20"`) so it never takes the installed app's or anyone's ⌃⌥D / ⌃⌥M.
+  "⌃⌥⇧F19" minimize "⌃⌥⇧F20" voiceNote "⌃⌥⇧F16"`) so it never takes the installed app's or anyone's ⌃⌥D / ⌃⌥M / ⌃⌥N.
 - `SAMRABBIT_DOCK_FIXTURE_WAKE=1` makes the voice placeholder report the wake listener as armed (the mic's dot).
 
 ## Developing the UI
@@ -370,6 +427,16 @@ The fake also answers the window's desktop routes (`dev/fake_desktop.py`): `GET 
 {calendar: false, chatgpt: "off", r1Online, journal}` shows the window's degraded states, `POST /dev/desktop/reset`;
 `GET /dev/desktop` counts the window's reads (`reads`) and `GET /dev/inbox/fake` its inbox polls (`polls`).
 
+Voice notes and the morning brief (`dev/fake_capture.py`, `dev/fake_briefing.py`; nothing is transcribed, journaled,
+filed, drafted or sent): `POST /v1/desktop/capture` (the id idempotent, 409 for other bytes), `GET
+/v1/desktop/capture/<id>?wait=` (received, then in turn a journal line, a T3 task, a note with a suggestion, a calendar
+entry), `GET /v1/desktop/captures`, `POST …/captures/<id>/act`; `POST /dev/capture {mode: ok|outdated|busy|refuse|
+no_speech|fail, delay, script}`, `GET /dev/capture` (what arrived: ids, sources, sizes and lengths, never the audio;
+`$SAMRABBIT_FAKE_CAPTURE_SAVE` keeps the WAVs for the tests). `GET /v1/desktop/briefing` (`dev/samples/briefing.json`
+moved to today), `POST …/briefing/refresh`, `POST …/briefing/items/<id>/act` (a draft answers a Gmail drafts link in
+the item's account); `POST /dev/briefing {status: ready|building|failed|off, fail: <action>}`, `GET /dev/briefing`. The
+summary carries `briefing` and `captures`.
+
 Event types the UI renders (`web/store.js`): `message.user`, `message.assistant.delta|done|interrupted`,
 `card.shown|updated|dismissed`, `host.t3_update`, `host.note`, `host.completion`, `ui.event`, `image`,
 `tool.call|completed` (GenUI card tools hidden, `ui_generate` hidden behind its UI card, `blobId` on a tool shows
@@ -385,16 +452,19 @@ at most once a second; anything else, including a UI navigating its own frame, o
 
 ```sh
 node --test companion/desktop/tests/*.mjs                   # timeline/store logic, API paging, the inbox and its long
-                                                            # poll, agenda, devices/ChatGPT status, the voice transcript
-python3 -m unittest discover -s companion/desktop/tests     # install.sh / uninstall.sh, the fake inbox and desktop routes
-companion/desktop/tests/window/run.sh                       # the window bridge's rules (page requests, voice pushes)
+                                                            # poll, agenda, devices/ChatGPT status, the voice transcript,
+                                                            # the morning brief and the voice note button
+python3 -m unittest discover -s companion/desktop/tests     # install.sh / uninstall.sh, the fake inbox, desktop, capture
+                                                            # and briefing routes
+companion/desktop/tests/window/run.sh                       # the window bridge's rules (page requests, voice and note pushes)
 companion/desktop/tests/window/clicks.sh                    # the page under a real mouse while the voice and inbox
                                                             # change, and a hidden window reading nothing (WebKit,
                                                             # off screen, silent; its own fake server)
-companion/desktop/tests/swift/run.sh                        # Agent Dock logic: inbox, placement, visibility, keys
+companion/desktop/tests/swift/run.sh                        # Agent Dock logic: inbox, placement, visibility, keys,
+                                                            # shortcuts, voice notes (⌃⌥N, outbox), the morning brief
 python3 -m unittest discover -s companion/mac-bridge/tests  # includes the /app/ route (test_desktop_app.py)
 companion/desktop/tests/voice/run.sh                        # the wake phrase matcher and runs, gate, ring, mic choice
-companion/desktop/tests/voice/headless.sh                   # the voice end to end against the fake, silently
+companion/desktop/tests/voice/headless.sh                   # the voice and voice notes end to end against the fake, silently
 companion/desktop/tests/voice/headless.sh listen 60         # the wake listener's CPU in a quiet room
 ```
 
@@ -404,8 +474,12 @@ Rabbit, what's on my calendar this afternoon?" in one breath), `wake-alone` ("He
 once it listens), `wake-pause` ("Hey Rabbit.", 3 s, the question), `wake-later` (a sentence, 2 s, "So, hey Rabbit,
 what's on my calendar…"), `wake-noise` (20 bursts of noise a second apart, then the phrase; the listener must never
 stop or pause) — in each the first utterance sent is transcribed again by the bridge's on-device transcriber and must
-be the question without the phrase —, `bargein` (barge-in, an announcement, `end()`), `talkover` (the next question
-said over the reply, voice barge-in forced on: it must arrive whole), `mute` (mute ends with the conversation; muted,
-"Hey Rabbit" waits and says why; a muted conversation still ends by itself) and `devices` (this Mac's audio inputs
-and the listener's choice, read only). Fixture voices come from `say -o` (written to a file, never played).
+be the question without the phrase —, `bargein` (barge-in, whose cancel names its turn, an announcement, `end()`),
+`talkover` (the next question said over the reply, voice barge-in forced on: it must arrive whole), `mute` (mute ends
+with the conversation; muted, "Hey Rabbit" waits and says why; a muted conversation still ends by itself), `devices`
+(this Mac's audio inputs and the listener's choice, read only), and the voice notes: `note` (the dock's button; it ends
+on the pause; "Hey Rabbit" waits and Talk doesn't start meanwhile; the bar says what the bridge did), `note-hold` (⌃⌥N
+held, sent on the release), `note-offline` (the bridge busy: kept in the outbox, sent when it takes it) and
+`note-suggest` (kept as a note, the bar's "Start as task" does it) — the WAV that went up is transcribed again on
+device, and the temp outbox (`SAMRABBIT_CAPTURE_OUTBOX`) must end empty. Fixture voices come from `say -o` (written to a file, never played).
 `tests/test_install.py` also checks `build.sh`'s ad-hoc fallback and the SamRabbitKit cache.
