@@ -5,7 +5,6 @@ Everything here runs on files in a temp folder: never the real ~/.codex.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -109,16 +108,17 @@ class CodexLoginTest(unittest.TestCase):
             self.path.write_text(" " * (chatgpt.MAX_FILE_BYTES + 1))
             self.assertFalse(self.auth.connected())
 
-    def test_a_refused_token_waits_for_codex_to_renew_it(self) -> None:
+    def test_a_refusal_never_refreshes_and_uses_what_codex_renewed(self) -> None:
         old = codex_token(tag="old")
         self.write(old)
-        with self.assertRaises(chatgpt.ChatGPTError):
-            self.auth.access_token(force_refresh=True)  # OpenAI refused it; nothing renewed it yet
-        self.assertFalse(self.auth.connected())
-        new = codex_token(tag="new")
-        self.write(new)  # Codex refreshed its login
+        self.assertEqual(self.auth.access_token(), old)
+        with mock.patch.object(chatgpt, "default_transport") as transport:
+            self.assertEqual(self.auth.access_token(force_refresh=True), old)  # nothing renewed: the same token again
+            renewed = codex_token(tag="new")
+            self.write(renewed)  # Codex renewed between handing the token out and OpenAI's answer
+            self.assertEqual(self.auth.access_token(force_refresh=True), renewed)
+        transport.assert_not_called()
         self.assertTrue(self.auth.connected())
-        self.assertEqual(self.auth.access_token(), new)
 
     def test_a_renewed_token_is_picked_up_at_once(self) -> None:
         self.write(codex_token(tag="one"))
@@ -158,10 +158,31 @@ class PreferredAuthTest(unittest.TestCase):
         self.assertEqual(self.auth.safety_id(), "own")
 
     def test_disconnect_drops_only_the_macs_own_login(self) -> None:
+        changes = []
+        self.auth.on_change = lambda: changes.append(1)
+        self.assertEqual(self.auth.disconnect(), {"connected": True, "source": "codex"})
+        self.assertEqual(changes, [])  # no login of its own: nothing changed, no session is retired
         self.store_own()
-        self.assertEqual(self.auth.disconnect(), {"connected": True})  # Codex's login is still there
+        self.assertEqual(self.auth.disconnect(), {"connected": True, "source": "codex"})  # Codex's is still there
+        self.assertEqual(changes, [1])
         self.assertTrue(self.codex.exists())
         self.assertEqual(self.auth.access_token(), self.codex_token)
+
+    def test_a_refusal_goes_back_to_the_login_that_gave_the_token(self) -> None:
+        self.assertEqual(self.auth.access_token(), self.codex_token)
+        own = self.store_own()  # the Mac's own login arrives while the borrowed token is in flight
+        with mock.patch.object(self.auth.own, "access_token", wraps=self.auth.own.access_token) as own_token:
+            self.assertEqual(self.auth.access_token(force_refresh=True), self.codex_token)
+        own_token.assert_not_called()  # the own login is not refreshed for Codex's refused token
+        self.assertEqual(self.auth.access_token(), own)
+
+    def test_the_status_never_mixes_two_accounts(self) -> None:
+        stale = jwt({"exp": 4_000_000_000, "email": "old-own@example.com",
+                     "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}})
+        record = self.auth.own._store({"access_token": stale, "refresh_token": "r", "expires_in": 3600})
+        self.auth.own._mark_refused(record)  # the Mac's own login needs a reconnect
+        status = self.auth.status()
+        self.assertEqual(status, {"connected": True, "source": "codex", "login": {"state": "idle"}, "plan": "promax"})
 
     def test_the_borrowed_login_is_never_refreshed(self) -> None:
         with mock.patch.object(self.auth.own, "refresh_if_needed") as own_refresh, \
@@ -183,8 +204,9 @@ class PreferredAuthTest(unittest.TestCase):
             self.assertIsInstance(chatgpt.make_auth(installed=False), chatgpt.UnavailableAuth)  # a checkout: never
             self.assertIsInstance(chatgpt.make_auth(installed=False, auth_file=str(self.own_file)),
                                   chatgpt.ChatGPTAuth)  # tests: only with an explicit codex_file
-        with mock.patch.dict(os.environ, {"CODEX_HOME": self.tmp.name, "SAMRABBIT_CODEX_LOGIN": "0"}):
-            self.assertIsInstance(chatgpt.make_auth(installed=True), chatgpt.ChatGPTAuth)
+        for off in ("0", "OFF", "False", " no "):
+            with mock.patch.dict(os.environ, {"CODEX_HOME": self.tmp.name, "SAMRABBIT_CODEX_LOGIN": off}):
+                self.assertIsInstance(chatgpt.make_auth(installed=True), chatgpt.ChatGPTAuth)
 
     def test_tokens_never_reach_the_log(self) -> None:
         import io
@@ -199,7 +221,38 @@ class PreferredAuthTest(unittest.TestCase):
         with self.assertRaises(chatgpt.ChatGPTError):
             chatgpt.CodexLoginAuth(str(self.codex), clock=lambda: 4_100_000_000).access_token()
         self.assertNotIn(self.codex_token, log.getvalue())
-        self.assertNotIn(hashlib.sha256(self.codex_token.encode()).hexdigest(), log.getvalue())
+
+
+class BorrowedRefusalTest(unittest.TestCase):
+    """OpenAI refusing the borrowed token: one retry with whatever the file holds, then the realtime brain's usual
+    pause with the refusal recorded (never a refresh, never 'not connected' for days)."""
+
+    def test_a_refused_borrowed_token_pauses_the_brain_like_the_macs_own(self) -> None:
+        import samrabbit_realtime as realtime
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        codex = Path(tmp.name, "auth.json")
+        token = codex_token()
+        codex.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": token}}))
+        auth = chatgpt.make_auth(installed=False, auth_file=str(Path(tmp.name, "own.json")), codex_file=str(codex))
+        brain = realtime.RealtimeBrain(auth, python=None, api_root="http://127.0.0.1:9")
+        calls = []
+
+        def refuse(api_root: str, sent: str, safety: str, offer: str, config: Dict[str, Any]) -> Any:
+            calls.append(sent)
+            return 403, "", {"code": "unsupported_country"}
+
+        with mock.patch.object(realtime, "create_call", refuse), \
+                mock.patch.object(chatgpt, "default_transport") as transport:
+            with self.assertRaises(realtime.RealtimeError) as caught:
+                brain.signal("v=0 offer", {})
+        transport.assert_not_called()
+        self.assertEqual(calls, [token, token])
+        self.assertEqual((caught.exception.code, caught.exception.pause),
+                         ("chatgpt_rejected", realtime.PAUSE_REJECTED_SECONDS))
+        self.assertEqual(brain.last_error, "http_403_unsupported_country")
+        self.assertTrue(auth.connected(), "the login itself is still there; only the brain pauses")
 
 
 if __name__ == "__main__":

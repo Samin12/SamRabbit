@@ -15,9 +15,10 @@ ChatGPT.app's ``~/.codex``:
 When the Mac has no login of its own, the installed bridge borrows the one Codex keeps in ``~/.codex/auth.json``
 (``$CODEX_HOME`` when set; ``CodexLoginAuth``): Samin is signed in to Codex on this Mac with the same client, so the
 token works for the realtime voice as it is. That file is only ever read: never written, never refreshed (its refresh
-token rotates, so refreshing it here would sign Codex out). Codex refreshes it itself every few days; when the borrowed
-token has expired or OpenAI refuses it, the realtime voice waits (the Claude brain answers) until Codex has renewed it
-or Samin connects the Mac's own login. ``SAMRABBIT_CODEX_LOGIN=0`` turns the borrowing off.
+token rotates, so refreshing it here would sign Codex out). Codex refreshes it itself every few days. When the
+borrowed token has expired the realtime voice is off (the Claude brain answers) until Codex has renewed it or Samin
+connects the Mac's own login; when OpenAI refuses it, the realtime brain pauses as for the Mac's own login and tries
+again later with whatever token the file then holds. ``SAMRABBIT_CODEX_LOGIN=0`` turns the borrowing off.
 
 The tokens live in ``~/.config/samrabbit/chatgpt-auth.json`` (0600, written whole to a temp file and moved over) and
 are refreshed (``grant_type=refresh_token``, JSON) five minutes before the access token expires; the rotated refresh
@@ -70,6 +71,7 @@ DEFAULT_AUTH_FILE = "~/.config/samrabbit/chatgpt-auth.json"
 DEFAULT_CODEX_HOME = "~/.codex"
 AUDIENCE = "https://api.openai.com/v1"
 BORROWED_LEEWAY_SECONDS = 2 * 60
+OFF_VALUES = ("0", "false", "off", "no")
 USER_AGENT = "SamRabbit-Mac-Bridge/1.0"
 START_ROUTE = "/v1/assistant/chatgpt/start"
 STATUS_ROUTE = "/v1/assistant/chatgpt/status"
@@ -576,8 +578,7 @@ class CodexLoginAuth:
     """Codex's own ChatGPT login on this Mac (``~/.codex/auth.json``), borrowed read-only (module docstring).
 
     Usable while it is a ChatGPT login (not an API key) of the same client for the OpenAI API whose access token is
-    good for two more minutes. ``access_token()`` reads the file again each time, so a token Codex renewed is used at
-    once; a token OpenAI refused is not offered again until the file changes."""
+    good for two more minutes. A token Codex renewed is used as soon as the file changes."""
 
     off: Optional[str] = None
 
@@ -586,7 +587,6 @@ class CodexLoginAuth:
         self._clock = clock
         self._lock = threading.Lock()
         self._cache: Optional[Tuple[Tuple[int, int], Optional[Dict[str, Any]]]] = None
-        self._refused: Optional[str] = None  # sha256 of the access token OpenAI refused
 
     def _read(self) -> Optional[Dict[str, Any]]:
         """``{token, exp, account}`` of a usable-looking login, or None. Opens the file read-only, nothing else."""
@@ -619,10 +619,7 @@ class CodexLoginAuth:
         return found
 
     def _usable(self, record: Optional[Dict[str, Any]]) -> bool:
-        if record is None or record["exp"] <= self._clock() + BORROWED_LEEWAY_SECONDS:
-            return False
-        with self._lock:
-            return self._refused != hashlib.sha256(record["token"].encode("utf-8")).hexdigest()
+        return record is not None and record["exp"] > self._clock() + BORROWED_LEEWAY_SECONDS
 
     def connected(self) -> bool:
         return self._usable(self._read())
@@ -637,14 +634,13 @@ class CodexLoginAuth:
         return value
 
     def access_token(self, *, force_refresh: bool = False) -> str:
-        """The borrowed token. ``force_refresh`` (OpenAI just refused it): never a refresh here, only a token Codex
-        renewed in the meantime; the refused one is set aside until the file changes."""
-        record = self._read()
-        if force_refresh and record is not None:
+        """The borrowed token. ``force_refresh`` (OpenAI just refused it) never refreshes: it reads the file again, so
+        a token Codex renewed meanwhile is used; the same token again lets the caller's second refusal pause the
+        realtime brain as it does for the Mac's own login."""
+        if force_refresh:
             with self._lock:
-                self._refused = hashlib.sha256(record["token"].encode("utf-8")).hexdigest()
                 self._cache = None
-            record = self._read()
+        record = self._read()
         if not self._usable(record):
             raise ChatGPTError(409, "chatgpt_not_connected", "The Codex login on this Mac has expired; open Codex "
                                "or connect ChatGPT in SamRabbit.")
@@ -668,6 +664,7 @@ class PreferredAuth:
         self.own = own
         self.borrowed = borrowed
         self.off: Optional[str] = None
+        self._issuer: Any = None  # the login that handed out the last token: a refusal goes back to it
 
     @property
     def path(self) -> str:
@@ -695,9 +692,8 @@ class PreferredAuth:
         value = self.own.status()
         if not value.get("connected") and self.borrowed.connected():
             borrowed = self.borrowed.status()
-            value.pop("reason", None)
-            value.update(connected=True, source="codex",
-                         **{key: borrowed[key] for key in ("plan", "email") if key in borrowed})
+            value = {"connected": True, "source": "codex", "login": value.get("login") or {"state": "idle"},
+                     **{key: borrowed[key] for key in ("plan", "email") if key in borrowed}}
         elif value.get("connected"):
             value["source"] = "samrabbit"
         return value
@@ -706,11 +702,17 @@ class PreferredAuth:
         return self.own.start()
 
     def disconnect(self) -> Dict[str, Any]:
-        self.own.disconnect()
-        return {"connected": self.connected()}
+        """Only the Mac's own login (Codex's is Codex's): nothing happens, and no session is retired, without one."""
+        if os.path.exists(self.own.path):
+            self.own.disconnect()
+        return {"connected": self.connected(), **({"source": "codex"} if self.connected() else {})}
 
     def access_token(self, *, force_refresh: bool = False) -> str:
-        return self._active().access_token(force_refresh=force_refresh)
+        issuer = self._issuer if force_refresh and self._issuer is not None and self._issuer.connected() \
+            else self._active()
+        token = issuer.access_token(force_refresh=force_refresh)
+        self._issuer = issuer
+        return token
 
     def safety_id(self) -> str:
         return self._active().safety_id()
@@ -738,7 +740,7 @@ def make_auth(*, installed: bool, auth_file: Optional[str] = None, issuer: Optio
         return PreferredAuth(own, CodexLoginAuth(codex_file)) if codex_file else own
     if installed:
         own = ChatGPTAuth(DEFAULT_AUTH_FILE, issuer=issuer or ISSUER)
-        if os.environ.get("SAMRABBIT_CODEX_LOGIN", "1").strip() in ("0", "false", "off", "no"):
+        if os.environ.get("SAMRABBIT_CODEX_LOGIN", "1").strip().lower() in OFF_VALUES:
             return own
         return PreferredAuth(own, CodexLoginAuth(codex_file or codex_auth_file()))
     return UnavailableAuth()
@@ -806,7 +808,8 @@ def main(argv: Optional[list] = None) -> int:
     if options.command in ("status", "disconnect"):
         connected = bool(value.get("connected"))
         plan = f" ({value['plan']})" if value.get("plan") else ""
-        print(f"ChatGPT: {'connected' + plan if connected else 'not connected'}")
+        via = " via the Codex login on this Mac" if value.get("source") == "codex" else ""
+        print(f"ChatGPT: {'connected' + plan + via if connected else 'not connected'}")
         return 0
     code, url = str(value.get("userCode") or ""), str(value.get("verificationUrl") or "")
     print("Connect SamRabbit to ChatGPT")

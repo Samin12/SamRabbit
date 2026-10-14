@@ -6,14 +6,16 @@
 #   companion/mac-bridge/install.sh [--port 3780] [--host 0.0.0.0] [--python /usr/bin/python3]
 #                                   [--google-account you@example.com] [--t3-orchestration-project <T3 project id>]
 #                                   [--assistant-model claude-haiku-5-5|claude-sonnet-5-5] [--assistant-voice <id>]
-#                                   [--assistant-brain auto|realtime|claude]
+#                                   [--assistant-brain auto|realtime|claude] [--codex-login on|off]
 #
 # --google-account: the Google account that links opened from the phone are pinned to (authuser=); without it the
 # bridge learns it from the calendar. --t3-orchestration-project: where the phone's non-coding tasks go (default:
 # T3's own agent project). Both are kept in the agent's environment (SAMRABBIT_GOOGLE_ACCOUNT,
 # SAMRABBIT_T3_ORCHESTRATION_PROJECT) across later runs; pass an empty value to remove one. --assistant-model,
 # --assistant-voice and --assistant-brain (the watch assistant's Claude model, ElevenLabs voice and which brain it
-# uses) are kept in ~/.config/samrabbit/assistant.json.
+# uses) are kept in ~/.config/samrabbit/assistant.json. --codex-login: whether the realtime voice may borrow Codex's
+# ChatGPT login (read-only) while the Mac has none of its own (default on; kept as SAMRABBIT_CODEX_LOGIN, and
+# CODEX_HOME when set, like the two above).
 #
 # Environment (tests): SAMRABBIT_HOME (default $HOME), SAMRABBIT_SKIP_LAUNCHCTL=1, SAMRABBIT_COMPOSIO (the Composio
 # CLI to record instead of searching PATH, ~/.local/bin, /opt/homebrew/bin and /usr/local/bin), SAMRABBIT_T3_CLI /
@@ -63,7 +65,8 @@ while [ $# -gt 0 ]; do
     --assistant-model) ASSISTANT_MODEL=$2; shift 2 ;;
     --assistant-voice) ASSISTANT_VOICE=$2; shift 2 ;;
     --assistant-brain) ASSISTANT_BRAIN=$2; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    --codex-login) SAMRABBIT_CODEX_LOGIN=$2; export SAMRABBIT_CODEX_LOGIN; shift 2 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "install.sh: unknown option $1" >&2; exit 64 ;;
   esac
 done
@@ -448,7 +451,9 @@ try:
 except Exception:  # noqa: BLE001 - no agent yet, or an unreadable one
     previous = {}
 checks = {"SAMRABBIT_GOOGLE_ACCOUNT": re.compile(r"^[^@\s]{1,128}@[^@\s]{1,128}\.[A-Za-z]{2,}$"),
-          "SAMRABBIT_T3_ORCHESTRATION_PROJECT": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$")}
+          "SAMRABBIT_T3_ORCHESTRATION_PROJECT": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$"),
+          "SAMRABBIT_CODEX_LOGIN": re.compile(r"^(?i:0|1|on|off|true|false|yes|no)$"),
+          "CODEX_HOME": re.compile(r"^/[^\x00-\x1f]{1,1023}$")}
 for key, pattern in checks.items():
     value = os.environ[key].strip() if key in os.environ else str(previous.get(key) or "")
     if value and not pattern.match(value):
