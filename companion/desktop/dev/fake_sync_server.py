@@ -17,7 +17,8 @@ It serves, on 127.0.0.1 only:
   ``GET /v1/desktop/inbox/items/<id>``, ``POST …/items/<id>/approve|answer|reply|stop|seen|open``,
   ``GET /v1/desktop/inbox/targets``, ``POST /v1/desktop/inbox/new``, from ``samples/inbox.json`` (every source and
   status, long titles, an approval with three options, a question); dev controls ``POST /dev/inbox/needs-you``
-  (a new approval arrives) and ``POST /dev/inbox/reset``.
+  (a new approval arrives), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake`` (``{"fake": true}``: the dock's
+  smoke driver runs only against a server that answers it).
 
 The sample data is realistic: ten conversations over the last month with cards, a Mac screenshot,
 an R1 camera photo, T3 updates, tool calls, background results and generated UIs (Chart.js from
@@ -597,14 +598,16 @@ class InboxFixtures:
         return sorted(self.items.values(), key=key)
 
     def snapshot(self) -> Dict[str, Any]:
+        # Counted like the bridge (samrabbit_inbox.py): before the 60-item cap, and "working" includes a SamRabbit chat
+        # that is streaming a reply (the dock counts its agents itself).
         with self.cond:
-            items = [public(item) for item in self.ordered()][:60]
+            items = [public(item) for item in self.ordered()]
             needs = sum(1 for i in items if i["status"] in ("needs-approval", "needs-input", "error")
                         or (i["status"] == "done" and i.get("unread")))
-            working = sum(1 for i in items if i["status"] == "working" and i["source"] != "samrabbit")
+            working = sum(1 for i in items if i["status"] == "working")
             return {"revision": self.revision, "updatedAt": iso(now_ms()),
                     "counts": {"needsYou": needs, "working": working, "total": len(items)},
-                    "sources": self.sources, "items": items}
+                    "sources": self.sources, "items": items[:60]}
 
     def wait(self, after: Optional[int], wait: float) -> Dict[str, Any]:
         with self.cond:
@@ -765,6 +768,9 @@ def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str
     if inbox is None:
         return handler.json(404, {"error": {"code": "not_found", "message": "Not found.", "retryable": False}})
     try:
+        if method == "GET" and path == "/dev/inbox/fake":
+            # The dock's smoke driver approves and creates tasks: it runs only when the server answers this.
+            return handler.json(200, {"fake": True})
         if method == "POST" and path == "/dev/inbox/needs-you":
             inbox.needs_you()
             return handler.json(202, {"ok": True})

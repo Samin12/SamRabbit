@@ -111,6 +111,9 @@ final class DockController: NSObject {
     let store = DockStore()
     let ui = DockUIState()
     private let voice = MacVoice.shared
+    /// What each window draws of the voice: the pill follows the mic level during a conversation, the list never.
+    private lazy var pillVoice = DockVoiceFeed(voice, keepsLevel: true)
+    private lazy var listVoice = DockVoiceFeed(voice, keepsLevel: false)
     private let render = DockRender(glass: DockRender.liveGlass())
     private(set) var pill: DockPanelWindow?
     private(set) var list: DockPanelWindow?
@@ -121,6 +124,8 @@ final class DockController: NSObject {
     private var followTimer: Timer?
     private var unhideTimer: Timer?
     private var hotKey: DockHotKey?
+    /// ⌘+ / ⌘− / ⌘0, held only while the pointer is on the dock.
+    private var zoomKeys: [DockHotKey] = []
     private var monitors: [Any] = []
     private var observers: [NSObjectProtocol] = []
     private var voiceSubscription: AnyCancellable?
@@ -252,6 +257,12 @@ final class DockController: NSObject {
             }
             return event
         }) { monitors.append(local) }
+        // AppKit offers ⌘ keys to the main menu before the key window sees them (⌘0 there opens the main window): while
+        // a dock window has the keys, the dock decides first (DockCommandKey).
+        if let keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
+            let keep = MainActor.assumeIsolated { self?.keepCommandKey(event) ?? true }
+            return keep ? event : nil
+        }) { monitors.append(keys) }
         hotKey = DockHotKey(keyCode: kVK_ANSI_K, modifiers: controlKey | optionKey, name: "⌃⌥K") { [weak self] in
             self?.summon(focusCompose: true)
         }
@@ -329,6 +340,7 @@ final class DockController: NSObject {
         pointerTimer = nil
         overPill = false
         overList = false
+        updateZoomKeys()
         ui.pillHover = false
         guard let pill else { return }
         NSAnimationContext.runAnimationGroup({ context in
@@ -359,7 +371,7 @@ final class DockController: NSObject {
         if let pill { return pill }
         let window = DockPanelWindow(role: .pill)
         window.controller = self
-        let root = DockPillRoot(store: store, ui: ui, voice: voice, commands: commands, render: render,
+        let root = DockPillRoot(store: store, ui: ui, voice: pillVoice, commands: commands, render: render,
                                 onSize: { [weak self] size in self?.pillSized(size) },
                                 onHitRects: { [weak self] rects in self?.pillControls = rects })
         let hosting = DockHostingView(rootView: root)
@@ -375,7 +387,7 @@ final class DockController: NSObject {
         if let list { return list }
         let window = DockPanelWindow(role: .list)
         window.controller = self
-        let root = DockPanelRoot(store: store, ui: ui, voice: voice, commands: commands, render: render,
+        let root = DockPanelRoot(store: store, ui: ui, voice: listVoice, commands: commands, render: render,
                                  onSize: { [weak self] size in self?.listSized(size) })
         let hosting = DockHostingView(rootView: root)
         hosting.sizingOptions = []
@@ -538,7 +550,7 @@ final class DockController: NSObject {
     private func openList() {
         let list = listWindow()
         store.loadTargets()
-        if case .offline = store.connection { store.retryNow() }
+        if enabled, case .offline = store.connection { store.retryNow() }
         if let row = ui.expandedRow { store.watched = row }
         if listSize != .zero { revealList() } else { list.orderOut(nil) }  // shown once it has measured itself
     }
@@ -615,8 +627,47 @@ final class DockController: NSObject {
         guard onPill != overPill || onList != overList else { return }
         overPill = onPill
         overList = onList
+        updateZoomKeys()
         if ui.pillHover != onPill { ui.pillHover = onPill }
         if !voiceActive { send(.pointer(overPill: onPill, overPanel: onList)) }
+    }
+
+    /// ⌘+ / ⌘− / ⌘0 size the dock while the pointer is on it, whichever app has the keys: Carbon hot keys (no
+    /// permission), taken from the frontmost app only while Samin points at the dock and given back when he leaves.
+    private func updateZoomKeys() {
+        let wanted = visible && (overPill || overList)
+        guard wanted == zoomKeys.isEmpty else { return }
+        if wanted {
+            let keys: [(Int, Int, Int)] = [(kVK_ANSI_Equal, cmdKey, 1), (kVK_ANSI_Equal, cmdKey | shiftKey, 1),
+                                           (kVK_ANSI_KeypadPlus, cmdKey, 1), (kVK_ANSI_Minus, cmdKey, -1),
+                                           (kVK_ANSI_KeypadMinus, cmdKey, -1), (kVK_ANSI_0, cmdKey, 0)]
+            zoomKeys = keys.compactMap { code, modifiers, steps in
+                DockHotKey(keyCode: code, modifiers: modifiers, name: "dock size", quiet: true) { [weak self] in
+                    self?.perform(.zoom(steps))
+                }
+            }
+        } else {
+            zoomKeys.forEach { $0.unregister() }
+            zoomKeys = []
+        }
+    }
+
+    /// A ⌘ key while a dock window has the keys: the dock's own size keys, editing in its fields, and nothing that
+    /// would run one of the app's menu items from the dock (false = the event goes no further).
+    private func keepCommandKey(_ event: NSEvent) -> Bool {
+        guard event.window is DockPanelWindow, event.modifierFlags.contains(.command) else { return true }
+        let flags = event.modifierFlags
+        switch DockCommandKey.route(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers ?? "",
+                                    shift: flags.contains(.shift), control: flags.contains(.control),
+                                    option: flags.contains(.option)) {
+        case .zoom(let steps):
+            perform(.zoom(steps))
+            return false
+        case .pass:
+            return true
+        case .swallow:
+            return false
+        }
     }
 
     // MARK: events from the windows
@@ -648,6 +699,10 @@ final class DockController: NSObject {
                 showMenu()
                 return true
             }
+            // A click on the voice bar gives it the keys, so Esc ends the conversation (without bringing SamRabbit
+            // forward). The bar never takes them by itself: Esc stays with the app Samin is in (a terminal's Esc
+            // interrupts Claude Code).
+            if voiceActive && !window.isKeyWindow { window.makeKey() }
             // The two ends of the pill resize it (drag up to grow); anywhere else drags it along the bottom.
             let grip = !voiceActive && (point.x < 12 || point.x > window.frame.width - 12)
             press = Press(start: NSEvent.mouseLocation, frame: window.frame, grip: grip, leftGrip: point.x < 12, zoom: zoom)
@@ -698,7 +753,12 @@ final class DockController: NSObject {
                 AppModel.shared.openMainWindow()
             } else if !voiceActive {
                 send(.clickPill)
-                if expansion.isOpen { takeKeys() }
+                // The list opens with the compose field taking the keys: what Samin types becomes a new prompt, and a
+                // stray letter can't act on a row. Esc leaves the field for J/K, ↩, E and R.
+                if expansion.isOpen {
+                    askForCompose()
+                    takeKeys()
+                }
             }
             return true
         case .rightMouseDown:
@@ -741,7 +801,8 @@ final class DockController: NSObject {
                     return true
                 }
             }
-            if editing && !flags.contains(.command) { return false }
+            // ⌘ keys never get here (keepCommandKey); a field keeps every other key.
+            if editing { return false }
             guard let key = DockKey.from(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers ?? "",
                                          command: flags.contains(.command), control: flags.contains(.control),
                                          option: flags.contains(.option)) else { return false }
@@ -813,17 +874,22 @@ final class DockController: NSObject {
 
     // MARK: summon, reveal, menu
 
-    /// ⌃⌥K: show the dock with its list open and the compose field taking the keys.
+    /// ⌃⌥K: show the dock with its list open and the compose field taking the keys. A dock that was turned off comes
+    /// back on (⌃⌥K is "Show Agent Dock"'s shortcut); a hide for a while stays: the dock shows until the list closes.
     func summon(focusCompose: Bool) {
         guard started else { return }
+        if !enabled { turnOn() }
         summoned = true
         refresh()
         send(.summon)
-        if focusCompose {
-            fieldWanted = true
-            ui.focusRequest = .compose
-        }
+        if focusCompose { askForCompose() }
         takeKeys()
+    }
+
+    /// The compose field takes the keys once the list has them.
+    private func askForCompose() {
+        fieldWanted = true
+        ui.focusRequest = .compose
     }
 
     /// The list takes the keys (J/K, typing) without bringing SamRabbit forward: the panel never activates the app.
@@ -838,19 +904,24 @@ final class DockController: NSObject {
     /// "Show Agent Dock" (menu bar extra, main menu): turns it back on, ends a hide, and opens it.
     func showFromMenu() {
         guard started else { return }
-        let wasOff = !enabled
-        enabled = true
+        if !enabled { turnOn() }
         hiddenUntil = nil
-        if wasOff {
-            Log.write("dock: turned on")
-            store.start()
-        }
         summon(focusCompose: false)
     }
 
-    /// A notification was clicked: open the list on that item.
+    private func turnOn() {
+        enabled = true
+        Log.write("dock: turned on")
+        store.start()
+    }
+
+    /// A notification was clicked: open the list on that item (not while the dock is turned off: its list is stale).
     func reveal(_ id: String) {
         guard started else { return }
+        guard enabled else {
+            Log.write("dock: off, a notification click opens nothing")
+            return
+        }
         summoned = true
         refresh()
         send(.summon)

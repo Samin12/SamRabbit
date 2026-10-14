@@ -4,7 +4,7 @@
   "inbox": {
     "revision": 1,
     "updatedAt": "2026-10-13T20:00:00Z",
-    "counts": {"needsYou": 6, "working": 4, "total": 15},
+    "counts": {"needsYou": 6, "working": 5, "total": 15},
     "sources": {
       "t3": {"connected": true},
       "claude": {"available": true},

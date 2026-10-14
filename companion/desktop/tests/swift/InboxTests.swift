@@ -8,11 +8,15 @@ enum InboxTests {
         ("decodingIsForgiving", decodingIsForgiving),
         ("capsTheList", capsTheList),
         ("computesCountsWhenMissing", computesCountsWhenMissing),
+        ("showsCountsLikeTheSections", showsCountsLikeTheSections),
         ("recommendsAnOption", recommendsAnOption),
         ("buildsAnswers", buildsAnswers),
         ("resolvesTargets", resolvesTargets),
         ("decodesDetail", decodesDetail),
         ("announcesEachNeedOnce", announcesEachNeedOnce),
+        ("announcesAThreadThatFinishesAgain", announcesAThreadThatFinishesAgain),
+        ("quietWhileTerminalSessionsFlap", quietWhileTerminalSessionsFlap),
+        ("smokeRunsOnlyAgainstTheFake", smokeRunsOnlyAgainstTheFake),
         ("formatsTimesAndText", formatsTimesAndText),
     ]
 
@@ -22,7 +26,7 @@ enum InboxTests {
         let inbox = try fixture()
         expectEqual(inbox.revision, 1)
         expectEqual(inbox.items.count, 15)
-        expectEqual(inbox.counts, DockCounts(needsYou: 6, working: 4, total: 15))
+        expectEqual(inbox.counts, DockCounts(needsYou: 6, working: 5, total: 15), "the bridge counts the streaming chat")
         expect(inbox.t3Connected)
         let pairing = inbox.items.first { $0.id == "t3:th_pairing_redirect" }
         expectEqual(pairing?.status, .needsApproval)
@@ -130,6 +134,35 @@ enum InboxTests {
         expectEqual(inbox.counts, DockCounts(needsYou: 1, working: 1, total: 4), "a streaming chat is not an agent at work")
     }
 
+    /// The pill's "N working" and the header agree with the Working section: the real bridge counts a SamRabbit chat
+    /// that is streaming an R1 reply as working; the dock doesn't (the chat sits under Recent chats).
+    static func showsCountsLikeTheSections() throws {
+        let inbox = try fixture()
+        let sections = DockSection.build(inbox.items)
+        let shown = inbox.shownCounts(items: inbox.items)
+        expectEqual(shown, DockShownCounts(needsYou: 6, working: 4))
+        expectEqual(shown.working, sections.first { $0.kind == .working }?.items.count ?? 0, "the pill matches the Working section")
+        expectEqual(shown.needsYou, sections.first { $0.kind == .needsYou }?.items.count ?? 0)
+        // An action's optimistic result counts at once (the approval is now working).
+        var items = inbox.items
+        let index = items.firstIndex { $0.id == "t3:th_pairing_redirect" }!
+        items[index].status = .working
+        items[index].pending = DockPending()
+        expectEqual(inbox.shownCounts(items: items), DockShownCounts(needsYou: 5, working: 5))
+        // Past the bridge's 60-item cap its counts add what isn't in the list (its working count includes chats).
+        let rows = (0..<60).map { "{\"id\": \"t3:\($0)\", \"status\": \"working\"}" }.joined(separator: ",")
+        let capped = try DockInbox.decode(Data("""
+        {"revision": 1, "counts": {"needsYou": 3, "working": 66, "total": 70},
+         "items": [\(rows)]}
+        """.utf8))
+        expectEqual(capped.shownCounts(items: capped.items), DockShownCounts(needsYou: 3, working: 66))
+        let chat = try DockInbox.decode(Data("""
+        {"revision": 1, "counts": {"needsYou": 0, "working": 1, "total": 1},
+         "items": [{"id": "chat:c", "source": "samrabbit", "status": "working"}]}
+        """.utf8))
+        expectEqual(chat.shownCounts(items: chat.items).working, 0, "an R1 reply streaming is not an agent at work")
+    }
+
     static func recommendsAnOption() throws {
         func approval(_ decisions: [String]) -> DockApproval {
             DockApproval(requestId: "r", kind: "command", detail: "", options: decisions.map { DockApprovalOption(decision: $0, label: $0) })
@@ -203,7 +236,7 @@ enum InboxTests {
         expectEqual(attention.update([approval], now: now).count, 0, "the first answer is the baseline")
         expectEqual(attention.update([approval], now: now).count, 0, "still waiting: not again")
         expectEqual(attention.update([working, other], now: now).map(\.id), ["t3:b"])
-        expectEqual(attention.update([approval, other], now: now.addingTimeInterval(5)).map(\.id), [], "same need flapping back: quiet")
+        expectEqual(attention.update([working, other], now: now.addingTimeInterval(3)).map(\.id), [], "still finished: not again")
         var request2 = approval
         request2.pending = DockPending(approvals: [DockApproval(requestId: "r2", kind: "command", detail: "", options: [])])
         expectEqual(attention.update([request2, other], now: now.addingTimeInterval(10)).map(\.id), ["t3:a"], "a new request is news")
@@ -213,6 +246,66 @@ enum InboxTests {
         var seen = other
         seen.unread = false
         expectEqual(attention.update([seen], now: now.addingTimeInterval(DockAttention.cooldown + 40)).count, 0)
+    }
+
+    /// The common loop: a T3 thread finishes (announced), Samin replies from the dock, it works for 4 minutes and
+    /// finishes again: the second finish is announced too, though it is the same thread and status within 10 minutes.
+    static func announcesAThreadThatFinishesAgain() throws {
+        var attention = DockAttention()
+        let now = Date()
+        func t3(_ status: DockStatus, unread: Bool = false) -> DockItem {
+            DockItem(id: "t3:a", source: "t3", title: "A", status: status, unread: unread)
+        }
+        _ = attention.update([], now: now)
+        expectEqual(attention.update([t3(.done, unread: true)], now: now.addingTimeInterval(60)).map(\.id), ["t3:a"])
+        expectEqual(attention.update([t3(.working)], now: now.addingTimeInterval(120)).count, 0)
+        expectEqual(attention.update([t3(.done, unread: true)], now: now.addingTimeInterval(300)).map(\.id), ["t3:a"],
+                    "the second finish")
+        // Failing again after a retry, too.
+        expectEqual(attention.update([t3(.error)], now: now.addingTimeInterval(310)).map(\.id), ["t3:a"])
+        _ = attention.update([t3(.working)], now: now.addingTimeInterval(320))
+        expectEqual(attention.update([t3(.error)], now: now.addingTimeInterval(330)).map(\.id), ["t3:a"])
+    }
+
+    /// Claude Code / Codex statuses come from their session files and can flap (a long tool reads as "waiting" for a
+    /// moment): the same need back after a few seconds stays quiet; back after a real stretch of work it is news.
+    static func quietWhileTerminalSessionsFlap() throws {
+        var attention = DockAttention()
+        let now = Date()
+        func claude(_ status: DockStatus, unread: Bool = false) -> DockItem {
+            DockItem(id: "claude:s", source: "claude", title: "S", status: status, unread: unread)
+        }
+        _ = attention.update([], now: now)
+        expectEqual(attention.update([claude(.done, unread: true)], now: now.addingTimeInterval(10)).count, 1)
+        _ = attention.update([claude(.working)], now: now.addingTimeInterval(20))
+        expectEqual(attention.update([claude(.done, unread: true)], now: now.addingTimeInterval(25)).count, 0, "a flap")
+        _ = attention.update([claude(.working)], now: now.addingTimeInterval(30))
+        expectEqual(attention.update([claude(.done, unread: true)], now: now.addingTimeInterval(60)).count, 0,
+                    "30 s of work is still a flap")
+        _ = attention.update([claude(.working)], now: now.addingTimeInterval(70))
+        expectEqual(attention.update([claude(.done, unread: true)], now: now.addingTimeInterval(200)).count, 1,
+                    "two minutes of work, then finished again: news")
+        // Flapping without end: at most once per cooldown.
+        var flapping = DockAttention()
+        _ = flapping.update([], now: now)
+        var announced = 0
+        for step in 0..<130 {
+            let at = now.addingTimeInterval(Double(step) * 10)
+            announced += flapping.update([claude(step % 2 == 0 ? .done : .working, unread: true)], now: at).count
+        }
+        expectEqual(announced, 3, "21 minutes of flapping: at 0, after 10 and after 20 minutes")
+    }
+
+    static func smokeRunsOnlyAgainstTheFake() throws {
+        func refusal(_ url: String, isDefault: Bool = false) -> String? {
+            DockSmokeGuard.refusal(base: URL(string: url)!, isDefaultBase: isDefault)
+        }
+        expect(refusal("http://127.0.0.1:3780/app/", isDefault: true) != nil, "the default address is the live bridge")
+        expect(refusal("http://127.0.0.1:3780/app/") != nil, "port 3780 is the live bridge's")
+        expect(refusal("http://localhost:3780/app/") != nil)
+        expect(refusal("http://127.0.0.1/app/") != nil, "no port")
+        expect(refusal("http://192.168.1.5:3811/app/") != nil, "not loopback")
+        expectEqual(refusal("http://127.0.0.1:3811/app/"), nil, "a fake server's port")
     }
 
     static func formatsTimesAndText() throws {

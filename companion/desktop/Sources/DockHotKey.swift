@@ -16,8 +16,9 @@ final class DockHotKey {
     private var ref: EventHotKeyRef?
     private let id: UInt32
 
-    /// nil when the combination is taken by another app (or Carbon refused it); the reason is logged.
-    init?(keyCode: Int, modifiers: Int, name: String, action: @escaping () -> Void) {
+    /// nil when the combination is taken by another app (or Carbon refused it); the reason is logged unless `quiet`
+    /// (keys held only for a moment, like the dock's size keys while the pointer is on it).
+    init?(keyCode: Int, modifiers: Int, name: String, quiet: Bool = false, action: @escaping () -> Void) {
         Self.installHandler()
         id = Self.nextId
         Self.nextId += 1
@@ -25,12 +26,14 @@ final class DockHotKey {
         let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), EventHotKeyID(signature: dockHotKeySignature, id: id),
                                          GetApplicationEventTarget(), 0, &ref)
         guard status == noErr, let ref else {
-            Log.write(status == eventHotKeyExistsErr ? "shortcut \(name) is taken by another app" : "shortcut \(name) not registered (\(status))")
+            if !quiet {
+                Log.write(status == eventHotKeyExistsErr ? "shortcut \(name) is taken by another app" : "shortcut \(name) not registered (\(status))")
+            }
             return nil
         }
         self.ref = ref
         Self.actions[id] = action
-        Log.write("shortcut \(name) registered")
+        if !quiet { Log.write("shortcut \(name) registered") }
     }
 
     func unregister() {

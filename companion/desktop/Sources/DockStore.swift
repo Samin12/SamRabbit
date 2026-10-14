@@ -92,15 +92,10 @@ final class DockStore: ObservableObject {
 
     // MARK: derived
 
-    var needsYouCount: Int {
-        // The bridge's count covers items past the 60-row cap; the local list adds what an action just changed.
-        max(0, inbox.counts.needsYou + items.filter(\.needsYou).count - inbox.items.filter(\.needsYou).count)
-    }
+    /// "2 need you" / "4 working": counted like the sections (DockInbox.shownCounts).
+    var needsYouCount: Int { inbox.shownCounts(items: items).needsYou }
 
-    var workingCount: Int {
-        let isAgentWorking: (DockItem) -> Bool = { $0.status == .working && !$0.isChat }
-        return max(0, inbox.counts.working + items.filter(isAgentWorking).count - inbox.items.filter(isAgentWorking).count)
-    }
+    var workingCount: Int { inbox.shownCounts(items: items).working }
 
     var isOnline: Bool { connection == .online }
 

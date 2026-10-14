@@ -307,6 +307,25 @@ struct DockInbox: Equatable {
     }
 
     var t3Connected: Bool { sources["t3"]?.ok ?? true }
+
+    /// What the pill and the list header say: counted from the dock's own rows (`items`: this answer with any action's
+    /// optimistic result and new tasks still on their way), like the sections, so "1 working" never sits over an empty
+    /// Working section. A SamRabbit chat streaming a reply is not an agent at work, though the bridge's
+    /// `counts.working` includes it. The bridge's counts only add what lies past its 60-item cap.
+    func shownCounts(items: [DockItem]) -> DockShownCounts {
+        let needsYou = items.filter(\.needsYou).count
+        let working = items.filter { $0.status == .working && !$0.isChat }.count
+        guard counts.total > self.items.count else { return DockShownCounts(needsYou: needsYou, working: working) }
+        // Everything working in the list (chats too) comes off the bridge's count, whichever way it counted chats.
+        let moreNeeds = max(0, counts.needsYou - self.items.filter(\.needsYou).count)
+        let moreWorking = max(0, counts.working - self.items.filter { $0.status == .working }.count)
+        return DockShownCounts(needsYou: needsYou + moreNeeds, working: working + moreWorking)
+    }
+}
+
+struct DockShownCounts: Equatable {
+    var needsYou: Int
+    var working: Int
 }
 
 struct DockMessage: Equatable, Decodable, Identifiable {
@@ -512,9 +531,12 @@ enum DockAnswers {
 // MARK: notifications
 
 /// Which needs-you items deserve a notification: each item once when it starts needing Samin (an approval request,
-/// a question, a failure, a finish), not again while it keeps needing him. The same need coming back within
-/// `cooldown` (the CLI heuristics can flap between working and waiting) is not announced again; a different one (a new
-/// request id, another status) is.
+/// a question, a failure, a finish), not again while it keeps needing him. Once it has stopped needing him for a while
+/// (`settle`) the same need is news again: a T3 thread that finishes, gets a reply, works and finishes again announces
+/// both finishes. T3 reports its own state, so any calm counts; the Claude Code and Codex statuses are read from their
+/// session files and can flap between working and waiting, so there the need must have been gone for a minute, and a
+/// need that keeps flapping back is announced at most once per `cooldown`. A different need (a new request id,
+/// another status) is always news.
 struct DockAttention: Equatable {
     struct Announced: Equatable {
         var key: String
@@ -523,6 +545,8 @@ struct DockAttention: Equatable {
 
     var active: Set<String> = []
     var announced: [String: Announced] = [:]
+    /// Since when an announced item has not been needing Samin with its announced need.
+    var calmSince: [String: Date] = [:]
     var primed = false
     static let cooldown: TimeInterval = 10 * 60
 
@@ -531,11 +555,21 @@ struct DockAttention: Equatable {
         return "\(item.id)|\(item.status.rawValue)|\(requests)"
     }
 
+    /// How long the need must have been gone before the same one is announced again.
+    static func settle(_ item: DockItem) -> TimeInterval {
+        item.source == "t3" ? 0 : 60
+    }
+
     /// The items to announce now. The first answer after launch only sets the baseline.
     mutating func update(_ items: [DockItem], now: Date) -> [DockItem] {
         let needing = items.filter(\.needsYou)
         let keys = Set(needing.map(Self.key))
-        defer { active = keys }
+        defer {
+            active = keys
+            for (id, last) in announced where !keys.contains(last.key) && calmSince[id] == nil { calmSince[id] = now }
+            announced = announced.filter { now.timeIntervalSince($0.value.at) < Self.cooldown * 3 }
+            calmSince = calmSince.filter { announced[$0.key] != nil }
+        }
         guard primed else {
             primed = true
             for item in needing { announced[item.id] = Announced(key: Self.key(item), at: now) }
@@ -545,11 +579,15 @@ struct DockAttention: Equatable {
         for item in needing {
             let key = Self.key(item)
             guard !active.contains(key) else { continue }
-            if let last = announced[item.id], last.key == key, now.timeIntervalSince(last.at) < Self.cooldown { continue }
+            if let last = announced[item.id], last.key == key {
+                let settled = calmSince[item.id].map { now.timeIntervalSince($0) >= Self.settle(item) } ?? false
+                calmSince[item.id] = nil
+                if !settled && now.timeIntervalSince(last.at) < Self.cooldown { continue }
+            }
             announced[item.id] = Announced(key: key, at: now)
+            calmSince[item.id] = nil
             announce.append(item)
         }
-        announced = announced.filter { now.timeIntervalSince($0.value.at) < Self.cooldown * 3 }
         return announce
     }
 }
@@ -615,5 +653,23 @@ struct DockLossy<T: Decodable>: Decodable {
 
     init(from decoder: Decoder) throws {
         value = try? T(from: decoder)
+    }
+}
+
+// MARK: dev
+
+/// DEV ONLY: whether the dock's smoke driver (`SAMRABBIT_DOCK_SMOKE`) may run against this bridge address. It approves
+/// a waiting request and starts a new T3 task, so it runs only against `dev/fake_sync_server.py`: never the default
+/// address (the live bridge) or port 3780, and (checked next, over HTTP) only when the server says it is the fake.
+enum DockSmokeGuard {
+    static let liveBridgePort = 3780
+
+    /// nil = allowed; else why not.
+    static func refusal(base: URL, isDefaultBase: Bool) -> String? {
+        if isDefaultBase { return "the app points at the default bridge address" }
+        guard let port = base.port else { return "the bridge address has no port" }
+        if port == liveBridgePort { return "port \(liveBridgePort) is the live bridge's" }
+        guard let host = base.host, ["127.0.0.1", "localhost", "::1", "[::1]"].contains(host) else { return "not a loopback address" }
+        return nil
     }
 }

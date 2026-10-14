@@ -1,26 +1,44 @@
 import Foundation
 
 // The expanded panel's keyboard, when the panel is the key window and no text field has the keys:
-// J/K or ↓/↑ move, Enter expands (and on an expanded row, opens it), E approves with the recommended option,
-// R replies, N goes to the compose field, Esc closes the row and then the panel. ⌘+/⌘−/⌘0 size the dock.
+// J/K or ↓/↑ move, Enter expands (and on an expanded row, opens it), E approves the open row's request with the
+// recommended option (only once the row is open, so the command it approves is on screen), R replies, N goes to the
+// compose field, Esc closes the row and then the panel. ⌘+/⌘−/⌘0 size the dock; every other ⌘ key is kept from the
+// app's menus (⌘0 there opens the main window, ⌘K searches it, ⌘Q quits) except editing and the emoji picker.
 // Pure: the panel turns NSEvents into DockKey and carries out the DockKeyAction this answers.
 
 enum DockKey: Equatable {
-    case down, up, enter, approve, reply, compose, escape, zoomIn, zoomOut, zoomReset
+    case down, up, enter, approve, reply, compose, escape
+}
+
+/// A ⌘ key pressed while a dock window has the keys. AppKit offers ⌘ keys to the main menu before the window sees
+/// them, so the dock decides first (a local event monitor): the app's menu items act on the main window, and running
+/// them from the dock would bring SamRabbit forward (⌘0 "Open SamRabbit Window", ⌘K search) or quit it under the app
+/// Samin is in (⌘Q; the menu bar he sees is that app's).
+enum DockCommandKey: Equatable {
+    case zoom(Int)  // +1, −1, 0 = reset
+    case pass  // editing in a field (⌘C/⌘V/⌘X/⌘A/⌘Z/⇧⌘Z) and the emoji picker (⌃⌘Space)
+    case swallow
+
+    static func route(keyCode: UInt16, characters: String, shift: Bool, control: Bool, option: Bool) -> DockCommandKey {
+        if keyCode == 49 && control { return .pass }
+        if control || option { return .swallow }
+        switch characters.lowercased() {
+        case "=", "+": return .zoom(1)
+        case "-", "_": return .zoom(-1)
+        case "0": return shift ? .swallow : .zoom(0)
+        case "c", "v", "x", "a": return shift ? .swallow : .pass
+        case "z": return .pass
+        default: return .swallow
+        }
+    }
 }
 
 extension DockKey {
     /// Key code / characters / modifiers to a key the panel understands (nil = not ours, let it through).
     static func from(keyCode: UInt16, characters: String, command: Bool, control: Bool, option: Bool) -> DockKey? {
-        if command {
-            switch characters {
-            case "=", "+": return .zoomIn
-            case "-", "_": return .zoomOut
-            case "0": return .zoomReset
-            default: return nil
-            }
-        }
-        if control || option { return nil }
+        // ⌘ keys go through DockCommandKey (before the main menu sees them).
+        if command || control || option { return nil }
         switch keyCode {
         case 125: return .down
         case 126: return .up
@@ -100,10 +118,10 @@ enum DockKeyboard {
             if row.id == expanded { return row.canOpen ? .open(row.id) : .none }
             return .expand(row.id)
         case .approve:
-            // The selected row, or when nothing is selected the first one waiting on an approval.
-            let row = index.map { rows[$0] } ?? rows.first { $0.approval != nil }
-            guard let row, let approval = row.approval else { return .none }
-            return .approve(id: row.id, requestId: approval.requestId, decision: approval.decision)
+            // Only the selected row, and only once it is open: then its approval card (the command, the files) is on
+            // screen. A stray E in a list that just opened, or on a closed row, approves nothing.
+            guard let index, rows[index].id == expanded, let approval = rows[index].approval else { return .none }
+            return .approve(id: rows[index].id, requestId: approval.requestId, decision: approval.decision)
         case .reply:
             guard let index, rows[index].canReply else { return .none }
             return .reply(rows[index].id)
@@ -111,12 +129,6 @@ enum DockKeyboard {
             return .compose
         case .escape:
             return expanded != nil ? .collapseRow : .collapsePanel
-        case .zoomIn:
-            return .zoom(1)
-        case .zoomOut:
-            return .zoom(-1)
-        case .zoomReset:
-            return .zoom(0)
         }
     }
 }

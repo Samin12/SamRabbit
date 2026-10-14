@@ -181,7 +181,9 @@ enum KeyboardTests {
         ("movesTheSelection", movesTheSelection),
         ("enterExpandsThenOpens", enterExpandsThenOpens),
         ("approvesWithTheRecommendedOption", approvesWithTheRecommendedOption),
+        ("strayKeysApproveNothing", strayKeysApproveNothing),
         ("replyComposeEscape", replyComposeEscape),
+        ("commandKeysStayInTheDock", commandKeysStayInTheDock),
         ("rowsFromItems", rowsFromItems),
     ]
 
@@ -201,9 +203,8 @@ enum KeyboardTests {
         expectEqual(key(14, "e"), .approve)
         expectEqual(key(15, "r"), .reply)
         expectEqual(key(45, "n"), .compose)
-        expectEqual(key(24, "=", command: true), .zoomIn)
-        expectEqual(key(27, "-", command: true), .zoomOut)
-        expectEqual(key(29, "0", command: true), .zoomReset)
+        expectEqual(key(24, "=", command: true), nil, "⌘ keys go through DockCommandKey")
+        expectEqual(key(29, "0", command: true), nil)
         expectEqual(key(38, "j", command: true), nil)
         expectEqual(key(38, "j", control: true), nil)
         expectEqual(key(0, "a"), nil)
@@ -236,12 +237,34 @@ enum KeyboardTests {
     }
 
     static func approvesWithTheRecommendedOption() throws {
-        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: "a", expanded: nil),
-                    .approve(id: "a", requestId: "r1", decision: "accept"))
-        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: "b", expanded: nil), .none,
+        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: "a", expanded: "a"),
+                    .approve(id: "a", requestId: "r1", decision: "accept"), "the open row, its command on screen")
+        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: "b", expanded: "b"), .none,
                     "E on a row without an approval does nothing")
-        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: nil, expanded: nil),
-                    .approve(id: "a", requestId: "r1", decision: "accept"), "nothing selected: the first waiting approval")
+    }
+
+    /// Samin clicks the pill and starts typing "explain the failing test": no letter may approve a command he never saw.
+    static func strayKeysApproveNothing() throws {
+        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: nil, expanded: nil), .none,
+                    "nothing selected: no fallback to the first waiting approval")
+        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: "a", expanded: nil), .none,
+                    "selected but closed: the command isn't on screen")
+        expectEqual(DockKeyboard.action(for: .approve, rows: rows, selected: "a", expanded: "c"), .none,
+                    "another row is open")
+        // Typed into a list that just opened: e, x, p, l, a, i, n… — only N acts (it moves the keys to compose).
+        var selected: String?
+        var expanded: String?
+        for character in "explain the failing test" {
+            guard let key = DockKey.from(keyCode: 0, characters: String(character), command: false, control: false, option: false) else { continue }
+            let action = DockKeyboard.action(for: key, rows: rows, selected: selected, expanded: expanded)
+            if case .approve = action { expect(false, "‘\(character)’ approved something") }
+            switch action {
+            case .select(let id): selected = id
+            case .expand(let id): expanded = id
+            case .compose: return  // the rest goes into the compose field
+            default: break
+            }
+        }
     }
 
     static func replyComposeEscape() throws {
@@ -251,8 +274,26 @@ enum KeyboardTests {
         expectEqual(DockKeyboard.action(for: .compose, rows: rows, selected: nil, expanded: nil), .compose)
         expectEqual(DockKeyboard.action(for: .escape, rows: rows, selected: "a", expanded: "a"), .collapseRow)
         expectEqual(DockKeyboard.action(for: .escape, rows: rows, selected: "a", expanded: nil), .collapsePanel)
-        expectEqual(DockKeyboard.action(for: .zoomIn, rows: [], selected: nil, expanded: nil), .zoom(1))
-        expectEqual(DockKeyboard.action(for: .zoomReset, rows: [], selected: nil, expanded: nil), .zoom(0))
+    }
+
+    /// ⌘ keys while the dock has the keys: its size keys, editing, and never one of the app's menu items (⌘0 "Open
+    /// SamRabbit Window" would bring the main window forward, ⌘K would search it, ⌘Q would quit SamRabbit).
+    static func commandKeysStayInTheDock() throws {
+        func route(_ code: UInt16, _ chars: String, shift: Bool = false, control: Bool = false) -> DockCommandKey {
+            DockCommandKey.route(keyCode: code, characters: chars, shift: shift, control: control, option: false)
+        }
+        expectEqual(route(24, "="), .zoom(1))
+        expectEqual(route(24, "+", shift: true), .zoom(1))
+        expectEqual(route(27, "-"), .zoom(-1))
+        expectEqual(route(29, "0"), .zoom(0), "⌘0 resets the dock's size, it doesn't open the main window")
+        for (code, chars) in [(UInt16(40), "k"), (12, "q"), (15, "r"), (31, "o"), (13, "w"), (4, "h"), (43, ","), (35, "p")] {
+            expectEqual(route(code, chars), .swallow, "⌘\(chars) runs no menu item from the dock")
+        }
+        expectEqual(route(35, "p", shift: true), .swallow, "⇧⌘P (Pair iPhone…)")
+        for chars in ["c", "v", "x", "a", "z"] { expectEqual(route(0, chars), .pass, "⌘\(chars) edits the field") }
+        expectEqual(route(6, "z", shift: true), .pass, "⇧⌘Z redoes")
+        expectEqual(route(49, " ", control: true), .pass, "⌃⌘Space: the emoji picker")
+        expectEqual(route(40, "k", control: true), .swallow)
     }
 
     static func rowsFromItems() throws {

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// What the dock's windows show right now (not data: the store has that).
@@ -61,6 +62,32 @@ extension DockVoiceSnapshot {
         wakeArmed = voice.wakeArmed
         wakeEnabled = voice.wakeEnabled
         shortcut = voice.shortcutDescription
+    }
+}
+
+/// MacVoice as one of the dock's windows draws it, published only when that changes. The list never draws the mic
+/// level and the pill only during a conversation, so the level (many times a second) redraws nothing else.
+@MainActor
+final class DockVoiceFeed: ObservableObject {
+    @Published private(set) var snapshot = DockVoiceSnapshot()
+    private let keepsLevel: Bool
+    private var subscription: AnyCancellable?
+
+    init(_ voice: MacVoice, keepsLevel: Bool) {
+        self.keepsLevel = keepsLevel
+        update(voice)
+        // objectWillChange fires before the new value is set: read it a moment later.
+        subscription = voice.objectWillChange.receive(on: DispatchQueue.main).sink { [weak self, weak voice] _ in
+            MainActor.assumeIsolated {
+                if let voice { self?.update(voice) }
+            }
+        }
+    }
+
+    private func update(_ voice: MacVoice) {
+        var next = DockVoiceSnapshot(voice)
+        if !keepsLevel || !next.active { next.level = 0 }
+        if next != snapshot { snapshot = next }
     }
 }
 
@@ -303,14 +330,14 @@ struct DockVoiceBar: View {
 struct DockPillRoot: View {
     @ObservedObject var store: DockStore
     @ObservedObject var ui: DockUIState
-    @ObservedObject var voice: MacVoice
+    @ObservedObject var voice: DockVoiceFeed
     let commands: DockCommands
     let render: DockRender
     var onSize: (CGSize) -> Void
     var onHitRects: ([CGRect]) -> Void
 
     var body: some View {
-        let snapshot = DockVoiceSnapshot(voice)
+        let snapshot = voice.snapshot
         Group {
             if snapshot.active {
                 DockVoiceBar(voice: snapshot, scale: ui.pillScale, commands: commands)

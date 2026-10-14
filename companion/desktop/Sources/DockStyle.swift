@@ -464,7 +464,15 @@ struct DockFieldRepresentable: NSViewRepresentable {
         }
 
         func controlTextDidEndEditing(_ notification: Notification) {
-            focusChanged(false)
+            // Changing the font (the dock's size, ⌘+/⌘−/⌘0 while typing) ends editing on paper while the field keeps
+            // its editor and the keys: only a field that has really let go stops editing (seen a moment later).
+            let field = notification.object as? NSTextField
+            let focus = parent.focus
+            let ui = parent.ui
+            DispatchQueue.main.async {
+                if let field, field.currentEditor() != nil { return }
+                if ui.editing == focus { ui.editing = nil }
+            }
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {

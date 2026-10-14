@@ -110,23 +110,30 @@ T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, 
 
 - **The pill** (~44 pt on a laptop, bigger on wider screens): the orb (it moves for a moment when the counts change),
   "2 need you" (blue capsule), "4 working", and the mic (a dot when the "Hey Rabbit" listener is armed). Point at it
-  for a moment and the list opens; click toggles the list; double-click opens the main window; drag it along the
-  bottom edge (and to other screens; remembered as a screen + a fraction of its width, so it stays put when monitors
-  change); drag an end of the pill up or down to size it (or ⌘+ / ⌘− / ⌘0 while the dock has the keys, or the menu).
+  for a moment and the list opens; click toggles the list (it opens with the compose field taking the keys);
+  double-click opens the main window; drag it along the bottom edge (and to other screens; remembered as a screen + a
+  fraction of its width, so it stays put when monitors change); drag an end of the pill up or down to size it (or
+  ⌘+ / ⌘− / ⌘0 while pointing at the dock or while it has the keys, or the menu).
 - **The list** opens above the pill: Needs you, Working, Recent chats, Earlier (folded). A row opens in place with its
   last messages and what the item supports right now (`can`): Approve / Deny (each option), answers to questions,
   Reply (↩ sends, ⇧↩ new line), Stop, Open (`/open`; a SamRabbit chat opens in the main window), Mark seen. Actions
   show at once and roll back with a short inline error when the bridge says no; a live terminal session answers
   "It's open in Terminal — Open to answer there". The compose bar at the bottom sends a new prompt to a T3 project
-  with a chosen agent and model (`/targets`, `/new`).
-- **Keys** (when the list has the keys): J/K or ↓/↑, ↩ open a row (↩ again: Open), E approve with the recommended
-  option, R reply, N compose, Esc close the row, then the list. **⌃⌥K** anywhere opens the list on the compose field
-  (Carbon `RegisterEventHotKey`, no Accessibility permission; the voice work owns ⌃⌥Space).
+  with a chosen agent and model (`/targets`, `/new`); its project and agent menus open upward over the list (the panel
+  grows to fit them, and a long list scrolls).
+- **Keys** (when the list has the keys and no field does — Esc leaves a field): J/K or ↓/↑, ↩ open a row (↩ again:
+  Open), E approve the open row with the recommended option (only an open row: its command is on screen), R reply,
+  N compose, Esc close the row, then the list. ⌘ keys in the dock never reach the app's menus (⌘0 there would open the
+  main window); editing keys and ⌃⌘Space still work in its fields. **⌃⌥K** anywhere opens the list on the compose
+  field, and turns a dock that was turned off back on (Carbon `RegisterEventHotKey`, no Accessibility permission; the
+  voice work owns ⌃⌥Space).
 - **When it shows:** whenever the main window is minimised, closed or hidden, or another app is in front; it steps
   aside while you are in the main window. Right-click (or "…"): Hide for 1 Hour, Hide Until Tomorrow (both come back by
   themselves), Turn Off the Dock (until **Show Agent Dock** in the menu bar extra or the app menu, ⌃⌥K), Always Listen
   for "Hey Rabbit", the voice shortcut, Open SamRabbit. During a voice conversation the pill becomes the voice bar
-  (what was heard, the reply as it streams, mute, stop speaking, end; Esc ends).
+  (what was heard, the reply as it streams, mute, stop speaking, end). Esc ends it once the bar has the keys: started
+  from the dock's mic, or after a click on the bar. The bar never takes Esc from the app you are in (a terminal's Esc
+  interrupts Claude Code).
 - **Windows:** two non-activating panels (`NSPanel`, `.nonactivatingPanel`), each exactly the size of its glass, no
   system shadow, status-bar level, on every Space and over full-screen apps, never in ⌘-Tab or the Window menu. The
   list can take the keys without bringing SamRabbit forward (the frontmost app and its menu bar stay as they were).
@@ -158,6 +165,8 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
   blurring the backdrop).
 - `SAMRABBIT_DOCK_SMOKE=<dir>` walks a running dev copy through open → expand → approve → new prompt → voice → hide →
   back without any synthetic click, logs what AppKit says about the windows at each step and draws each live state.
+  It approves and creates a task, so it refuses to run unless the app points at the fake server: not the default
+  address, not port 3780, and the server must answer `GET /dev/inbox/fake`.
 - `SAMRABBIT_DOCK_FIXTURE_WAKE=1` makes the voice placeholder report the wake listener as armed (the mic's dot).
 
 ## Developing the UI

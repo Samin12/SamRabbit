@@ -216,7 +216,7 @@ enum DockSnapshots {
             if let keep {
                 inbox.items = inbox.items.filter(keep)
                 inbox.counts = DockCounts(needsYou: inbox.items.filter(\.needsYou).count,
-                                          working: inbox.items.filter { $0.status == .working && !$0.isChat }.count,
+                                          working: inbox.items.filter { $0.status == .working }.count,
                                           total: inbox.items.count)
             }
             var detailMap: [String: DockItemDetail] = [:]
@@ -289,9 +289,34 @@ enum DockSnapshots {
 /// (open the list, expand an approval, approve it, send a new prompt, the voice bar with the placeholder voice, hide for
 /// a while and back), logs what AppKit says about its windows at each step, and draws each state from the live store
 /// into <dir> (drawn like the snapshots: the live views and data over a backdrop, since nothing may capture the screen).
+/// It approves a real request and starts a task, so it runs only against dev/fake_sync_server.py: never the default
+/// address or port 3780 (DockSmokeGuard), and only when the server answers `GET /dev/inbox/fake`.
 @MainActor
 enum DockSmoke {
     static func run(_ controller: DockController, directory: String) {
+        if let reason = DockSmokeGuard.refusal(base: Config.baseURL, isDefaultBase: Config.isDefaultBase) {
+            Log.write("dock smoke refused: \(reason) (it approves and creates tasks: point the app at dev/fake_sync_server.py)")
+            return
+        }
+        Task { @MainActor in
+            guard await isFakeServer() else {
+                Log.write("dock smoke refused: the server is not dev/fake_sync_server.py (no /dev/inbox/fake)")
+                return
+            }
+            steps(controller, directory: directory)
+        }
+    }
+
+    /// `GET /dev/inbox/fake` → `{"fake": true}`: only the fake server says so.
+    private static func isFakeServer() async -> Bool {
+        guard let request = Config.request(Config.api("/dev/inbox/fake"), timeout: 5),
+              let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return body["fake"] as? Bool == true
+    }
+
+    private static func steps(_ controller: DockController, directory: String) {
         let out = URL(fileURLWithPath: (directory as NSString).expandingTildeInPath, isDirectory: true)
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         var steps: [(TimeInterval, String, () -> Void)] = []
@@ -348,6 +373,34 @@ enum DockSmoke {
             controller.summon(focusCompose: true)
         }
         step(27, "hotkey-compose")
+        // ⌘ keys through the app's own event queue (NSApp.postEvent: the route a real key takes, menus included):
+        // ⌘0 resets the dock's size instead of opening the main window, ⌘K searches nothing.
+        step(27.5, "command-keys") {
+            controller.perform(.zoom(1))
+            post(key: "0", code: 29, command: true, to: controller.list)
+            post(key: "k", code: 40, command: true, to: controller.list)
+        }
+        step(29, "command-keys-after")
+        // A click on the pill (posted the same way) opens the list with the compose field taking the keys: the
+        // letters of a prompt go into it; and E on a selected approval row that is still closed approves nothing.
+        step(29.5, "collapse") {
+            controller.perform(.collapsePanel)
+            Task { await devPost("/dev/inbox/needs-you") }  // a fresh approval for the stray E
+        }
+        step(30.5, "click-pill") { click(controller.pill) }
+        step(31.5, "pill-clicked") {
+            for (character, code) in [("e", UInt16(14)), ("x", UInt16(7)), ("p", UInt16(35))] {
+                post(key: character, code: code, to: controller.list)
+            }
+        }
+        step(32.5, "typed") {
+            post(key: "\u{1b}", code: 53, to: controller.list)
+            if let item = store.items.first(where: { $0.supports("approve") && !$0.pending.approvals.isEmpty }) {
+                controller.perform(.select(item.id))
+            }
+            post(key: "e", code: 14, to: controller.list)
+        }
+        step(34, "stray-keys-after") { store.composeText = "" }
 
         for (at, name, body) in steps {
             DispatchQueue.main.asyncAfter(deadline: .now() + at) {
@@ -364,9 +417,40 @@ enum DockSmoke {
                 }
                 Log.write("dock smoke \(name): pill \(describe(pill)); list \(describe(list)); front app=\(NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? "SamRabbit" : "other");"
                           + " main window visible=\(main?.isVisible ?? false); needs you \(store.needsYouCount), working"
-                          + " \(store.workingCount), items \(store.items.count); expanded=\(ui.expanded); selected=\(ui.selected ?? "-"); voice=\(MacVoice.shared.state)")
+                          + " \(store.workingCount), items \(store.items.count); expanded=\(ui.expanded); selected=\(ui.selected ?? "-");"
+                          + " open row=\(ui.expandedRow ?? "-"); editing=\(ui.editing.map { "\($0)" } ?? "-"); compose \(store.composeText.count) chars;"
+                          + " voice=\(MacVoice.shared.state)")
                 draw(controller, name: name, to: out)
-                if name == "hotkey-compose" { Log.write("dock smoke done") }
+                if name == "stray-keys-after" { Log.write("dock smoke done") }
+            }
+        }
+    }
+
+    /// A dev control of the fake server (it was checked to be the fake before the first step).
+    private static func devPost(_ path: String) async {
+        guard var request = Config.request(Config.api(path), timeout: 5) else { return }
+        request.httpMethod = "POST"
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
+    /// A key into the app's own event queue (never the system's): AppKit routes it like a real one, menus first.
+    private static func post(key: String, code: UInt16, command: Bool = false, to window: NSWindow?) {
+        guard let window, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: command ? [.command] : [],
+                                                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                         context: nil, characters: key, charactersIgnoringModifiers: key,
+                                                         isARepeat: false, keyCode: code) else { return }
+        NSApp.postEvent(event, atStart: false)
+    }
+
+    /// A click on the pill's words (not on a control), through the app's own event queue.
+    private static func click(_ window: NSWindow?) {
+        guard let window else { return }
+        let point = NSPoint(x: 70, y: window.frame.height / 2)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            if let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                                              pressure: type == .leftMouseDown ? 1 : 0) {
+                NSApp.postEvent(event, atStart: false)
             }
         }
     }

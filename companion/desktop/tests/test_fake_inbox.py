@@ -93,13 +93,20 @@ class FakeInboxTest(unittest.TestCase):
     def test_needs_the_desktop_token(self) -> None:
         self.assertEqual(self.call("GET", "/v1/desktop/inbox", token=None)[0], 401)
         self.assertEqual(self.call("GET", "/v1/desktop/inbox", token="nope-" + "x" * 20)[0], 401)
+        self.assertEqual(self.call("GET", "/dev/inbox/fake", token=None)[0], 401)
+
+    def test_says_it_is_the_fake(self) -> None:
+        # The dock's smoke driver (it approves and creates tasks) runs only against a server that answers this.
+        self.assertEqual(self.call("GET", "/dev/inbox/fake"), (200, {"fake": True}))
 
     def test_inbox_has_every_source_and_status_in_order(self) -> None:
         body = self.inbox()
         items = body["items"]
         self.assertEqual({i["source"] for i in items}, {"t3", "claude", "codex", "samrabbit"})
         self.assertEqual({i["status"] for i in items}, {"needs-approval", "needs-input", "error", "done", "working", "idle"})
-        self.assertEqual(body["counts"], {"needsYou": 6, "working": 4, "total": 15})
+        # Counted like the bridge: "working" includes the SamRabbit chat that is streaming a reply.
+        self.assertEqual(body["counts"], {"needsYou": 6, "working": 5, "total": 15})
+        self.assertTrue(any(i["source"] == "samrabbit" and i["status"] == "working" for i in items))
         self.assertTrue(any(len(i["title"]) > 100 for i in items), "a long title")
         approval = next(i for i in items if i["pending"]["approvals"])
         self.assertEqual(len(approval["pending"]["approvals"][0]["options"]), 3)

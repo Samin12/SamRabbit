@@ -15,21 +15,31 @@ struct DockPanel: View {
     var body: some View {
         let p = ui.panelScale
         VStack(spacing: 0) {
-            header(p)
-            if !store.inbox.t3Connected && store.isOnline {
-                DockBanner(text: "T3 Code isn’t connected to the bridge" + (store.inbox.sources["t3"]?.reason.map { ": \($0)" } ?? "."),
-                           scale: p)
-                    .padding(.horizontal, 12 * p)
-                    .padding(.bottom, 6 * p)
+            ZStack(alignment: .top) {
+                VStack(spacing: 0) {
+                    header(p)
+                    if !store.inbox.t3Connected && store.isOnline {
+                        DockBanner(text: "T3 Code isn’t connected to the bridge" + (store.inbox.sources["t3"]?.reason.map { ": \($0)" } ?? "."),
+                                   scale: p)
+                            .padding(.horizontal, 12 * p)
+                            .padding(.bottom, 6 * p)
+                    }
+                    if !store.isOnline {
+                        DockStateCard(title: store.offlineText, detail: store.offlineDetail, dim: true, scale: p,
+                                      retry: store.connection == .connecting ? nil : { store.retryNow() })
+                    } else if store.items.isEmpty {
+                        DockStateCard(title: "Nothing is waiting for you",
+                                      detail: "Agents that need you show up here. Ask one below.", dim: false, scale: p, retry: nil)
+                    } else {
+                        list(p)
+                    }
+                }
+                menuRoom(p)
             }
-            if !store.isOnline {
-                DockStateCard(title: store.offlineText, detail: store.offlineDetail, dim: true, scale: p,
-                              retry: store.connection == .connecting ? nil : { store.retryNow() })
-            } else if store.items.isEmpty {
-                DockStateCard(title: "Nothing is waiting for you",
-                              detail: "Agents that need you show up here. Ask one below.", dim: false, scale: p, retry: nil)
-            } else {
-                list(p)
+            .overlay {
+                if ui.menu != nil && !render.isSnapshot {
+                    Color.black.opacity(0.001).onTapGesture { ui.menu = nil }
+                }
             }
             Rectangle().fill(DockPalette.hairline).frame(height: 1)
             DockCompose(store: store, ui: ui, voice: voice, commands: commands)
@@ -59,6 +69,20 @@ struct DockPanel: View {
         .padding(.bottom, 6 * p)
     }
 
+    /// An open target menu opens upward from its chip, over the list. The panel (and its window, which is exactly the
+    /// glass) must be at least that tall, or a short list (nothing waiting, offline) would cut the menu off at the top
+    /// edge: the same menu, invisible, holds the room in a single layout pass.
+    @ViewBuilder private func menuRoom(_ p: CGFloat) -> some View {
+        if let which = ui.menu, let targets = store.targets {
+            DockTargetMenu(which: which, targets: targets, choice: targets.resolve(store.choice), now: store.now, scale: p,
+                           maxHeight: DockTargetMenu.maxHeight(panel: ui.maxPanelHeight, scale: p)) { _, _, _ in }
+                .fixedSize()
+                .hidden()
+                .accessibilityHidden(true)
+                .padding(.bottom, 6 * p)
+        }
+    }
+
     private var countsLine: String {
         let needs = store.needsYouCount
         let working = store.workingCount
@@ -85,11 +109,6 @@ struct DockPanel: View {
                 .frame(maxHeight: limit)
                 .fixedSize(horizontal: false, vertical: true)
                 .mask(DockEdgeFade(scale: p))
-                .overlay {
-                    if ui.menu != nil {
-                        Color.black.opacity(0.001).onTapGesture { ui.menu = nil }
-                    }
-                }
                 .onChange(of: ui.selected) { _, selected in
                     guard let selected else { return }
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(selected) }
@@ -825,7 +844,8 @@ struct DockCompose: View {
 
     @ViewBuilder private func menu(_ which: DockUIState.Menu, _ p: CGFloat) -> some View {
         if ui.menu == which, let targets = store.targets {
-            DockTargetMenu(which: which, targets: targets, choice: targets.resolve(store.choice), now: store.now, scale: p) { project, agent, model in
+            DockTargetMenu(which: which, targets: targets, choice: targets.resolve(store.choice), now: store.now, scale: p,
+                           maxHeight: DockTargetMenu.maxHeight(panel: ui.maxPanelHeight, scale: p)) { project, agent, model in
                 if let project { store.pick(project: project) }
                 if let agent, let model { store.pick(agent: agent, model: model) }
                 ui.menu = nil
@@ -836,17 +856,51 @@ struct DockCompose: View {
     }
 }
 
-/// The chips' menus: projects (most recently active first), or agents with their models.
+/// The chips' menus: projects (most recently active first), or agents with their models. At most `maxHeight` tall
+/// (the room the panel can have above the compose bar); a longer list scrolls, starting at the current choice.
 struct DockTargetMenu: View {
     let which: DockUIState.Menu
     let targets: DockTargets
     let choice: DockTargets.Choice
     let now: Date
     let scale: CGFloat
+    let maxHeight: CGFloat
     let pick: (String?, String?, String?) -> Void
+    @Environment(\.dockRender) private var render
+
+    /// The panel is at most `panel` tall (60% of the screen, less near the top); the compose bar under the menu takes
+    /// about 130 pt of it (the list's own cap leaves the same room).
+    static func maxHeight(panel: CGFloat, scale p: CGFloat) -> CGFloat {
+        max(120 * p, panel - 130 * p)
+    }
 
     var body: some View {
         let p = scale
+        Group {
+            if render.isSnapshot {
+                // ImageRenderer can't draw a ScrollView's content: the same rows, capped and clipped.
+                rows(p)
+                    .frame(maxHeight: maxHeight, alignment: .top)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .clipped()
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        rows(p)
+                    }
+                    .frame(maxHeight: maxHeight)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .onAppear { proxy.scrollTo(selectedRow, anchor: .center) }
+                }
+            }
+        }
+        .frame(width: 236 * p, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 13 * p, style: .continuous).fill(Color(red: 0.1, green: 0.11, blue: 0.14).opacity(0.98)))
+        .overlay(RoundedRectangle(cornerRadius: 13 * p, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.4), radius: 14 * p, y: 6 * p)
+    }
+
+    private func rows(_ p: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 1 * p) {
             switch which {
             case .project:
@@ -854,6 +908,7 @@ struct DockTargetMenu: View {
                 ForEach(projects) { project in
                     row(title: project.title, detail: DockTime.short(project.lastActiveAt.flatMap(DockDate.parse), now: now),
                         selected: project.id == choice.projectId, p) { pick(project.id, nil, nil) }
+                        .id(project.id)
                 }
             case .agent:
                 ForEach(targets.agents) { agent in
@@ -862,15 +917,19 @@ struct DockTargetMenu: View {
                         row(title: model.label, detail: nil, selected: agent.id == choice.agent && model.id == choice.model, p) {
                             pick(nil, agent.id, model.id)
                         }
+                        .id("\(agent.id)/\(model.id)")
                     }
                 }
             }
         }
         .padding(5 * p)
-        .frame(width: 236 * p, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 13 * p, style: .continuous).fill(Color(red: 0.1, green: 0.11, blue: 0.14).opacity(0.98)))
-        .overlay(RoundedRectangle(cornerRadius: 13 * p, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
-        .shadow(color: Color.black.opacity(0.4), radius: 14 * p, y: 6 * p)
+    }
+
+    private var selectedRow: String {
+        switch which {
+        case .project: return choice.projectId ?? ""
+        case .agent: return "\(choice.agent ?? "")/\(choice.model ?? "")"
+        }
     }
 
     private var projects: [DockTargets.Project] {
@@ -930,13 +989,13 @@ struct DockMenuRow: View {
 struct DockPanelRoot: View {
     @ObservedObject var store: DockStore
     @ObservedObject var ui: DockUIState
-    @ObservedObject var voice: MacVoice
+    @ObservedObject var voice: DockVoiceFeed
     let commands: DockCommands
     let render: DockRender
     var onSize: (CGSize) -> Void
 
     var body: some View {
-        DockPanel(store: store, ui: ui, voice: DockVoiceSnapshot(voice), commands: commands)
+        DockPanel(store: store, ui: ui, voice: voice.snapshot, commands: commands)
             .fixedSize()
             .dockReportSize()
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
