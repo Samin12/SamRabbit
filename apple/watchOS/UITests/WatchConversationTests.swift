@@ -8,7 +8,8 @@ import XCTest
 /// detector, the 16 kHz WAV, the streamed turn, the PCM frames scheduled on the player, the captions, barge-in,
 /// announcements). The simulator plays nothing out loud (`AudioGraph` is muted there).
 ///
-/// Needs `apple/dev/fake_bridge.py` on 127.0.0.1:3799, the iPhone simulator paired with it and this watch paired
+/// Needs `apple/dev/fake_bridge.py` on 127.0.0.1:3799 (or `TEST_RUNNER_SAMRABBIT_FAKE_BRIDGE=<host:port>`), the
+/// iPhone simulator paired with it and this watch paired
 /// with that iPhone (skips otherwise). Screenshots are attached as `watch-…` (exported to
 /// ~/Movies/SamRabbit-tests/wave5). Synchronous on purpose (see `WatchVoiceTests`).
 @MainActor
@@ -23,6 +24,9 @@ final class WatchConversationTests: XCTestCase {
         fake("assistant", ["mode": "ok", "delay": 0.35, "pace": 0.5, "hold": 0, "ping": 0, "busyFor": 0,
                            "code": "assistant_failed", "heard": Self.heard, "say": Self.say])
     }
+
+    /// The fake bridge (`TEST_RUNNER_SAMRABBIT_FAKE_BRIDGE`, default 127.0.0.1:3799).
+    nonisolated static let bridge = ProcessInfo.processInfo.environment["SAMRABBIT_FAKE_BRIDGE"] ?? "127.0.0.1:3799"
 
     nonisolated static let heard = "Draft the release notes for build 2.4"
     nonisolated static let say = "Okay, I started the release notes for build 2.4 in Hermes. Anything else?"
@@ -65,14 +69,14 @@ final class WatchConversationTests: XCTestCase {
 
     @discardableResult
     nonisolated private func fake(_ name: String, _ body: [String: Any] = [:]) -> [String: Any] {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:3799/__fake/\(name)")!)
+        var request = URLRequest(url: URL(string: "http://\(Self.bridge)/__fake/\(name)")!)
         request.httpMethod = "POST"
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return exchange(request)
     }
 
     nonisolated private func fakeGet(_ name: String) -> [String: Any] {
-        exchange(URLRequest(url: URL(string: "http://127.0.0.1:3799/__fake/\(name)")!))
+        exchange(URLRequest(url: URL(string: "http://\(Self.bridge)/__fake/\(name)")!))
     }
 
     nonisolated private func exchange(_ request: URLRequest) -> [String: Any] {

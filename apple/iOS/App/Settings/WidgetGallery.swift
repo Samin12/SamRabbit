@@ -60,6 +60,9 @@ enum WidgetGallery {
         Item(id: "lock-screen", title: "Lock Screen", size: CGSize(width: 364, height: 210)) { snapshot in
             AnyView(LockScreenPreview(snapshot: snapshot))
         },
+        Item(id: "talk", title: "Talk · Lock Screen and Live Activity", size: CGSize(width: 364, height: 330)) { _ in
+            AnyView(TalkPreview())
+        },
     ]
 
     static func snapshot(_ summary: MobileSummary?, fetchedAt: Date?, paired: Bool) -> WidgetSnapshot {
@@ -89,6 +92,41 @@ struct LockScreenPreview: View {
         }
         .foregroundStyle(.white)
         .padding(.vertical, 22)
+        .frame(width: 364)
+        .background {
+            LinearGradient(colors: [Color(hex: 0x1C2F5C), Color(hex: 0x35246B), Color(hex: 0x0D1730)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .environment(\.colorScheme, .dark)
+    }
+}
+
+/// Talk's Lock Screen widgets, its Live Activity on the Lock Screen and the Dynamic Island expanded, with a
+/// made-up conversation.
+struct TalkPreview: View {
+    private let state = TalkActivityState(phase: .speaking,
+                                          line: "Okay, I started the release notes for build 2.4. Anything else?")
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 14) {
+                TalkCircularFace()
+                    .frame(width: 66, height: 66)
+                TalkRectangularFace()
+                    .frame(width: 168, height: 66)
+            }
+            TalkActivityLockFace(state: state, startedAt: .now.addingTimeInterval(-83))
+                .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(hex: 0x0B1324).opacity(0.88)))
+                .padding(.horizontal, 10)
+            TalkIslandExpandedFace(state: TalkActivityState(phase: .listening, line: "“What's next on my calendar?”"))
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+                .background(RoundedRectangle(cornerRadius: 40, style: .continuous).fill(.black))
+                .padding(.horizontal, 10)
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 20)
         .frame(width: 364)
         .background {
             LinearGradient(colors: [Color(hex: 0x1C2F5C), Color(hex: 0x35246B), Color(hex: 0x0D1730)],

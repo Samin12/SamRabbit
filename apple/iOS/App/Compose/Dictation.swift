@@ -29,6 +29,9 @@ final class SpeechDictation {
 
     var isListening: Bool { state == .listening }
 
+    /// Runs just before dictation takes the microphone: a live conversation (Talk) ends first, one microphone.
+    static var willStart: (@MainActor () -> Void)?
+
     func toggle(_ text: Binding<String>) {
         if isListening { stop() } else { Task { await start(text) } }
     }
@@ -46,6 +49,7 @@ final class SpeechDictation {
             return
         }
         guard !isListening else { return }
+        Self.willStart?()
         guard let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
               recognizer.isAvailable else {
             state = .unavailable("Dictation isn't available right now.")

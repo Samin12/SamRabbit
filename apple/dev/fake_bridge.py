@@ -1803,6 +1803,15 @@ class Handler(BaseHTTPRequestHandler):
         elif re.search(r"\b(task|draft|notes|start)\b", heard, re.I):
             actions.append({"kind": "t3.started", "title": "Release notes for build 2.4", "threadId": "t_relnotes",
                             "projectName": "Hermes"})
+            # The task it says it started is there (the iPhone's Talk opens it in Tasks). Called with the lock held.
+            if "t_relnotes" not in b.threads:
+                b.threads["t_relnotes"] = {
+                    "threadId": "t_relnotes", "title": "Release notes for build 2.4", "projectId": "p_assistant",
+                    "projectName": "Assistant", "status": "working", "updatedAt": time.time(),
+                    "summary": "Collecting the changes merged since build 2.3.", "pending": None,
+                    "messages": [{"role": "user", "text": "Draft the release notes for build 2.4", "at": time.time()},
+                                 {"role": "assistant", "text": "On it. Collecting the changes merged since build "
+                                  "2.3 and grouping them into features and fixes.", "at": time.time()}]}
         if re.search(r"\b(calendar|next|meeting)\b", heard, re.I):
             cards.append({"title": "Up next", "body": "Design review at 3:00 PM"})
             if say == DEFAULT_SAY and not actions:

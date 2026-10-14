@@ -43,6 +43,7 @@ struct RootView: View {
 
     var body: some View {
         @Bindable var model = model
+        @Bindable var talk = model.talk
         TabView(selection: $model.tab) {
             Tab("Home", systemImage: "circle.hexagongrid.fill", value: AppTab.home) {
                 NavigationStack(path: $model.homePath) { HomeView().destinations() }
@@ -62,11 +63,17 @@ struct RootView: View {
                 NavigationStack { SettingsView() }
             }
         }
+        .talkAccessory(talk.active && !talk.presented)
         .tint(SamTheme.accent)
         .preferredColorScheme(.dark)
         .sheet(item: $model.sheet) { sheet in
             SheetView(sheet: sheet)
                 .environment(model)
+        }
+        .fullScreenCover(isPresented: $talk.presented) {
+            TalkView()
+                .environment(model)
+                .overlay(alignment: .top) { ToastOverlay().environment(model) }
         }
         .overlay(alignment: .top) { ToastOverlay() }
     }

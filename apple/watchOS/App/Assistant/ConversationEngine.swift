@@ -3,20 +3,27 @@ import Observation
 import os
 import SamRabbitKit
 import SwiftUI
+#if os(watchOS)
 import WatchKit
+#else
+import UIKit
+#endif
 
-private let conversationLog = Logger(subsystem: "com.samrabbit.mobile.watchkitapp", category: "conversation")
+private let conversationLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.samrabbit.mobile",
+                                     category: "conversation")
 
-/// The watch's always-on conversation with SamRabbit: listens, sends what was said to the Mac, plays the answer
-/// as it streams in, and listens again. The rules are `ConversationMachine` (SamRabbitKit, unit-tested); this
-/// carries out its effects with the audio graph (`AudioGraph`), the speech detector and the bridge client, and
-/// feeds it back what happened.
+/// The watch's always-on conversation with SamRabbit, and the iPhone's Talk (the same file is compiled into both
+/// apps): listens, sends what was said to the Mac, plays the answer as it streams in, and listens again. The rules
+/// are `ConversationMachine` (SamRabbitKit, unit-tested); this carries out its effects with the audio graph
+/// (`AudioGraph`), the speech detector and the bridge client, and feeds it back what happened.
 ///
 /// * Turns stream (`application/x-samrabbit-stream`): PCM frames are played as they arrive, `say.delta` is the live
 ///   caption. An older bridge or the Claude fallback answers in one piece; a reply without audio is spoken by the
 ///   watch itself.
-/// * Directly to the Mac, or through the iPhone (`TurnRelay`) when the Mac can't be reached directly.
+/// * Directly to the Mac, or (the watch) through the iPhone (`TurnRelay`) when the Mac can't be reached directly.
+///   The iPhone always goes straight to the Mac with its own token.
 /// * Announcements are polled about every 20 s while the conversation is open and played between turns.
+/// * The iPhone also mutes the microphone (`setMuted`) and takes typed turns (`send(text:)`).
 /// * Nothing heard, said, or any audio is ever logged.
 @MainActor
 @Observable
@@ -36,9 +43,11 @@ final class ConversationEngine {
     @ObservationIgnored private static let stillOrb = UserDefaults.standard.bool(forKey: "SamRabbitStillOrb")
     /// The audio engine runs (the microphone is live). Debug builds show it to the UI tests.
     private(set) var audioRunning = false
+    /// The microphone is muted (the iPhone's mute button): nothing is heard until it is unmuted; replies and
+    /// announcements still play, and the quiet end waits. A new conversation starts unmuted.
+    private(set) var micMuted = false
 
     @ObservationIgnored private let account: BridgeAccount
-    @ObservationIgnored private let link: PhoneLink
     @ObservationIgnored private let graph: AudioGraph
     @ObservationIgnored private var detector = SpeechDetector()
     @ObservationIgnored private var micOpen = false
@@ -51,10 +60,11 @@ final class ConversationEngine {
     @ObservationIgnored var onUnauthorized: (@MainActor () -> Void)?
     /// Called after each turn (the route may have changed, a task may have started).
     @ObservationIgnored var onTurnFinished: (@MainActor () -> Void)?
+    /// Called after every event the conversation handled (the iPhone's Live Activity follows it).
+    @ObservationIgnored var onUpdate: (@MainActor () -> Void)?
 
-    init(account: BridgeAccount, link: PhoneLink) {
+    init(account: BridgeAccount) {
         self.account = account
-        self.link = link
         let idle = UserDefaults.standard.object(forKey: "SamRabbitIdleSeconds") == nil
             ? 120 : max(5, UserDefaults.standard.double(forKey: "SamRabbitIdleSeconds"))
         machine = ConversationMachine(idleTimeout: idle)
@@ -64,6 +74,8 @@ final class ConversationEngine {
         graph.onPlaying = { [weak self] in self?.handle(.playing) }
         graph.onDrained = { [weak self] in self?.handle(.drained) }
         graph.onInterrupted = { [weak self] in self?.handle(.interrupted) }
+        // The iPhone: a call ended and iOS says the audio may go on: the paused conversation continues.
+        graph.onResumable = { [weak self] in self?.resume() }
         graph.onRunning = { [weak self] in self?.audioRunning = $0 }
     }
 
@@ -108,8 +120,22 @@ final class ConversationEngine {
     /// The wrist came up or the app came back to the front.
     func resume() { handle(.resume) }
 
-    /// The app left the screen (the Digital Crown, another app): finish the reply, then pause.
+    /// The app left the screen (the Digital Crown, another app): finish the reply, then pause. (The iPhone's
+    /// conversation goes on in the background instead.)
     func leave() { handle(.background) }
+
+    /// Mutes or unmutes the microphone. Speech being heard when it mutes is dropped.
+    func setMuted(_ on: Bool) {
+        guard on != micMuted, active || !on else { return }
+        micMuted = on
+        detector.reset()
+        if on { level = 0 }
+        handle(.muted(on))
+        if on, machine.phase == .hearing { handle(.discarded) }
+    }
+
+    /// A typed turn (the iPhone's keyboard): sent as `{text}`; a reply on its way or playing is interrupted.
+    func send(text: String) { handle(.typed(text)) }
 
     // MARK: - The machine
 
@@ -120,6 +146,12 @@ final class ConversationEngine {
             conversationLog.info("\(before.rawValue, privacy: .public) -> \(self.machine.phase.rawValue, privacy: .public)")
         }
         for effect in effects { perform(effect) }
+        if micMuted, !machine.phase.inConversation {
+            // Over: the next conversation starts unmuted.
+            micMuted = false
+            _ = machine.handle(.muted(false))
+        }
+        onUpdate?()
     }
 
     private func perform(_ effect: ConversationMachine.Effect) {
@@ -183,12 +215,12 @@ final class ConversationEngine {
         case .stopPlayback:
             graph.stopPlayback()
         case .speak(let text):
-            graph.speak(text)
+            graph.speak(Self.deviceWords(text))
         case .play(let clip):
             // An announcement's clip the watch can't read (an MP3 from the Claude path): its words are said instead.
             if !graph.play(clip: clip) { handle(.clipFailed) }
         case .haptic(let haptic):
-            WKInterfaceDevice.current().play(Self.haptic(haptic))
+            Self.play(haptic)
         case .end(let conversationId):
             if let client = account.client() {
                 Task { _ = try? await client.assistantEnd(conversationId: conversationId) }
@@ -198,8 +230,25 @@ final class ConversationEngine {
         }
     }
 
-    private static func haptic(_ haptic: ConversationMachine.Haptic) -> WKHapticType {
-        switch haptic {
+    /// The conversation's words are the watch's; the iPhone says the few that name the watch about itself.
+    static func deviceWords(_ text: String) -> String {
+        #if os(iOS)
+        switch text {
+        case ConversationMachine.Failure.unauthorized.spoken:
+            "Your Mac no longer accepts this iPhone. Pair it again in SamRabbit's Settings."
+        case ConversationMachine.Failure.unauthorized.shown:
+            "Pair this iPhone again"
+        default:
+            text
+        }
+        #else
+        text
+        #endif
+    }
+
+    private static func play(_ haptic: ConversationMachine.Haptic) {
+        #if os(watchOS)
+        let type: WKHapticType = switch haptic {
         case .start: .start
         case .click: .click
         case .stop: .stop
@@ -207,12 +256,23 @@ final class ConversationEngine {
         case .retry: .retry
         case .notification: .notification
         }
+        WKInterfaceDevice.current().play(type)
+        #else
+        switch haptic {
+        case .start: UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        case .click: UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .stop: UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        case .failure: UINotificationFeedbackGenerator().notificationOccurred(.error)
+        case .retry: UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        case .notification: UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
+        #endif
     }
 
     // MARK: - Listening
 
     private func heard(_ samples: [Int16]) {
-        guard micOpen else { return }
+        guard micOpen, !micMuted else { return }
         for event in detector.feed(samples) { detected(event) }
         if machine.phase == .listening || machine.phase == .hearing { level = detector.level }
     }

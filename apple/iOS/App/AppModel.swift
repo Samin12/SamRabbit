@@ -85,12 +85,16 @@ final class AppModel {
 
     private var refreshLoop: Task<Void, Never>?
     private var routeObserver: (any NSObjectProtocol)?
+    private var lastTurnRefresh: Date?
     let notifications = NotificationController()
     let liveActivities = LiveActivityController()
+    /// The live conversation with SamRabbit (Talk).
+    let talk: TalkModel
 
     init(account: BridgeAccount = .shared) {
         self.account = account
         actions = SamRabbitActions(account: account)
+        talk = TalkModel(account: account)
         pairing = account.isPaired ? account.pairing : nil
         if let cached = SummaryCache.shared.load() {
             summary = cached.summary
@@ -102,6 +106,22 @@ final class AppModel {
                                                                queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.consumePendingRoute() }
         }
+        talk.engine.onUnauthorized = { [weak self] in
+            self?.lastError = .unauthorized
+            self?.handleUnauthorized()
+        }
+        talk.engine.onTurnFinished = { [weak self] in
+            // A turn may have started a task or answered one: refresh, at most every 10 s.
+            guard let self, self.lastTurnRefresh.map({ -$0.timeIntervalSinceNow > 10 }) ?? true else { return }
+            self.lastTurnRefresh = .now
+            Task { await self.refresh() }
+        }
+        #if DEBUG
+        // `-SamRabbitTalk start` (the UI tests, screenshots): Talk opens at launch.
+        if UserDefaults.standard.string(forKey: "SamRabbitTalk") == "start" {
+            Task { @MainActor [weak self] in self?.startTalk() }
+        }
+        #endif
     }
 
     var isPaired: Bool { pairing != nil }
@@ -109,7 +129,10 @@ final class AppModel {
     /// The Mac answered on the last refresh.
     var reachable: Bool { lastError == nil && summary != nil }
 
-    var orbMood: OrbMood { isPaired ? OrbMood.from(summary, reachable: reachable) : .offline }
+    var orbMood: OrbMood {
+        guard isPaired else { return .offline }
+        return talk.active ? .live : OrbMood.from(summary, reachable: reachable)
+    }
 
     /// Why the task areas may be out of date while the rest of the Mac works (nil when the whole Mac
     /// is unreachable: `lastError` says so already).
@@ -391,22 +414,30 @@ final class AppModel {
     /// may open Ask with the microphone on (`ask?listen=1`).
     func handle(url: URL, fromApp: Bool = false) {
         guard let link = AppLink(url: url, fromApp: fromApp) else { return }
+        // Anywhere else in the app: Talk steps aside (the conversation goes on, over the tab bar), and a sheet
+        // waits for it to go.
+        let overTalk = link != .talk && talk.presented
+        if overTalk { talk.minimize() }
+        func present(_ next: AppSheet) { self.present(next, afterTalk: overTalk) }
         switch link {
+        case .talk:
+            // The app's own intent again while talking (the Action Button): like a tap on the orb.
+            if fromApp, talk.active, talk.presented { talk.pressedAgain() } else { startTalk() }
         case .pair(let pairLink):
-            sheet = .pair(pairLink)
+            present(.pair(pairLink))
         case .manualPair:
             tab = .settings
-            sheet = .manualPair
+            present(.manualPair)
         case .compose(let composer, let listen):
             let token = listen ? UUID() : nil
             switch composer {
-            case .ask: sheet = .ask(prefill: "", listen: token)
-            case .note: sheet = .note(prefill: "", listen: token)
-            case .generate: sheet = .generate(prefill: "")
-            case .openOnMac: sheet = .openOnMac(prefill: "")
+            case .ask: present(.ask(prefill: "", listen: token))
+            case .note: present(.note(prefill: "", listen: token))
+            case .generate: present(.generate(prefill: ""))
+            case .openOnMac: present(.openOnMac(prefill: ""))
             }
         case .confirm(let action):
-            sheet = .confirm(action)
+            present(.confirm(action))
         case .thread(let id):
             tab = .tasks
             tasksPath = NavigationPath()
@@ -448,6 +479,37 @@ final class AppModel {
         case .generate(let prompt): sheet = .generate(prefill: prompt)
         case .openOnMac(let app, let url): sheet = .openOnMac(prefill: url ?? app ?? "")
         case .block: break
+        }
+    }
+
+    /// Opens Talk and starts a conversation (the Home button, `samrabbit://talk`, Siri, the Action Button, the
+    /// Talk control and Lock Screen widget). A sheet that is up (a composer, a confirmation) closes first.
+    func startTalk() {
+        guard isPaired else {
+            tab = .settings
+            show(.info, "Pair with your Mac first", detail: "Then you can talk to SamRabbit from here.")
+            return
+        }
+        guard sheet != nil else {
+            talk.start()
+            return
+        }
+        sheet = nil
+        Task {
+            try? await Task.sleep(for: .milliseconds(450)) // the sheet's dismissal first
+            talk.start()
+        }
+    }
+
+    /// Shows a sheet; `afterTalk`: Talk is stepping aside, the sheet comes once it went.
+    private func present(_ next: AppSheet, afterTalk: Bool) {
+        guard afterTalk else {
+            sheet = next
+            return
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            sheet = next
         }
     }
 
