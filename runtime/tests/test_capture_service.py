@@ -5,10 +5,12 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 from sam_runtime.domains.capture import CaptureBridgeClient, CaptureRejected, CaptureService
 from sam_runtime.domains.capture import outcome as lines
+from sam_runtime.domains.capture import service as service_module
 from sam_runtime.storage.announcements import AnnouncementRepository
 from sam_runtime.storage.database import RuntimeDatabase
 
@@ -126,6 +128,49 @@ class CaptureServiceTest(unittest.TestCase):
         self.fake.responses.clear()
         self.clock.now += 60
         self.assertEqual(1, self.service.run_due())
+
+    def test_a_full_outbox_refuses_the_new_note_visibly_and_drops_no_waiting_one(self) -> None:
+        self.assertGreaterEqual(service_module.MAX_OUTBOX, 200, "text is tiny: room for weeks away from the Mac")
+        self.store.clear()
+        with mock.patch.object(service_module, "MAX_OUTBOX", 3):
+            waiting = [self.note(text=f"note number {index}") for index in range(3)]
+            for payload in waiting:
+                self.assertEqual("queued", self.service.submit(payload)["state"])
+            extra = self.note(text="the one that does not fit")
+            view = self.service.submit(extra)
+        self.assertEqual(("failed", "outbox_full"), (view["state"], view["error"]))
+        self.assertIn("outbox full", view["say"])
+        self.assertEqual(3, self.service.pending_count())
+        for payload in waiting:
+            self.assertEqual("queued", self.service.view(payload["captureId"])["state"], "nothing was dropped")
+        self.assertEqual("the one that does not fit", self.service.kept_text(extra["captureId"]),
+                         "the refused note's words are kept on the R1")
+        self.assertEqual(1, self.service.summary()["failed"])
+        self.assertEqual(3, self.service.summary()["queued"])
+
+    def test_a_note_refused_for_good_keeps_its_words_past_later_notes(self) -> None:
+        self.fake.instant = True
+        self.fake.responses["POST /v1/capture"] = (400, {"error": {"code": "invalid_request", "message": "no"}})
+        refused = self.note(text="words that only the R1 has")
+        self.assertEqual("failed", self.service.submit(refused)["state"])
+        self.fake.responses.clear()
+        for _index in range(service_module.MAX_RECENT + 5):
+            self.assertEqual("done", self.service.submit(self.note())["state"])
+        reloaded = self.make_service()
+        self.assertEqual("words that only the R1 has", reloaded.kept_text(refused["captureId"]))
+        self.assertEqual("failed", reloaded.view(refused["captureId"])["state"])
+        self.assertLessEqual(len(reloaded.summary(limit=100)["recent"]), service_module.MAX_RECENT)
+
+    def test_a_bridge_address_off_the_lan_waits_for_pairing_again(self) -> None:
+        self.store.save("http://93.184.216.34:3780", self.fake.token)
+        payload = self.note()
+        view = self.service.submit(payload)
+        self.assertEqual(("queued", lines.QUEUED_UNAUTHORIZED_LINE), (view["state"], view["say"]))
+        self.assertEqual([], self.fake.paths(), "nothing goes off the LAN")
+        self.clock.now += service_module.WAKE_DEBOUNCE_SECONDS + 1
+        self.store.save(self.fake.url, self.fake.token)  # paired again: the store's listener wakes the outbox
+        self.assertEqual(1, self.service.run_due())
+        self.assertEqual("done", self.service.view(payload["captureId"])["state"])
 
     def test_unpaired_r1_keeps_the_note(self) -> None:
         self.store.clear()

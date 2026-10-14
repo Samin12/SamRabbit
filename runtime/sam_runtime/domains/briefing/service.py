@@ -1,10 +1,16 @@
 """The morning briefing on the R1 (CONTRACTS-WAVE8 B4): fetched from the Mac bridge, cached, acted on by tap or
 voice.
 
-* ``sam-briefing`` worker: fetches at start, every 10 minutes from 05:00 to 12:00 in the user's timezone (the
+* ``sam-briefing`` worker: fetches at start, every 10 minutes in the morning (until 12:00 in the user's timezone, the
   journal setting, America/New_York by default) and hourly otherwise; at once after a refresh request (then again
   at +5, +15, +30, +60 s while the Mac rebuilds) and when the bridge answers again after a failure. Failures back
   off 2, 5, 15, 60, 300 s.
+* The quiet hour before the build: the bridge builds the day's brief at 06:40 (retry 06:52), and any request after
+  05:00 with no brief for today makes it build at once (its "lazy" build, for a Mac that was off at 06:40). So the
+  worker never asks the bridge on its own from 05:00 until ``BUILD_TIME`` + 2 min (06:42): a background fetch due
+  in that stretch waits for 06:42, and the first morning fetch is at 06:42 sharp. A tap on refresh and a spoken
+  "read my brief" still ask at once (the user wants it now). A bridge that publishes its own ``buildTime``
+  ("HH:MM", the ``time`` in its briefing.json) moves that stretch with it.
 * Cache: ``provider_settings`` ``briefing.latest`` (the normalized brief, at most 64 KB) and ``briefing.meta``
   (fetch time, last error, the date a ``briefing.ready`` announcement was made). No migration.
 * ``briefing.ready``: one silent announcement per day, for the first brief that has something to do first. The app
@@ -18,8 +24,9 @@ Nothing from the brief is logged (counts, revisions and codes only).
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -41,6 +48,11 @@ META_KEY = "briefing.meta"
 KIND_READY = "briefing.ready"
 MORNING_START_HOUR = 5
 MORNING_END_HOUR = 12
+# The bridge's defaults (samrabbit_briefing.BUILD_TIME, LAZY_AFTER): a request in between makes it build early.
+BUILD_TIME = (6, 40)
+LAZY_AFTER = (5, 0)
+# The first background fetch comes this long after the build time (the bridge's timer ticks every 30 s).
+AFTER_BUILD_SECONDS = 2 * 60.0
 MORNING_INTERVAL_SECONDS = 10 * 60.0
 OTHER_INTERVAL_SECONDS = 60 * 60.0
 UNCONFIGURED_INTERVAL_SECONDS = 5 * 60.0
@@ -51,7 +63,7 @@ STALE_SECONDS = 2 * 60 * 60.0
 WAKE_DEBOUNCE_SECONDS = 30.0
 MAX_CACHE_BYTES = 64 * 1024
 _UNREACHABLE = frozenset({"mac_unreachable", "mac_no_answer", "mac_not_configured", "mac_token_unavailable"})
-_STATE_AFTER = {"draft_reply": "drafted", "make_task": "tasked", "block_time": "blocked", "remind": "snoozed",
+_STATE_AFTER = {"draft_reply": "drafted", "make_task": "tasked", "block_time": "blocked", "remind": "reminded",
                 "done": "done", "dismiss": "dismissed"}
 _SAY = {"draft_reply": "Saved as a draft in Gmail. Open it on your phone to send.",
         "make_task": "Started a T3 task for it.", "block_time": "Blocked time on your calendar.",
@@ -91,7 +103,7 @@ class BriefingService:
         self._brief: dict[str, object] | None = None
         self._meta: dict[str, object] = {}
         self._failures = 0
-        self._next_at = 0.0
+        self._next_at = -1.0  # not scheduled yet: the first worker step plans it (quiet stretch included)
         self._polls: list[float] = []
         self._refresh_requested = False
         self._last_wake = 0.0
@@ -127,7 +139,7 @@ class BriefingService:
             if now - self._last_wake < WAKE_DEBOUNCE_SECONDS:
                 return
             self._last_wake = now
-            self._next_at = now
+            self._next_at = self._background_at(now)
             self._wake.notify_all()
 
     # ------------------------------------------------------------------ API
@@ -180,13 +192,17 @@ class BriefingService:
         except BridgeCallFailure as failure:
             self._record_failure(failure.code)
             return False
-        brief = model.normalize(raw)
-        status = str((raw.get("briefing") if isinstance(raw.get("briefing"), dict) else raw).get("status") or "")
+        brief = model.normalize(raw, self._zone())
+        body = raw.get("briefing") if isinstance(raw.get("briefing"), dict) else raw
+        status = model.flat(body.get("status"), 16)
+        build_time = _clock_setting(body.get("buildTime"))
         now = self._clock()
         with self._lock:
             if brief is not None:
                 self._brief = brief
             self._meta.update({"fetchedAt": now, "error": None, "status": status or None})
+            if build_time is not None:
+                self._meta["buildTime"] = f"{build_time[0]:02d}:{build_time[1]:02d}"
             self._failures = 0
             self._save_locked()
         if brief is not None:
@@ -205,6 +221,17 @@ class BriefingService:
             self._next_at = self._clock()
             self._wake.notify_all()
         return {"status": "refreshing"}
+
+    def fetch_soon(self) -> None:
+        """The user asked for the brief (by voice) and the R1 has none for today: ask the Mac now, even in the quiet
+        stretch before its build time (then the bridge builds one at once, which is what they want)."""
+        if not self._client.configured():
+            return
+        with self._wake:
+            now = self._clock()
+            if self._next_at < 0 or self._next_at > now:
+                self._next_at = now
+            self._wake.notify_all()
 
     def act(self, item_id: str, action: object) -> dict[str, object]:
         """One tap (or a voice confirm) on an item: ``{ok, itemId, action, state, say, open?}``."""
@@ -228,9 +255,11 @@ class BriefingService:
                                                      "That didn't work. Try again from your phone.")
             return {"ok": False, "itemId": item_id, "action": kind, "state": item.get("state"), "error": failure.code,
                     "say": message}
-        state = result.get("state") if isinstance(result.get("state"), str) and result["state"] in model.STATES \
+        answered = result.get("item") if isinstance(result.get("item"), dict) else result
+        state = model.state(answered.get("state")) if isinstance(answered.get("state"), str) \
             else _STATE_AFTER.get(kind, str(item.get("state") or "open"))
-        say = _SAY.get(kind, "Done.")
+        inner = result.get("result") if isinstance(result.get("result"), dict) else {}
+        say = model.flat(inner.get("say"), 160) or _SAY.get(kind, "Done.")
         view: dict[str, object] = {"ok": result.get("ok") is not False, "itemId": item_id, "action": kind,
                                    "state": state, "say": say}
         if kind == "open":
@@ -250,6 +279,8 @@ class BriefingService:
         """One worker step (refresh request, a due fetch); True when it fetched. Used by the worker and tests."""
         now = self._clock()
         with self._lock:
+            if self._next_at < 0:
+                self._next_at = self._background_at(now)
             refresh = self._refresh_requested
             self._refresh_requested = False
             due = now >= self._next_at or any(at <= now for at in self._polls)
@@ -266,14 +297,16 @@ class BriefingService:
             return False
         ok = self.fetch_once()
         with self._lock:
+            now = self._clock()
             if ok:
-                self._next_at = self._clock() + self._interval()
+                wanted = now + self._interval()
             elif self._meta.get("error") == "mac_not_configured":
-                self._next_at = self._clock() + UNCONFIGURED_INTERVAL_SECONDS
+                wanted = now + UNCONFIGURED_INTERVAL_SECONDS
             elif self._meta.get("error") == "bridge_outdated":
-                self._next_at = self._clock() + self._interval()  # an old bridge: no fast retries
+                wanted = now + self._interval()  # an old bridge: no fast retries
             else:
-                self._next_at = self._clock() + min(self._interval(), backoff_seconds(self._failures))
+                wanted = now + min(self._interval(), backoff_seconds(self._failures))
+            self._next_at = self._background_at(wanted)
         return ok
 
     def _run(self) -> None:
@@ -292,13 +325,39 @@ class BriefingService:
 
     def _kick(self) -> None:
         with self._wake:
-            if self._next_at > self._clock():
-                self._next_at = self._clock()
+            now = self._clock()
+            soon = self._background_at(now)
+            if self._next_at > soon:
+                self._next_at = soon
                 self._wake.notify_all()
 
     def _interval(self) -> float:
         hour = local_datetime(self._clock(), self._zone()).hour
         return MORNING_INTERVAL_SECONDS if MORNING_START_HOUR <= hour < MORNING_END_HOUR else OTHER_INTERVAL_SECONDS
+
+    def _background_at(self, wanted: float) -> float:
+        """``wanted``, or the end of the quiet stretch (05:00 to the build time + 2 min, local) when it falls in it:
+        a fetch there would make the bridge build the day's brief early ("lazy") and skip its 06:40 build. Once the
+        R1 has that day's brief (a refresh he asked for), the bridge has one too: no quiet stretch then."""
+        zone = self._zone()
+        local = local_datetime(wanted, zone)
+        brief = self._brief  # callers may hold the lock (a plain read needs none)
+        if brief is not None and brief.get("date") == local.date().isoformat():
+            return wanted
+        build = self._build_time()
+        quiet_from = local.replace(hour=LAZY_AFTER[0], minute=LAZY_AFTER[1], second=0, microsecond=0)
+        quiet_until = local.replace(hour=build[0], minute=build[1], second=0, microsecond=0) + \
+            timedelta(seconds=AFTER_BUILD_SECONDS)
+        if quiet_from <= local < quiet_until:
+            return quiet_until.timestamp()
+        return wanted
+
+    def _build_time(self) -> tuple[int, int]:
+        # Callers may hold the lock (a dict read needs none).
+        published = _clock_setting(self._meta.get("buildTime"))
+        if published is None or published < LAZY_AFTER:
+            return BUILD_TIME
+        return published
 
     def _zone(self):  # noqa: ANN202 - tzinfo
         try:
@@ -362,6 +421,14 @@ class BriefingService:
         if self._brief is not None and len(json.dumps(self._brief, ensure_ascii=False)) <= MAX_CACHE_BYTES:
             self._latest.save(self._brief)
         self._meta_setting.save(self._meta)
+
+
+def _clock_setting(value: object) -> tuple[int, int] | None:
+    """``"06:40"`` as (6, 40); None for anything else."""
+    match = re.match(r"^(\d{1,2}):(\d{2})$", value.strip()) if isinstance(value, str) else None
+    if match is None or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _iso(epoch: float) -> str:

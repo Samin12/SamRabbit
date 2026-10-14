@@ -3,8 +3,9 @@
 * ``POST /v1/capture`` ``{captureId, text, capturedAt, durationMs?, trigger?}`` → ``200 {captureId, state, say,
   kind?, outcome?, suggestion?}`` with ``state`` done | sent | queued | failed. The note is stored before the Mac
   is tried, so an answer of ``queued`` means it is safe on the R1.
-* ``GET /v1/capture/<captureId>`` → the same view (404 when unknown).
-* ``GET /v1/captures`` → ``{queued, sending, recent: [...]}`` (states and lines only, no transcripts).
+* ``GET /v1/capture/<captureId>`` → the same view (404 when unknown), plus ``text`` for a note the R1 could not hand
+  over for good (outbox full, refused by the bridge): those words exist nowhere else.
+* ``GET /v1/captures`` → ``{queued, sending, failed, recent: [...]}`` (states and lines only, no transcripts).
 """
 
 from __future__ import annotations
@@ -39,8 +40,11 @@ class CaptureRoutes:
         view = self._service.view(match.group(1))
         if view is None:
             request.respond_json(404, {"error": {"code": "capture_not_found", "message": "No such voice note."}})
-        else:
-            request.respond_json(200, view)
+            return True
+        kept = self._service.kept_text(match.group(1))
+        if kept:
+            view = dict(view, text=kept)
+        request.respond_json(200, view)
         return True
 
     def handle_post(self, request: "RouteRequest", pairing: PairingAuthority | None = None) -> bool:

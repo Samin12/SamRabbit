@@ -4,8 +4,13 @@ Shape kept in the cache and served to the app::
 
     {date, revision, status, headline, spoken, updatedAt, needsYou, footer,
      sections: [{id: do_first|today|agents|fyi, title, items: [Item]}]}
-    Item = {id, kind, section, title, why, suggestion?, account?, time?, conflict?, threadId?, state,
+    Item = {id, kind, section, title, why, suggestion?, account?, time?, startsAt?, conflict?, threadId?, state,
             actions: [{type, label}]}
+
+Read from the bridge's real ``GET /v1/briefing`` view (``tests/bridge_briefing_fixture.json``): ``generatedAt`` is
+the build time, section ``doFirst``, events carry ``startsAt``/``endsAt`` (``time`` is made from ``startsAt`` in the
+user's zone), an agent item points at its T3 thread as ``itemId: "t3:<threadId>"`` with ``source: "t3"``, and Remind
+me leaves an item ``reminded``. Fields the R1 doesn't show (the model's draft text, urls, ``can``) are dropped.
 
 Limits (CONTRACTS-WAVE8 A3): Do first ≤ 3, Today ≤ 5, Agents ≤ 3, FYI ≤ 3, ≤ 12 items. The R1 offers only these
 actions: Draft reply (a Gmail DRAFT, never sent), Make task, Block time, Remind me, Done, Dismiss, Open. Anything
@@ -14,6 +19,7 @@ else the bridge lists (approve, send, …) is dropped here, so no R1 surface can
 
 from __future__ import annotations
 
+from datetime import datetime, tzinfo
 import re
 
 SECTIONS = (("do_first", "Do first", 3), ("today", "Today", 5), ("agents", "Agents", 3), ("fyi", "FYI", 3))
@@ -27,7 +33,9 @@ _ACTION_ALIASES = {"draft_reply": "draft_reply", "draft": "draft_reply", "make_t
 _SECTION_ALIASES = {"do_first": "do_first", "dofirst": "do_first", "first": "do_first", "today": "today",
                     "events": "today", "calendar": "today", "agents": "agents", "agent": "agents", "fyi": "fyi"}
 CLOSED_STATES = frozenset({"done", "dismissed"})
-STATES = frozenset({"open", "drafted", "tasked", "blocked", "snoozed", "done", "dismissed"})
+STATES = frozenset({"open", "drafted", "tasked", "blocked", "reminded", "done", "dismissed"})
+# Older words for the same states (an R1 cache from before, other bridges).
+_STATE_ALIASES = {"snoozed": "reminded", "remind": "reminded", "draft": "drafted", "task": "tasked"}
 _ID = re.compile(r"^[A-Za-z0-9._:\-]{1,80}$")
 
 
@@ -46,18 +54,29 @@ def section_id(value: object) -> str | None:
     return _SECTION_ALIASES.get(key) or _SECTION_ALIASES.get(re.sub(r"[^a-z_]", "", str(value or "").lower()))
 
 
-def normalize(raw: object) -> dict[str, object] | None:
-    """The bridge's brief (wrapped in ``briefing`` or not; sections as a list, a map or a flat item list)."""
+def state(value: object) -> str:
+    """A bridge or cached item state as one of ``STATES`` (unknown words: open)."""
+    word = flat(value, 16).lower()
+    word = _STATE_ALIASES.get(word, word)
+    return word if word in STATES else "open"
+
+
+def normalize(raw: object, zone: tzinfo | None = None) -> dict[str, object] | None:
+    """The bridge's brief (wrapped in ``briefing`` or not; sections as a list, a map or a flat item list), or None
+    when it holds no brief (``available: false`` while the Mac is still waiting for its build time, building the
+    first one, failed or off). ``zone``: the user's timezone, for event times."""
     if not isinstance(raw, dict):
         return None
     brief = raw.get("briefing") if isinstance(raw.get("briefing"), dict) else raw
+    if brief.get("available") is False:
+        return None
     date = flat(brief.get("date"), 10)
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
         return None
     grouped: dict[str, list[dict[str, object]]] = {key: [] for key, _title, _limit in SECTIONS}
     for section, items in _raw_sections(brief):
         for item in items:
-            normalized = _item(item, section)
+            normalized = _item(item, section, zone)
             if normalized is not None:
                 grouped[str(normalized["section"])].append(normalized)
     sections = []
@@ -79,7 +98,7 @@ def normalize(raw: object) -> dict[str, object] | None:
         "status": flat(brief.get("status"), 16) or "ready",
         "headline": flat(brief.get("headline"), 90),
         "spoken": flat(brief.get("spoken"), 400),
-        "updatedAt": flat(brief.get("updatedAt") or brief.get("builtAt"), 40) or None,
+        "updatedAt": flat(brief.get("generatedAt") or brief.get("updatedAt") or brief.get("builtAt"), 40) or None,
         "needsYou": int(needs) if isinstance(needs, int) and not isinstance(needs, bool) and needs >= 0 else open_first,
         "footer": flat(brief.get("footer"), 120),
         "sections": sections,
@@ -152,7 +171,7 @@ def _raw_sections(brief: dict[str, object]) -> list[tuple[str | None, list[objec
     return found
 
 
-def _item(raw: object, section: str | None) -> dict[str, object] | None:
+def _item(raw: object, section: str | None, zone: tzinfo | None = None) -> dict[str, object] | None:
     if not isinstance(raw, dict):
         return None
     item_id = flat(raw.get("id"), 80)
@@ -171,10 +190,9 @@ def _item(raw: object, section: str | None) -> dict[str, object] | None:
         actions.append({"type": kind, "label": label or ACTION_LABELS[kind]})
         if len(actions) == 2:
             break
-    state = flat(raw.get("state"), 16).lower() or "open"
     item: dict[str, object] = {
         "id": item_id, "kind": flat(raw.get("kind"), 16) or "email", "section": where, "title": title,
-        "why": flat(raw.get("why"), 140), "state": state if state in STATES else "open", "actions": actions,
+        "why": flat(raw.get("why"), 140), "state": state(raw.get("state")), "actions": actions,
     }
     for key, limit in (("suggestion", 120), ("account", 16), ("time", 24)):
         value = flat(raw.get(key), limit)
@@ -183,13 +201,40 @@ def _item(raw: object, section: str | None) -> dict[str, object] | None:
     starts = flat(raw.get("startsAt") or raw.get("start"), 40)
     if starts:
         item["startsAt"] = starts
+        if "time" not in item and zone is not None:
+            clock = clock_time(starts, zone)
+            if clock:
+                item["time"] = clock
     if raw.get("conflict") is True:
         item["conflict"] = True
-    source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
-    thread = raw.get("threadId") or source.get("threadId")
-    if isinstance(thread, str) and _ID.match(thread) and item["kind"] == "agent":
+    thread = t3_thread(raw)
+    if thread is not None and item["kind"] == "agent":
         item["threadId"] = thread
     return item
+
+
+def t3_thread(raw: dict[str, object]) -> str | None:
+    """The T3 thread an agent item is about: the bridge's inbox id ``t3:<threadId>`` (source ``t3``), or a
+    ``threadId`` of its own (``source.threadId`` too). Claude and Codex sessions have none."""
+    source = raw.get("source")
+    thread = raw.get("threadId") or (source.get("threadId") if isinstance(source, dict) else None)
+    inbox_id = raw.get("itemId")
+    if not thread and isinstance(inbox_id, str) and inbox_id.startswith("t3:"):
+        thread = inbox_id[3:]
+    return thread if isinstance(thread, str) and _ID.match(thread) else None
+
+
+def clock_time(value: str, zone: tzinfo) -> str:
+    """``2026-10-14T15:00:00-04:00`` as "3:00 PM" in ``zone`` ("" for anything else, all-day dates included)."""
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if moment.tzinfo is None or "T" not in value:
+        return ""
+    local = moment.astimezone(zone)
+    hour = local.hour % 12 or 12
+    return f"{hour}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"
 
 
 def _section_for_kind(kind: object) -> str | None:

@@ -10,6 +10,11 @@ done. Outcomes that arrive after the app was answered are published as one silen
 
 The capture id (a UUID the app makes when recording starts) is the idempotency key end to end: the app may send the
 same note again, the bridge keeps one note per id. Transcripts are never logged (ids, states and lengths only).
+
+Words are never dropped quietly: the outbox holds up to ``MAX_OUTBOX`` notes and never evicts one to make room (a
+note past that is refused with a visible "R1 outbox full" failure), and a note the R1 could not hand over for good
+(the outbox was full, the bridge refused it) keeps its words in ``capture.recent`` (``GET /v1/capture/<id>``
+answers them as ``text``), ahead of other finished notes when that list is trimmed.
 """
 
 from __future__ import annotations
@@ -35,7 +40,8 @@ from .client import CaptureBridgeClient, permanent
 OUTBOX_KEY = "capture.outbox"
 RECENT_KEY = "capture.recent"
 KIND_ROUTED = "capture.routed"
-MAX_OUTBOX = 50
+# Text is small (≤ 8,000 characters, usually a few hundred): room for weeks away from the Mac.
+MAX_OUTBOX = 200
 MAX_RECENT = 30
 MAX_TEXT_CHARS = 8000
 INLINE_WAIT_SECONDS = 8
@@ -43,10 +49,11 @@ FOLLOW_WAIT_SECONDS = 8
 FOLLOW_FOR_SECONDS = 10 * 60.0
 BACKOFF_SECONDS = (2, 5, 15, 60, 300)
 # A bridge that refuses the R1 (token, outdated route, not paired) is not retried fast; a re-pairing wakes it.
-SLOW_CODES = frozenset({"mac_unauthorized", "mac_token_unavailable", "bridge_outdated", "mac_not_configured"})
+SLOW_CODES = frozenset({"mac_unauthorized", "mac_token_unavailable", "bridge_outdated", "mac_not_configured",
+                        "mac_not_local", "mac_url_invalid"})
 # Failures a bridge answering again (or a re-pairing) can fix: those notes go at once on a wake.
 WAKE_CODES = frozenset({"mac_unreachable", "mac_no_answer", "mac_not_configured", "mac_token_unavailable",
-                        "mac_unauthorized"})
+                        "mac_unauthorized", "mac_not_local", "mac_url_invalid"})
 TRIGGERS = frozenset({"triple_press", "hold", "tap", "debug"})
 WAKE_DEBOUNCE_SECONDS = 5.0
 _CAPTURE_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -107,6 +114,9 @@ class FinishedCapture:
     outcome: dict[str, object] | None = None
     suggestion: str | None = None
     finished_at: float = field(default_factory=time.time)
+    # The words of a note the R1 could not hand over for good (it is the only copy); None otherwise.
+    text: str | None = None
+    error: str | None = None
 
     def view(self) -> dict[str, object]:
         value: dict[str, object] = {"captureId": self.capture_id, "state": self.state, "say": self.say,
@@ -115,6 +125,8 @@ class FinishedCapture:
             value["outcome"] = self.outcome
         if self.suggestion:
             value["suggestion"] = self.suggestion
+        if self.error:
+            value["error"] = self.error
         return value
 
     @staticmethod
@@ -124,11 +136,13 @@ class FinishedCapture:
         outcome = record.get("outcome") if isinstance(record.get("outcome"), dict) else None
         return FinishedCapture(str(record["captureId"]), str(record.get("state") or "done"),
                                str(record.get("say") or ""), str(record.get("kind") or ""), outcome,
-                               _text(record.get("suggestion")), _number(record.get("finishedAt")) or time.time())
+                               _text(record.get("suggestion")), _number(record.get("finishedAt")) or time.time(),
+                               _text(record.get("text")), _text(record.get("error")))
 
     def record(self) -> dict[str, object]:
         return {"captureId": self.capture_id, "state": self.state, "say": self.say, "kind": self.kind,
-                "outcome": self.outcome, "suggestion": self.suggestion, "finishedAt": self.finished_at}
+                "outcome": self.outcome, "suggestion": self.suggestion, "finishedAt": self.finished_at,
+                "text": self.text, "error": self.error}
 
 
 class CaptureService:
@@ -192,16 +206,20 @@ class CaptureService:
             if done is not None:
                 return done.view()
             existing = self._outbox.get(capture.capture_id)
-            if existing is None:
-                self._trim_outbox_locked()
+            full = existing is None and len(self._outbox) >= MAX_OUTBOX
+            if existing is not None:
+                capture = existing
+            elif not full:
                 capture.next_at = self._clock()
                 self._outbox[capture.capture_id] = capture
                 if not self._save_locked():
                     _LOG.warning("capture.outbox_unsaved", extra={"captureId": capture.capture_id})
                 _LOG.info("capture.received", extra={"captureId": capture.capture_id, "chars": len(capture.text),
                                                      "trigger": capture.trigger})
-            else:
-                capture = existing
+        if full:
+            _LOG.warning("capture.outbox_full", extra={"captureId": capture.capture_id, "queued": MAX_OUTBOX})
+            return self._finish(capture, "failed", lines.OUTBOX_FULL_LINE.format(count=MAX_OUTBOX), None,
+                                announce=False, keep_text=True, error="outbox_full")
         if not self._claim(capture.capture_id):
             return self.view(capture.capture_id) or {"captureId": capture.capture_id, "state": "queued",
                                                      "say": lines.QUEUED_LINE}
@@ -220,13 +238,21 @@ class CaptureService:
             pending = self._outbox.get(key)
             return None if pending is None else self._pending_view(pending)
 
+    def kept_text(self, capture_id: str) -> str | None:
+        """The words of a note the R1 could not hand over (outbox full, refused for good), else None."""
+        self._load()
+        with self._lock:
+            done = self._finished(capture_id.lower())
+            return done.text if done is not None else None
+
     def summary(self, limit: int = 10) -> dict[str, object]:
         self._load()
         with self._lock:
             queued = sum(1 for item in self._outbox.values() if item.state == "queued")
             sending = sum(1 for item in self._outbox.values() if item.state == "sent")
+            failed = sum(1 for item in self._recent if item.state == "failed")
             recent = [item.view() for item in reversed(self._recent[-max(1, min(limit, MAX_RECENT)):])]
-        return {"queued": queued, "sending": sending, "recent": recent}
+        return {"queued": queued, "sending": sending, "failed": failed, "recent": recent}
 
     def run_due(self) -> int:
         """Sends or follows every note that is due; returns how many finished. Used by the worker and tests."""
@@ -263,7 +289,8 @@ class CaptureService:
         except BridgeCallFailure as failure:
             if permanent(failure):
                 _LOG.warning("capture.refused", extra={"captureId": capture.capture_id, "code": failure.code})
-                return self._finish(capture, "failed", lines.FAILED_LINE, None, announce=not inline)
+                return self._finish(capture, "failed", lines.FAILED_LINE, None, announce=not inline, keep_text=True,
+                                    error=failure.code)
             return self._requeue(capture, failure.code)
         with self._lock:
             capture.state = "sent"
@@ -316,17 +343,19 @@ class CaptureService:
         return self._finish(capture, state, lines.line(result), result, announce=announce)
 
     def _finish(self, capture: PendingCapture, state: str, say: str, result: dict[str, object] | None, *,
-                announce: bool) -> dict[str, object]:
+                announce: bool, keep_text: bool = False, error: str | None = None) -> dict[str, object]:
         suggestion = None
         if result is not None:
             raw = result.get("suggestion")
             suggestion = lines.flat(raw.get("label"), 60) if isinstance(raw, dict) else (lines.flat(raw, 60) or None)
         done = FinishedCapture(capture.capture_id, state, say, lines.kind(result or {}),
-                               lines.app_outcome(result or {}), suggestion or None, self._clock())
+                               lines.app_outcome(result or {}), suggestion or None, self._clock(),
+                               capture.text if keep_text else None, error)
         with self._lock:
             self._outbox.pop(capture.capture_id, None)
-            self._recent = [item for item in self._recent if item.capture_id != capture.capture_id][-(MAX_RECENT - 1):]
+            self._recent = [item for item in self._recent if item.capture_id != capture.capture_id]
             self._recent.append(done)
+            self._trim_recent_locked()
             self._save_locked()
         _LOG.info("capture.finished", extra={"captureId": capture.capture_id, "state": state, "kind": done.kind})
         if announce and state in ("done", "failed"):
@@ -393,11 +422,11 @@ class CaptureService:
             self._in_flight.discard(capture_id)
             self._wake.notify_all()
 
-    def _trim_outbox_locked(self) -> None:
-        while len(self._outbox) >= MAX_OUTBOX:
-            oldest = min(self._outbox.values(), key=lambda item: item.created_at)
-            self._outbox.pop(oldest.capture_id, None)
-            _LOG.warning("capture.outbox_full_dropped", extra={"captureId": oldest.capture_id})
+    def _trim_recent_locked(self) -> None:
+        """At most ``MAX_RECENT`` finished notes; the oldest without kept words goes first."""
+        while len(self._recent) > MAX_RECENT:
+            index = next((at for at, item in enumerate(self._recent) if item.text is None), 0)
+            self._recent.pop(index)
 
     def _load(self) -> None:
         with self._lock:
@@ -418,7 +447,7 @@ class CaptureService:
                 item = FinishedCapture.from_record(record)
                 if item is not None and item.capture_id not in known:
                     self._recent.append(item)
-            self._recent = self._recent[-MAX_RECENT:]
+            self._trim_recent_locked()
 
     def _save_locked(self) -> bool:
         if not self._loaded:

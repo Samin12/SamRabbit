@@ -20,10 +20,10 @@ from sam_runtime.domains.heptabase_journal.client import HttpTransport
 SUBMIT_TIMEOUT_SECONDS = 8.0
 MAX_WAIT_SECONDS = 10
 SOURCE = "r1"
-# Bridge answers that will never be accepted however often the note is sent again.
+# Bridge answers that will never be accepted however often the note is sent again. (A bridge address that is not
+# on the LAN or not valid is fixed by pairing again: those notes wait for it.)
 PERMANENT_CODES = frozenset({"invalid_request", "invalid_json", "invalid_capture_id", "capture_conflict",
-                             "body_too_large", "text_too_long", "unsupported_media_type", "mac_not_local",
-                             "mac_url_invalid"})
+                             "body_too_large", "text_too_long", "unsupported_media_type"})
 
 
 class CaptureBridgeClient:

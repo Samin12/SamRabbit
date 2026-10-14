@@ -34,6 +34,7 @@ class CaptureBriefingRoutesTest(unittest.TestCase):
         database.migrate()
         self.fake = FakeCaptureBriefingBridge()
         self.fake.brief = sample_brief(datetime.now(timezone.utc).date().isoformat())
+        self.fake.zone = timezone.utc
         self.store, _mac = make_mac(database)
         self.store.save(self.fake.url, self.fake.token)
         announcements = AnnouncementRepository(database)
@@ -86,6 +87,19 @@ class CaptureBriefingRoutesTest(unittest.TestCase):
         status, error = self.call("POST", "/v1/capture", {**note, "captureId": "x"})
         self.assertEqual((400, "invalid_request"), (status, error["error"]["code"]))
         self.assertEqual(404, self.call("GET", f"/v1/capture/{uuid.uuid4()}")[0])
+
+    def test_a_note_the_mac_refused_for_good_can_still_be_read_back_on_the_device(self) -> None:
+        self.fake.responses["POST /v1/capture"] = (400, {"error": {"code": "invalid_request", "message": "no"}})
+        capture_id = str(uuid.uuid4())
+        status, view = self.call("POST", "/v1/capture", {"captureId": capture_id, "text": "only the R1 has these words",
+                                                         "capturedAt": "2026-10-14T09:41:07-04:00"})
+        self.assertEqual((200, "failed", "invalid_request"), (status, view["state"], view["error"]))
+        self.assertNotIn("text", view)
+        status, view = self.call("GET", f"/v1/capture/{capture_id}")
+        self.assertEqual((200, "only the R1 has these words"), (status, view["text"]))
+        status, summary = self.call("GET", "/v1/captures")
+        self.assertEqual(1, summary["failed"])
+        self.assertNotIn("only the R1", json.dumps(summary), "the list never carries words")
 
     def test_briefing_round_trip(self) -> None:
         self.briefing.fetch_once()

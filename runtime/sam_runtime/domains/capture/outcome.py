@@ -19,6 +19,8 @@ QUEUED_UNAUTHORIZED_LINE = "On the R1 until the Mac bridge is connected again."
 QUEUED_UNPAIRED_LINE = "On the R1 until you connect your Mac."
 SENT_LINE = "Sent to your Mac."
 FAILED_LINE = "Couldn't save that note."
+# The R1 never drops a waiting note to make room: a new one is refused, visibly.
+OUTBOX_FULL_LINE = "R1 outbox full ({count} notes). Connect your Mac to send them."
 
 
 def flat(value: object, limit: int = MAX_LINE) -> str:
@@ -71,7 +73,8 @@ def line(result: dict[str, object]) -> str:
 
 def queued_line(code: str) -> str:
     return {"bridge_outdated": QUEUED_OUTDATED_LINE, "mac_unauthorized": QUEUED_UNAUTHORIZED_LINE,
-            "mac_token_unavailable": QUEUED_UNAUTHORIZED_LINE,
+            "mac_token_unavailable": QUEUED_UNAUTHORIZED_LINE, "mac_not_local": QUEUED_UNAUTHORIZED_LINE,
+            "mac_url_invalid": QUEUED_UNAUTHORIZED_LINE,
             "mac_not_configured": QUEUED_UNPAIRED_LINE}.get(code, QUEUED_LINE)
 
 
