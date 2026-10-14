@@ -524,10 +524,17 @@ final class AudioGraph {
         let seconds = Double(buffer.frameLength) / max(1, buffer.format.sampleRate)
         expectedEnd = max(expectedEnd, .now).addingTimeInterval(seconds)
         levels.append((scheduledFrames, Self.level(of: buffer)))
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.played(current) } }
-        }
+        Self.schedule(buffer, on: player) { [weak self] in self?.played(current) }
         if !player.isPlaying { player.play() }
+    }
+
+    /// AVFoundation calls the completion back on its own queue. Nonisolated, so the closure doesn't inherit the main
+    /// actor: Swift 6 traps a main-actor closure that runs anywhere else (it ended every reply on a real iPhone).
+    private nonisolated static func schedule(_ buffer: AVAudioPCMBuffer, on player: AVAudioPlayerNode,
+                                             played: @escaping @MainActor @Sendable () -> Void) {
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { played() } }
+        }
     }
 
     private func played(_ generation: Int) {
@@ -624,8 +631,15 @@ final class MicrophoneInput: ConversationInput {
         guard format.sampleRate > 0, format.channelCount > 0, let tap = TapConverter(from: format) else {
             throw AudioGraph.StartFailure.engine("input format")
         }
+        Self.tap(input, format: format, converter: tap, deliver: deliver)
+    }
+
+    /// The tap runs on the audio thread. Nonisolated, so its closure doesn't inherit the main actor: Swift 6 traps a
+    /// main-actor closure that runs anywhere else (Talk crashed the moment the microphone opened on a real iPhone).
+    private nonisolated static func tap(_ input: AVAudioInputNode, format: AVAudioFormat, converter: TapConverter,
+                                        deliver: @escaping @MainActor @Sendable ([Int16]) -> Void) {
         input.installTap(onBus: 0, bufferSize: AVAudioFrameCount(format.sampleRate / 10), format: format) { buffer, _ in
-            guard let samples = tap.convert(buffer), !samples.isEmpty else { return }
+            guard let samples = converter.convert(buffer), !samples.isEmpty else { return }
             // In order (the detector reads a continuous stream).
             DispatchQueue.main.async { MainActor.assumeIsolated { deliver(samples) } }
         }
