@@ -15,9 +15,9 @@ import java.util.function.BooleanSupplier;
 
 /**
  * One dictation at a time: microphone → runtime speech-to-text call → words. Streams the running
- * text (partial + final) to the listener and ends with the settled words. Limits: 60 s of
- * listening, auto-stop after ~4.7 s of quiet once something was said (server VAD), and after 8 s
- * when nothing was said. Never runs while a voice session is live (the shared microphone and
+ * text (partial + final) to the listener and ends with the settled words. Default limits
+ * ({@link DictationMachine.Limits#DEFAULT}): 60 s of listening, auto-stop after ~4.7 s of quiet once
+ * something was said (server VAD), and after 8 s when nothing was said. Never runs while a voice session is live (the shared microphone and
  * the assistant would hear the dictation): {@link #start()} refuses, and a voice session that
  * starts mid-dictation stops it. Main thread only.
  */
@@ -33,11 +33,14 @@ public final class DictationSession {
         void onDictationEnded(String words, DictationMachine.Stop reason, String message);
     }
 
+    /** Dictations listening or finishing right now, in any sheet or voice note (main thread). */
+    private static int activeCount;
+
     private final Context context;
     private final BooleanSupplier voiceSessionLive;
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final DictationMachine machine = new DictationMachine();
+    private final DictationMachine machine;
     private final DictationTranscript transcript = new DictationTranscript();
     private final DictationEvents events = new DictationEvents();
     private final Runnable tick = this::tick;
@@ -45,11 +48,24 @@ public final class DictationSession {
     private DictationPeer peer;
     private String failure = "";
     private String lastText = "";
+    private boolean counted;
 
     public DictationSession(Context context, BooleanSupplier voiceSessionLive, Listener listener) {
+        this(context, voiceSessionLive, listener, DictationMachine.Limits.DEFAULT);
+    }
+
+    /** A dictation with its own limits (a voice note listens longer and stops sooner after the words). */
+    public DictationSession(Context context, BooleanSupplier voiceSessionLive, Listener listener,
+                            DictationMachine.Limits limits) {
         this.context = context.getApplicationContext();
         this.voiceSessionLive = voiceSessionLive;
         this.listener = listener;
+        this.machine = new DictationMachine(limits);
+    }
+
+    /** True while any dictation holds the microphone (the screen stays on meanwhile). */
+    public static boolean anyActive() {
+        return activeCount > 0;
     }
 
     public DictationMachine.Phase phase() {
@@ -117,6 +133,10 @@ public final class DictationSession {
             }
         });
         listener.onDictationPhase(machine.phase());
+        if (!counted) {
+            counted = true;
+            activeCount++;
+        }
         peer.start();
         main.postDelayed(tick, TICK_MS);
         Log.i(LOG_TAG, "dictation started");
@@ -221,6 +241,10 @@ public final class DictationSession {
     }
 
     private void release() {
+        if (counted) {
+            counted = false;
+            activeCount = Math.max(0, activeCount - 1);
+        }
         main.removeCallbacks(tick);
         if (peer != null) {
             peer.close();

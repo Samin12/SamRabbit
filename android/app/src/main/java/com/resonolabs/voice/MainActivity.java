@@ -9,9 +9,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.database.ContentObserver;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -20,6 +24,8 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 
 import com.resonolabs.ui.power.DisplayPolicy;
+import com.resonolabs.ui.power.IdleScreenPolicy;
+import com.resonolabs.ui.power.SideButtonSetting;
 import com.resonolabs.runtime.host.RuntimeHealthClient;
 import com.resonolabs.runtime.host.RuntimeManagementClient;
 import com.resonolabs.runtime.host.RuntimeService;
@@ -39,6 +45,39 @@ public final class MainActivity extends Activity {
     /** Cold start through the side-button alias: start Voice once the runtime answers. */
     private boolean sideButtonStartPending;
     private boolean screenOffRegistered;
+    /** Owns FLAG_KEEP_SCREEN_ON: the screen goes off after 10 min with nothing going on. */
+    private IdleScreenPolicy idle;
+    private boolean resumed;
+    /** A voice-note gesture that arrived before HOME was resumed (the mic needs a TOP process). */
+    private String voiceNotePending;
+    private long voiceNotePendingAt;
+    /** A pending note older than this is dropped (HOME never came to the front in time). */
+    private static final long NOTE_PENDING_MAX_MS = 6_000L;
+    /** Cold start through the hold alias: start the note once the runtime answers. */
+    private boolean noteAfterRuntime;
+    private boolean theaterRegistered;
+    /** Triple press: PWM flips theater_mode_on to 1; reset it at once and start the note. */
+    private final ContentObserver theater = new ContentObserver(new Handler(Looper.getMainLooper())) {
+        @Override public void onChange(boolean selfChange) {
+            String value = Settings.Global.getString(getContentResolver(), SideButtonGesture.THEATER_SETTING);
+            if (!SideButtonGesture.isTripleSignal(value)) return; // our own reset to 0
+            try {
+                Settings.Global.putInt(getContentResolver(), SideButtonGesture.THEATER_SETTING, 0);
+            } catch (RuntimeException error) {
+                Log.w(SideButtonGesture.LOG_TAG, "theater mode reset failed: " + error);
+            }
+            onVoiceNoteGesture("triple_press");
+        }
+    };
+    private final Runnable sideButtonChanged = () -> runOnUiThread(() -> {
+        SideButtonGesture.applyVoiceNotePolicy(this);
+        if (root != null) root.refreshSideButtonHint();
+    });
+    private final BroadcastReceiver screenOn = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (idle != null) idle.onResume();
+        }
+    };
     private final BroadcastReceiver screenOff = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (root == null) return;
@@ -72,6 +111,10 @@ public final class MainActivity extends Activity {
                 Log.i(SideButtonGesture.LOG_TAG, "double press (cold start) -> "
                         + (started ? "voice started" : "already in session"));
             }
+            if (noteAfterRuntime && root != null) {
+                noteAfterRuntime = false;
+                onVoiceNoteGesture("hold");
+            }
         });
         setShowWhenLocked(true);
         setTurnScreenOn(true);
@@ -98,9 +141,15 @@ public final class MainActivity extends Activity {
         // A fresh launch whose intent is the alias = double press while HOME was not running.
         // (A recreated activity keeps the old intent; it must not toggle again.)
         if (state == null && SideButtonGesture.isToggle(getIntent())) sideButtonStartPending = true;
+        if (state == null && SideButtonGesture.isVoiceNote(getIntent())) noteAfterRuntime = true;
         SideButtonGesture.checkFrameworkPolicy(this);
+        SideButtonSetting.addListener(sideButtonChanged);
+        getContentResolver().registerContentObserver(
+                Settings.Global.getUriFor(SideButtonGesture.THEATER_SETTING), false, theater);
+        theaterRegistered = true;
         registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF),
                 Context.RECEIVER_NOT_EXPORTED);
+        registerReceiver(screenOn, new IntentFilter(Intent.ACTION_SCREEN_ON), Context.RECEIVER_NOT_EXPORTED);
         screenOffRegistered = true;
         java.util.ArrayList<String> missing = new java.util.ArrayList<>();
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -119,6 +168,9 @@ public final class MainActivity extends Activity {
         NotificationFeed.ensureEnabled(this);
         disableSystemShade();
         DisplayPolicy.apply(getWindow());
+        idle = new IdleScreenPolicy(this, getWindow(), root::screenBusy);
+        root.setBusyListener(idle::onBusyChanged);
+        idle.start();
         installFullscreenPolicy();
         enterProductFullscreen();
     }
@@ -127,6 +179,7 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (SideButtonGesture.isToggle(intent)) onSideButtonDoublePress();
+        else if (SideButtonGesture.isVoiceNote(intent)) onVoiceNoteGesture("hold");
         else {
             openT3ThreadFrom(intent, true);
             openGeneratedUiFrom(intent, true);
@@ -160,8 +213,18 @@ public final class MainActivity extends Activity {
 
     private void onSideButtonDoublePress() {
         if (root == null) return;
+        if (idle != null) idle.onInteraction();
         if (!sideButton.accept(SystemClock.elapsedRealtime())) {
             Log.i(SideButtonGesture.LOG_TAG, "double press ignored (duplicate delivery)");
+            return;
+        }
+        if (root.voiceNoteActive()) {
+            // A voice note is recording: any side-button gesture finishes and sends it.
+            sideButtonStartPending = false;
+            root.post(() -> {
+                boolean sent = root.finishVoiceNote();
+                Log.i(SideButtonGesture.LOG_TAG, "double press -> " + (sent ? "voice note sent" : "voice note busy"));
+            });
             return;
         }
         // A newer gesture supersedes a cold-start "start" still waiting for the runtime health
@@ -175,10 +238,47 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /**
+     * Triple press (theater flip) or hold (VOICE_ASSIST): start a voice note, or finish the one
+     * recording. The microphone must be opened from a TOP process: when HOME is not resumed yet
+     * (the press that woke the screen, another app in front) it waits for onResume.
+     */
+    private void onVoiceNoteGesture(String trigger) {
+        if (root == null) return;
+        if (idle != null) idle.onInteraction();
+        if (!sideButton.acceptNote(SystemClock.elapsedRealtime())) {
+            Log.i(SideButtonGesture.LOG_TAG, trigger + " ignored (duplicate delivery)");
+            return;
+        }
+        if (!resumed) {
+            voiceNotePending = trigger;
+            voiceNotePendingAt = SystemClock.elapsedRealtime();
+            Log.i(SideButtonGesture.LOG_TAG, trigger + " -> voice note when HOME is in front");
+            try {
+                startActivity(new Intent(this, MainActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+            } catch (RuntimeException error) {
+                Log.w(SideButtonGesture.LOG_TAG, "could not bring HOME to front: " + error.getClass().getSimpleName());
+            }
+            return;
+        }
+        root.post(() -> {
+            boolean started = root.voiceNoteFromSideButton(trigger);
+            Log.i(SideButtonGesture.LOG_TAG, trigger + " -> " + (started ? "voice note" : "voice note sent"));
+        });
+    }
+
     @Override protected void onDestroy() {
         if (current.get() == this) current = new java.lang.ref.WeakReference<>(null);
+        SideButtonSetting.removeListener(sideButtonChanged);
+        if (theaterRegistered) {
+            getContentResolver().unregisterContentObserver(theater);
+            theaterRegistered = false;
+        }
+        if (idle != null) idle.close();
         if (screenOffRegistered) {
             unregisterReceiver(screenOff);
+            unregisterReceiver(screenOn);
             screenOffRegistered = false;
         }
         if (root != null) root.close();
@@ -203,8 +303,35 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        resumed = true;
         DisplayPolicy.applyInputPolicy(getWindow());
+        if (idle != null) idle.onResume();
         enterProductFullscreen();
+        String pending = voiceNotePending;
+        voiceNotePending = null;
+        if (pending != null && SystemClock.elapsedRealtime() - voiceNotePendingAt > NOTE_PENDING_MAX_MS) {
+            Log.i(SideButtonGesture.LOG_TAG, pending + " dropped (HOME came to the front too late)");
+            pending = null;
+        }
+        if (pending != null && root != null) {
+            String trigger = pending;
+            root.post(() -> {
+                boolean started = root.voiceNoteFromSideButton(trigger);
+                Log.i(SideButtonGesture.LOG_TAG, trigger + " (after resume) -> "
+                        + (started ? "voice note" : "voice note sent"));
+            });
+        }
+    }
+
+    @Override protected void onPause() {
+        resumed = false;
+        super.onPause();
+    }
+
+    /** Touch, keys and generic motion that reach the activity (the idle clock's interactions). */
+    @Override public void onUserInteraction() {
+        super.onUserInteraction();
+        if (idle != null) idle.onInteraction();
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
@@ -216,6 +343,8 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        // The wheel and keys handled here skip super (and its onUserInteraction): count them first.
+        if (idle != null && event.getAction() == KeyEvent.ACTION_DOWN) idle.onInteraction();
         if (root != null && root.onHardwareKey(event)) return true;
         return super.dispatchKeyEvent(event);
     }

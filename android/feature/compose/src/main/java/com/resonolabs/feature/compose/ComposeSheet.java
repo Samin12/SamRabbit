@@ -101,10 +101,17 @@ public final class ComposeSheet extends Dialog {
     }
 
     private static volatile BooleanSupplier voiceProbe = () -> false;
+    /** Sheets on screen right now (main thread): HOME keeps the screen on while one is open. */
+    private static int shown;
 
     /** The shell tells every sheet whether a voice session (which owns the microphone) is live. */
     public static void setVoiceSessionProbe(BooleanSupplier probe) {
         voiceProbe = probe == null ? () -> false : probe;
+    }
+
+    /** True while any sheet is on screen (typing in it never reaches HOME's own input). */
+    public static boolean anyOpen() {
+        return shown > 0;
     }
 
     /** Keyboard-first sheet with a context line and an action label. */
@@ -132,6 +139,7 @@ public final class ComposeSheet extends Dialog {
         @Override public void onActivityDestroyed(Activity a) { }
     };
     private boolean lifecycleRegistered;
+    private boolean counted;
 
     private ComposeSheet(Activity activity, Options options, Submit submit) {
         super(activity, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen);
@@ -163,6 +171,10 @@ public final class ComposeSheet extends Dialog {
             activity.registerActivityLifecycleCallbacks(lifecycle);
             lifecycleRegistered = true;
         }
+        if (!counted) {
+            counted = true;
+            shown++;
+        }
         view.onShown();
     }
 
@@ -170,6 +182,10 @@ public final class ComposeSheet extends Dialog {
         if (lifecycleRegistered) {
             activity.unregisterActivityLifecycleCallbacks(lifecycle);
             lifecycleRegistered = false;
+        }
+        if (counted) {
+            counted = false;
+            shown = Math.max(0, shown - 1);
         }
         view.onClosed();
         super.onStop();

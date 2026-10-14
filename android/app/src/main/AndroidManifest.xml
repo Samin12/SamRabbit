@@ -103,5 +103,20 @@
             android:name=".SideButtonToggle"
             android:exported="false"
             android:targetActivity=".MainActivity" />
+
+        <!-- Side-button hold = voice note (Settings > Side button: Hold or Both): with
+             Settings.Global power_button_long_press=4, PhoneWindowManager starts VOICE_ASSIST on a
+             0.5 s hold, and this alias is its only handler. Exported for that implicit start, but
+             guarded by DEVICE_POWER, which only the system holds: no app can start it. -->
+        <activity-alias
+            android:name=".SideButtonVoiceNote"
+            android:exported="true"
+            android:permission="android.permission.DEVICE_POWER"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VOICE_ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity-alias>
     </application>
 </manifest>

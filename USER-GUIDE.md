@@ -12,11 +12,13 @@ SamRabbit is the R1 HOME surface. Voice is the first page and Cards is the secon
 - Use the scroll wheel for supported list navigation.
 - Use the side button (the R1's only button):
   - **Double-press** to start talking, from any page and even with the screen off. Double-press again to end the conversation, even while SamRabbit is speaking.
-  - **Press once** to turn the screen off or on. The screen turns off about 0.3 seconds after you let go, because the R1 first waits to see whether a second press follows. Turning the screen off ends a live conversation.
-  - **Hold** for the power menu.
-  - Both presses of a double press must start within 0.3 seconds of each other. A slower double press counts as two single presses.
-  - The double press comes from the SamRabbit power-button overlay (`android/system/power-overlay`, installed to `/oem/overlay`). Without it, a double press does nothing special.
-- SamRabbit keeps the screen awake while its activity is visible.
+  - **Triple-press** for a **voice note** (the default; Settings → Side button can make it **Hold** for half a second, or **Both**). It starts recording at once and never talks back. Say it and stop: it is sent about 2.5 seconds after your last word, or press the side button, tap the screen or press the wheel to send it now. **Back** (or a swipe from the left edge) cancels it. The R1 shows "Sent ✓" and what your Mac did with it: a line in today's journal when you say "put this in my journal …", a T3 task for "make a new task …", a calendar entry for "remind me at …", otherwise a saved note. A note recorded while the Mac is away waits on the R1 and goes when the Mac is back; its outcome then shows as a small chip. A note lasts at most 3 minutes.
+  - **Press once** to turn the screen off or on. The screen turns off about 0.3 seconds after you let go, because the R1 first waits to see whether a second press follows. Turning the screen off ends a live conversation (unless Always-on voice is on) and sends a voice note that is recording.
+  - **Hold** for the power menu (with the Hold voice note on, the power menu moves to a 3.5-second hold).
+  - Every press of a double or triple press must start within 0.3 seconds of the one before. A slower press counts as a new single press. While the triple press is on, a double press starts talking about 0.3 seconds after you let go (the R1 first checks for a third press).
+  - The double and triple press come from the SamRabbit power-button overlay (`android/system/power-overlay`, installed to `/oem/overlay`). Without it, a double press does nothing special; the triple press needs the restart after an update that installs the new overlay.
+- The screen goes off after **10 minutes** with nothing going on, and stays on during a conversation, a voice note, dictation, a running or ringing timer and the camera. Any press wakes it. Settings → Display → **Screen off** can set it to **Never**.
+- Before noon, the Cards page shows a **Morning brief** under the clock, made on your Mac from your email, calendar and agents. Tap it for the full brief; tap an item for its buttons (Draft reply, Make task, Block time, Remind me, Open, Done, Dismiss). **Draft reply** only saves a draft in Gmail for you to review and send yourself; nothing is ever sent. The R1 reads the brief out only when you tap **Read it** or ask for it.
 
 Open the gear icon at the upper right for Settings. The running-person icon at the top opens the native Background Agent run surface.
 

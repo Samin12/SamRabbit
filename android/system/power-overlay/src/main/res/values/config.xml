@@ -14,4 +14,12 @@
          on-screen buttons). Without this, a swipe up from the bottom reveals the bars, starts
          Launcher3's home/recents gesture and reads as a status-bar pull that opens Control Center. -->
     <bool name="config_showNavigationBar">false</bool>
+    <!-- 1 = MULTI_PRESS_POWER_THEATER_MODE: a triple press flips Settings.Global theater_mode_on,
+         which SamRabbit watches and resets at once (the voice-note signal). The app owns
+         Settings.Global power_button_triple_press, which overrides this live (Settings > Side
+         button: Triple press / Hold / Both). -->
+    <integer name="config_triplePressOnPowerBehavior">1</integer>
+    <!-- Theater mode must never put the screen to sleep: stock true turns the screen off on the
+         triple press. Read once at boot, so the app refuses to enable the triple until this is false. -->
+    <bool name="config_goToSleepOnButtonPressTheaterMode">false</bool>
 </resources>

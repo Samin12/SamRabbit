@@ -32,6 +32,8 @@ include(
     ":feature:genui",
     ":feature:t3",
     ":feature:compose",
+    ":feature:voicenote",
+    ":feature:briefing",
     ":runtime-host",
     ":system:motor-service",
     ":system:power-overlay",

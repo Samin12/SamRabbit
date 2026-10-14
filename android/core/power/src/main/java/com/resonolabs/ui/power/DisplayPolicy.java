@@ -6,6 +6,10 @@ import android.view.WindowManager;
 
 import java.lang.reflect.Field;
 
+/**
+ * HOME's window policy: input never pokes PowerManager's user activity, no idle-timeout override and
+ * no brightness override. Keeping the screen on is {@link IdleScreenPolicy}'s job (10 min idle).
+ */
 public final class DisplayPolicy {
     private static final String TAG = "SamDisplayPolicy";
     // Confirmed from the framework.jar retained from the exact Rabbit R1 image.
@@ -22,7 +26,6 @@ public final class DisplayPolicy {
         // Never override the configured display level from HOME.
         params.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
         window.setAttributes(params);
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     /** Reapply only the focused-window input policy after lifecycle/focus changes. */
@@ -30,7 +33,6 @@ public final class DisplayPolicy {
         WindowManager.LayoutParams params = window.getAttributes();
         applyDisableUserActivity(params);
         window.setAttributes(params);
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     private static void setWindowIdleTimeout(

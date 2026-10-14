@@ -49,4 +49,7 @@ public interface BoardHost {
 
     /** Settings (where Management lives: connect a calendar, pair T3 again). */
     void openSettings();
+
+    /** The morning brief page; {@code itemId} opens that item's detail (BACK returns to the board), null the list. */
+    default void openBriefing(String itemId) { }
 }

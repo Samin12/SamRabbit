@@ -132,4 +132,20 @@ public class DictationMachineTest {
         assertFalse(machine.speechActive());
         assertEquals(Action.NONE, machine.tick(100_000L, 0));
     }
+
+    @Test public void voiceNoteLimitsListenLongerAndStopSoonerAfterTheWords() {
+        DictationMachine.Limits note = new DictationMachine.Limits(180_000L, 8_000L, 2_500L, 15_000L);
+        DictationMachine machine = new DictationMachine(note);
+        assertTrue(machine.start(0L));
+        machine.onLive(500L);
+        machine.onSpeechStarted(1_000L);
+        assertEquals("past the sheet's 60 s cap", Action.NONE, machine.tick(500L + 61_000L, 1));
+        machine.onSpeechStopped(70_000L);
+        assertEquals(Action.NONE, machine.tick(70_000L + 2_499L, 0));
+        assertEquals(Action.MUTE, machine.tick(70_000L + 2_500L, 0));
+        assertEquals(Stop.SILENCE, machine.stopReason());
+        assertEquals(180_000L, new DictationMachine(note).remainingMs(0L));
+        assertEquals(DictationMachine.MAX_LISTEN_MS, new DictationMachine().remainingMs(0L));
+        assertTrue(DictationMachine.Limits.DEFAULT == new DictationMachine().limits());
+    }
 }

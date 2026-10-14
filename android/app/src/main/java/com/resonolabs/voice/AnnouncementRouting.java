@@ -7,12 +7,20 @@ package com.resonolabs.voice;
  * UIs ({@code ui.generated} / {@code ui.failed}, CONTRACTS-WAVE3 §5-6) route the same way: shown
  * to the live model (picture + caption), or a notification and a "New: …" pill. Other kinds are
  * left for their own owners (not acknowledged here; {@code ui.generating} is only progress).
+ *
+ * <p>Voice-note outcomes ({@code capture.routed} / {@code capture.failed}) and {@code briefing.ready}
+ * are {@link Route#SILENT}: a chip or a quiet refresh, acknowledged "seen", never spoken, whether
+ * or not a session is live (the quiet rule: the R1 never reads these out by itself).
  */
 final class AnnouncementRouting {
-    enum Route { VOICE, DEFER, NOTIFY, IGNORE }
+    enum Route { VOICE, DEFER, NOTIFY, SILENT, IGNORE }
 
     static final String CHANNEL_VOICE = "voice";
     static final String CHANNEL_NOTIFICATION = "notification";
+    static final String CHANNEL_SEEN = "seen";
+    static final String CAPTURE_ROUTED = "capture.routed";
+    static final String CAPTURE_FAILED = "capture.failed";
+    static final String BRIEFING_READY = "briefing.ready";
     static final String T3_PREFIX = "t3.thread.";
     static final String NEEDS_APPROVAL = "t3.thread.needs_approval";
     static final String NEEDS_INPUT = "t3.thread.needs_input";
@@ -27,6 +35,7 @@ final class AnnouncementRouting {
     private AnnouncementRouting() {}
 
     static Route route(String kind, boolean voiceLive, boolean voiceStarting) {
+        if (isSilent(kind)) return Route.SILENT;
         if (kind == null || !(kind.startsWith(T3_PREFIX) || isUi(kind))) return Route.IGNORE;
         if (voiceLive) return Route.VOICE;
         if (voiceStarting) return Route.DEFER;
@@ -38,8 +47,31 @@ final class AnnouncementRouting {
         return switch (route) {
             case VOICE -> CHANNEL_VOICE;
             case NOTIFY -> CHANNEL_NOTIFICATION;
+            case SILENT -> CHANNEL_SEEN;
             default -> null;
         };
+    }
+
+    /** Shown quietly (a chip, a refresh), never spoken: voice-note outcomes and the morning brief. */
+    static boolean isSilent(String kind) {
+        return CAPTURE_ROUTED.equals(kind) || CAPTURE_FAILED.equals(kind) || BRIEFING_READY.equals(kind);
+    }
+
+    /**
+     * The chip for a voice-note outcome that arrived after the note closed: the runtime's short line
+     * ({@code payload.say}, else the announcement text). Empty for anything else.
+     */
+    static String captureChip(String kind, String payloadSay, String text) {
+        if (!CAPTURE_ROUTED.equals(kind) && !CAPTURE_FAILED.equals(kind)) return "";
+        String line = flat(payloadSay, 80);
+        if (line.isEmpty()) line = flat(text, 80);
+        if (line.isEmpty()) line = CAPTURE_FAILED.equals(kind) ? "Couldn't save it" : "Saved";
+        return line;
+    }
+
+    /** False for a failed or refused note (the chip turns amber). */
+    static boolean captureOk(String kind, String state) {
+        return CAPTURE_ROUTED.equals(kind) && !"failed".equals(state);
     }
 
     /** A generated-UI outcome this app presents (not {@code ui.generating}). */

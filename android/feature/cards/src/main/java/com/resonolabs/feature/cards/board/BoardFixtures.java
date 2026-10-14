@@ -23,8 +23,9 @@ import java.util.List;
  * Shapes match the runtime projections exactly, so the same parsing and drawing code runs.
  *
  * <p>One widget can also be forced into a state while the others stay real:
- * {@code debug.sam.widgets.t3} = reauth | unreachable | starting | hidden, and
- * {@code debug.sam.widgets.journal} = connected | reconnect | disconnected | empty.
+ * {@code debug.sam.widgets.t3} = reauth | unreachable | starting | hidden,
+ * {@code debug.sam.widgets.journal} = connected | reconnect | disconnected | empty, and
+ * {@code debug.sam.widgets.briefing} = full | empty | unconfigured | hidden (shown at any hour).
  */
 public final class BoardFixtures {
     public enum Mode { OFF, FULL, EMPTY, UNCONFIGURED }
@@ -135,6 +136,54 @@ public final class BoardFixtures {
         put(value, "needsReconnect", reconnect);
         put(value, "today", today);
         return value;
+    }
+
+    /**
+     * {@code GET /v1/briefing} (runtime view) for {@code debug.sam.widgets.briefing} = full (default
+     * in fake mode) | empty (no brief yet) | unconfigured (no Mac) | hidden. Fictional people only.
+     */
+    public static JSONObject briefing(String state, long nowMs, ZoneId zone) {
+        ZonedDateTime now = Instant.ofEpochMilli(nowMs).atZone(zone);
+        String today = now.toLocalDate().toString();
+        boolean full = "full".equals(state) || "1".equals(state) || "true".equals(state);
+        String built = now.withHour(7).withMinute(1).withSecond(0).withNano(0).toInstant().toString();
+        String json = "{\"configured\":" + !"unconfigured".equals(state) + ",\"available\":" + full
+                + ",\"status\":\"" + (full ? "ready" : "unconfigured".equals(state) ? "unconfigured" : "loading")
+                + "\",\"today\":\"" + today + "\",\"morning\":true,\"stale\":false,\"briefing\":" + (!full ? "null"
+                : "{\"date\":\"" + today + "\",\"revision\":3,\"status\":\"ready\",\"updatedAt\":\"" + built + "\","
+                + "\"headline\":\"3 things need you · 4 meetings, first at 10:00 · 1 agent waiting\","
+                + "\"spoken\":\"Three things need you this morning.\",\"needsYou\":3,"
+                + "\"footer\":\"Skipped 182 promos and newsletters · business 64 · personal 41 read\","
+                + "\"sections\":["
+                + "{\"id\":\"do_first\",\"title\":\"Do first\",\"items\":["
+                + "{\"id\":\"fx-bi-dana\",\"kind\":\"email\",\"account\":\"business\",\"state\":\"open\","
+                + "\"title\":\"Reply to Dana: confirm Thu 2 pm\",\"why\":\"Needs the SOW signed by Friday; asked twice\","
+                + "\"suggestion\":\"Draft a reply confirming Thursday 2 pm\",\"actions\":[{\"type\":\"draft_reply\","
+                + "\"label\":\"Draft reply\"},{\"type\":\"remind\",\"label\":\"Remind 4 pm\"}]},"
+                + "{\"id\":\"fx-bi-payout\",\"kind\":\"email\",\"account\":\"business\",\"state\":\"open\","
+                + "\"title\":\"Payout failed: update bank details\",\"why\":\"Stripe retries tomorrow at 9 am\","
+                + "\"actions\":[{\"type\":\"open\",\"label\":\"Open\"},{\"type\":\"remind\",\"label\":\"Remind 2 pm\"}]},"
+                + "{\"id\":\"fx-bi-acme\",\"kind\":\"email\",\"account\":\"personal\",\"state\":\"open\","
+                + "\"title\":\"Bug report from Acme: checkout 500s\",\"why\":\"Their customers can't pay since last night\","
+                + "\"suggestion\":\"Start a T3 task to find the failing route\",\"actions\":[{\"type\":\"make_task\","
+                + "\"label\":\"Make task\"},{\"type\":\"draft_reply\",\"label\":\"Draft reply\"}]}]},"
+                + "{\"id\":\"today\",\"title\":\"Today\",\"items\":["
+                + "{\"id\":\"fx-bi-standup\",\"kind\":\"event\",\"state\":\"open\",\"title\":\"Standup\",\"time\":\"10:00\","
+                + "\"conflict\":true,\"why\":\"Overlaps the dentist\",\"actions\":[{\"type\":\"block_time\",\"label\":\"Block time\"}]},"
+                + "{\"id\":\"fx-bi-review\",\"kind\":\"event\",\"state\":\"open\",\"title\":\"Design review\",\"time\":\"1:30\","
+                + "\"why\":\"Dana sent the deck for this\",\"actions\":[]}]},"
+                + "{\"id\":\"agents\",\"title\":\"Agents\",\"items\":["
+                + "{\"id\":\"fx-bi-agent\",\"kind\":\"agent\",\"state\":\"open\",\"threadId\":\"fx-t3-deploy\","
+                + "\"title\":\"T3 \\u201cDeploy the board build\\u201d needs approval\",\"why\":\"Wants to reboot the R1\","
+                + "\"actions\":[{\"type\":\"open\",\"label\":\"Open\"}]}]},"
+                + "{\"id\":\"fyi\",\"title\":\"FYI\",\"items\":["
+                + "{\"id\":\"fx-bi-fyi\",\"kind\":\"fyi\",\"state\":\"open\",\"title\":\"Stripe payout of $1,240 arrived\","
+                + "\"actions\":[]}]}]}") + "}";
+        try {
+            return new JSONObject(json);
+        } catch (JSONException invalid) {
+            return new JSONObject();
+        }
     }
 
     /** Fake {@code POST /v1/journal/notes}. */

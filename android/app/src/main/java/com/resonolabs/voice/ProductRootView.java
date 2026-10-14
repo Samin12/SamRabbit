@@ -32,7 +32,14 @@ import com.resonolabs.runtime.host.RuntimeAnnouncementClient;
 import com.resonolabs.runtime.host.RuntimeArtifactClient;
 import com.resonolabs.runtime.host.T3Client;
 import com.resonolabs.ui.power.AlwaysOnVoice;
+import com.resonolabs.ui.power.SideButtonSetting;
 import com.resonolabs.feature.compose.ComposeSheet;
+import com.resonolabs.feature.compose.DictationSession;
+import com.resonolabs.feature.genui.GenBlock;
+import com.resonolabs.feature.genui.GenCardStore;
+import com.resonolabs.feature.voicenote.VoiceNoteController;
+import com.resonolabs.feature.voicenote.VoiceNoteMachine;
+import com.resonolabs.feature.voicenote.VoiceNoteOverlay;
 
 final class ProductRootView extends FrameLayout {
     private static final String ANNOUNCE_TAG = "SamAnnounce";
@@ -74,6 +81,22 @@ final class ProductRootView extends FrameLayout {
     /** Updates that arrived while a voice session was connecting: spoken once it is live. */
     private final ArrayList<Object[]> deferredUpdates = new ArrayList<>();
     private final Runnable flushDeferred = this::flushDeferredToVoice;
+    /** Side-button voice note: records over whatever page is open, sends, shows the outcome. */
+    private final VoiceNoteController voiceNote;
+    private final VoiceNoteOverlay noteOverlay;
+    /** A note asked for while a voice session held the microphone: started once it has let go. */
+    private String pendingNoteTrigger;
+    private int pendingNoteTries;
+    private final Runnable startPendingNote = this::startPendingNote;
+    /** Tells MainActivity's IdleScreenPolicy that something that keeps the screen on started or ended. */
+    private Runnable busyListener = () -> { };
+    /** A finished timer rings this long: the screen stays on meanwhile. */
+    private static final long TIMER_RING_MS = 2L * 60L * 1000L;
+    private final GenCardStore.Listener timerWatch = new GenCardStore.Listener() {
+        @Override public void onCardsChanged() { busyChanged(); }
+
+        @Override public void onCardEvent(int event, GenCard card) { busyChanged(); }
+    };
 
     ProductRootView(
             Activity activity,
@@ -90,11 +113,12 @@ final class ProductRootView extends FrameLayout {
         voice.setSessionListener(new VoicePageView.SessionListener() {
             @Override public void onSessionActive(boolean active) {
                 // Microphone foreground service: keeps listening with the screen off.
-                if (active) VoiceSessionService.start(getContext());
+                if (active) VoiceSessionService.hold(getContext(), "voice");
                 else {
-                    VoiceSessionService.stop(getContext());
+                    VoiceSessionService.release(getContext(), "voice");
                     flushDeferredAsNotifications();
                 }
+                busyChanged();
             }
 
             @Override public void onSessionLive() {
@@ -169,6 +193,26 @@ final class ProductRootView extends FrameLayout {
         addView(settings, match());
         controlCenter = new ControlCenterView(activity, this::openSettingsFromControls, this::controlCenterClosed);
         addView(controlCenter, match());
+        voiceNote = new VoiceNoteController(activity, voice::isInSession, new VoiceNoteController.Listener() {
+            @Override public void onVoiceNoteChanged() {
+                noteOverlay.update();
+            }
+
+            @Override public void onVoiceNoteActive(boolean active) {
+                // The microphone service keeps the last words coming if a single press sleeps the screen.
+                if (active) {
+                    VoiceSessionService.hold(getContext(), "note");
+                    noteOverlay.bringToFront();
+                } else {
+                    VoiceSessionService.release(getContext(), "note");
+                }
+                busyChanged();
+            }
+        });
+        noteOverlay = new VoiceNoteOverlay(activity, voiceNote);
+        addView(noteOverlay, match());
+        GenCardStore.get(activity).addListener(timerWatch);
+        refreshSideButtonHint();
         setFocusable(true);
         setFocusableInTouchMode(true);
         setContentDescription("SamRabbit HOME");
@@ -218,6 +262,7 @@ final class ProductRootView extends FrameLayout {
 
     private void openCreationImport() {
         creationImportOpen = true;
+        busyChanged();
         settings.setVisibility(GONE);
         creationImport.setVisibility(VISIBLE);
         creationImport.start();
@@ -226,6 +271,7 @@ final class ProductRootView extends FrameLayout {
 
     private void closeCreationImport() {
         creationImportOpen = false;
+        busyChanged();
         creationImport.stop();
         creationImport.setVisibility(GONE);
         settings.setVisibility(VISIBLE);
@@ -397,6 +443,10 @@ final class ProductRootView extends FrameLayout {
         }
         switch (page) {
             case "cards", "calendar", "tasks" -> openCards();
+            case "briefing" -> {
+                openCards();
+                cards.openBriefing(null);
+            }
             case "runs" -> openRunner();
             case "t3" -> openT3();
             default -> { }
@@ -430,8 +480,24 @@ final class ProductRootView extends FrameLayout {
             case VOICE -> deliverToVoice(item);
             case DEFER -> deferredUpdates.add(new Object[]{item, android.os.SystemClock.uptimeMillis()});
             case NOTIFY -> deliverAsNotification(item);
+            case SILENT -> deliverSilently(item);
             case IGNORE -> { }
         }
+    }
+
+    /**
+     * A voice note's outcome that arrived after the note closed (it waited for the Mac): a chip at
+     * the top for a few seconds. {@code briefing.ready}: nothing to show here (the Cards board reads
+     * the brief itself). Never spoken, always acknowledged "seen".
+     */
+    private void deliverSilently(JSONObject item) {
+        String kind = text(item, "kind");
+        JSONObject payload = item.optJSONObject("payload");
+        String chip = AnnouncementRouting.captureChip(kind, text(payload, "say"), text(item, "text"));
+        if (!chip.isEmpty() && !voiceNote.showing()) {
+            noteOverlay.showChip(chip, AnnouncementRouting.captureOk(kind, text(payload, "state")));
+        }
+        announcements.ack(item.optLong("id", 0L), AnnouncementRouting.CHANNEL_SEEN);
     }
 
     private void deliverToVoice(JSONObject item) {
@@ -668,10 +734,35 @@ final class ProductRootView extends FrameLayout {
         voice.debugTranscript(open, viewer);
     }
 
+    /**
+     * DEBUG_NOTE: the voice-note overlay in a given state without the microphone or the runtime
+     * (screenshots): {@code phase} LISTENING | FINISHING | SENT | QUEUED | NOTHING_HEARD | FAILED, or
+     * {@code chip} for the late-outcome chip; {@code close} hides it.
+     */
+    void debugVoiceNote(String phase, String words, String line) {
+        if ("chip".equalsIgnoreCase(phase)) {
+            noteOverlay.showChip(line == null || line.isBlank() ? "Added to your journal" : line, true);
+            return;
+        }
+        if ("close".equalsIgnoreCase(phase)) {
+            voiceNote.debugPreview(null, "", "");
+            return;
+        }
+        VoiceNoteMachine.Phase value;
+        try {
+            value = VoiceNoteMachine.Phase.valueOf(phase == null ? "" : phase.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException unknown) {
+            value = VoiceNoteMachine.Phase.LISTENING;
+        }
+        voiceNote.debugPreview(value, words == null ? "" : words, line == null ? "" : line);
+        noteOverlay.bringToFront();
+    }
+
     /** One-line state for debug broadcasts. */
     String debugState() {
         return "inSession=" + voice.isInSession() + " live=" + voice.isLive() + " starting=" + voice.isStarting()
-                + " alwaysOn=" + AlwaysOnVoice.isEnabled(getContext()) + " page=" + debugPage();
+                + " alwaysOn=" + AlwaysOnVoice.isEnabled(getContext()) + " note=" + voiceNote.machine().phase()
+                + " busy=" + screenBusy() + " page=" + debugPage();
     }
 
     /** What is in front, so test scripts never tap into a page someone else has open. */
@@ -699,6 +790,7 @@ final class ProductRootView extends FrameLayout {
         cameraHandoffOpen = true;
         voice.setVisibility(GONE); cards.setVisibility(GONE); hideT3(); chrome.setVisibility(GONE);
         camera.setVisibility(VISIBLE); camera.startHandoff(); camera.requestFocus();
+        busyChanged();
     }
 
     private void openCamera() {
@@ -706,6 +798,7 @@ final class ProductRootView extends FrameLayout {
         cameraOpen = true;
         voice.setVisibility(GONE); cards.setVisibility(GONE); hideT3(); chrome.setVisibility(GONE);
         camera.setVisibility(VISIBLE); camera.startPreview(); camera.requestFocus();
+        busyChanged();
     }
 
     private void returnFromCamera() {
@@ -713,6 +806,7 @@ final class ProductRootView extends FrameLayout {
         cameraHandoffOpen = false;
         camera.setVisibility(GONE); chrome.setVisibility(cardContentOpen ? GONE : VISIBLE);
         restoreTab();
+        busyChanged();
     }
 
     @Override public boolean onInterceptTouchEvent(MotionEvent event) {
@@ -732,6 +826,8 @@ final class ProductRootView extends FrameLayout {
                 return true;
             }
         }
+        // The voice note owns the screen: taps send it; only the edge swipe (Back = cancel) passes.
+        if (voiceNote.showing()) return false;
         if (controlCenter.isOpen() || settingsOpen || runnerOpen || creationImportOpen) return false;
         switch (action) {
             case MotionEvent.ACTION_MOVE -> {
@@ -838,6 +934,11 @@ final class ProductRootView extends FrameLayout {
     }
 
     boolean navigateBack() {
+        if (voiceNote.showing()) {
+            // BACK cancels a recording (nothing is sent) or closes a result.
+            if (!voiceNote.cancel()) voiceNote.dismissResult();
+            return true;
+        }
         if (controlCenter.isOpen()) return controlCenter.onInput(UiInputIntent.BACK);
         if (creationImportOpen) return creationImport.onInput(UiInputIntent.BACK);
         if (runnerOpen) return runner.onInput(UiInputIntent.BACK);
@@ -862,6 +963,11 @@ final class ProductRootView extends FrameLayout {
      * session starts. Returns true when a session was started.
      */
     boolean toggleVoiceFromSideButton() {
+        if (voiceNote.active()) {
+            // Any side-button gesture finishes a recording note (and the mic stays with the note).
+            voiceNote.finish();
+            return false;
+        }
         if (voice.isInSession()) {
             stopVoiceSession();
             return false;
@@ -882,6 +988,12 @@ final class ProductRootView extends FrameLayout {
      * Returns true when a session was ended.
      */
     boolean stopVoiceForScreenOff() {
+        if (voiceNote.recording()) {
+            // A single press while recording = "done, send it" (the microphone service holds on meanwhile).
+            voiceNote.finish();
+            Log.i(SideButtonGesture.LOG_TAG, "screen off -> voice note sent");
+            return true;
+        }
         if (!voice.isInSession()) return false;
         if (AlwaysOnVoice.isEnabled(getContext())) {
             // Always-on voice: the microphone foreground service keeps the session listening.
@@ -890,6 +1002,103 @@ final class ProductRootView extends FrameLayout {
         }
         stopVoiceSession();
         return true;
+    }
+
+    // ---- voice note (side button triple press / hold) ---------------------------------------
+
+    /**
+     * Triple press or hold: starts a voice note at once, or finishes and sends the one recording.
+     * A live voice session is ended first (it holds the microphone). True when a note started.
+     */
+    boolean voiceNoteFromSideButton(String trigger) {
+        if (voiceNote.recording()) {
+            voiceNote.finish();
+            return false;
+        }
+        if (voiceNote.active()) return false; // already sending
+        if (controlCenter.isOpen()) controlCenter.hide();
+        if (voice.isInSession()) {
+            stopVoiceSession();
+            pendingNoteTrigger = trigger;
+            pendingNoteTries = 0;
+            removeCallbacks(startPendingNote);
+            postDelayed(startPendingNote, 350L);
+            return true;
+        }
+        return voiceNote.start(trigger);
+    }
+
+    private void startPendingNote() {
+        if (pendingNoteTrigger == null) return;
+        if (voice.isInSession() && ++pendingNoteTries < 6) {
+            postDelayed(startPendingNote, 300L);
+            return;
+        }
+        String trigger = pendingNoteTrigger;
+        pendingNoteTrigger = null;
+        voiceNote.start(trigger);
+    }
+
+    /** From start until the runtime answered (any side-button gesture then finishes it). */
+    boolean voiceNoteActive() {
+        return voiceNote.active();
+    }
+
+    /** Stop listening and send (a double press, a tap, the wheel). */
+    boolean finishVoiceNote() {
+        return voiceNote.finish();
+    }
+
+    /** The note's input while it is on screen: press/tap sends, BACK cancels, the wheel is ignored. */
+    private void onVoiceNoteInput(UiInputIntent intent) {
+        if (intent == UiInputIntent.ACTIVATE) {
+            if (voiceNote.recording()) voiceNote.finish();
+            else if (!voiceNote.active()) voiceNote.dismissResult();
+        } else if (intent == UiInputIntent.BACK) {
+            if (!voiceNote.cancel()) voiceNote.dismissResult();
+        }
+    }
+
+    /** The idle Voice page hint names the voice-note gesture chosen in Settings > Side button. */
+    void refreshSideButtonHint() {
+        SideButtonSetting.VoiceNote choice = SideButtonSetting.voiceNote(getContext());
+        voice.setIdleHint(switch (choice) {
+            case HOLD -> "Double-press to talk · hold for a note";
+            case BOTH -> "Double-press to talk · triple-press or hold for a note";
+            default -> "Double-press to talk · triple-press for a note";
+        });
+    }
+
+    // ---- screen idle (MainActivity's IdleScreenPolicy) ---------------------------------------
+
+    void setBusyListener(Runnable listener) {
+        busyListener = listener == null ? () -> { } : listener;
+    }
+
+    private void busyChanged() {
+        busyListener.run();
+    }
+
+    /**
+     * True while the screen must stay on: a voice session (or one connecting), a voice note or any
+     * dictation, an open text sheet, a running or ringing timer, the camera or a QR import.
+     */
+    boolean screenBusy() {
+        return voice.isInSession() || voice.isStarting() || voiceNote.active() || DictationSession.anyActive()
+                || ComposeSheet.anyOpen() || cameraOpen || creationImportOpen || timerKeepsScreenOn();
+    }
+
+    private boolean timerKeepsScreenOn() {
+        GenCardStore store = GenCardStore.get(getContext());
+        long now = store.now();
+        for (GenCard card : store.activeCards()) {
+            if (!card.isTimer()) continue;
+            GenBlock timer = card.timerBlock();
+            if (timer == null) continue;
+            if (!timer.done && !timer.paused) return true;
+            if (timer.done && now - timer.endsAt < TIMER_RING_MS) return true;
+        }
+        return false;
     }
 
     private void stopVoiceSession() {
@@ -913,7 +1122,8 @@ final class ProductRootView extends FrameLayout {
     }
 
     private void dispatch(UiInputIntent intent) {
-        if (controlCenter.isOpen()) controlCenter.onInput(intent);
+        if (voiceNote.showing()) onVoiceNoteInput(intent);
+        else if (controlCenter.isOpen()) controlCenter.onInput(intent);
         else if (creationImportOpen) creationImport.onInput(intent);
         else if (runnerOpen) runner.onInput(intent);
         else if (settingsOpen) settings.onInput(intent);
@@ -927,6 +1137,9 @@ final class ProductRootView extends FrameLayout {
 
     void close() {
         removeCallbacks(flushDeferred);
+        removeCallbacks(startPendingNote);
+        GenCardStore.get(getContext()).removeListener(timerWatch);
+        voiceNote.close();
         // Voice first: ending its session turns deferred T3 updates into notifications and
         // acks them; the announcement client then closes and still sends those queued acks
         // (an unacked item would be replayed when HOME starts again).

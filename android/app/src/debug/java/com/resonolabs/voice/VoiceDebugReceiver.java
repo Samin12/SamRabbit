@@ -20,7 +20,12 @@ import java.nio.charset.StandardCharsets;
  * adb shell am broadcast -p com.resonolabs.voice.engineering -a com.resonolabs.voice.DEBUG_STATE
  * adb shell 'am broadcast -p com.resonolabs.voice.engineering -a com.resonolabs.voice.DEBUG_PICTURE --es source generated_ui --es title "Weekly focus hours" --es summary "Bar chart of focus hours per day"'
  * adb shell 'am broadcast -p com.resonolabs.voice.engineering -a com.resonolabs.voice.DEBUG_TRANSCRIPT --ez open true --ez viewer false'
+ * adb shell 'am broadcast -p com.resonolabs.voice.engineering -a com.resonolabs.voice.DEBUG_NOTE --es phase SENT --es line "Added to your journal"'
  * </pre>
+ * DEBUG_NOTE shows the voice-note overlay in one state with no microphone, no dictation and nothing
+ * sent (screenshots): {@code phase} LISTENING | FINISHING | SENDING | SENT | QUEUED | NOTHING_HEARD |
+ * FAILED, {@code chip} (the late-outcome chip) or {@code close}; {@code words} the live words,
+ * {@code line} the result line.
  * DEBUG_PICTURE adds a synthetic picture (no runtime, no camera, no Mac): {@code source} camera,
  * mac_screenshot or generated_ui (default). A generated UI takes the real announcement path
  * (live session: shown to the model; idle: a silent notification and a "New: …" pill).
@@ -78,6 +83,8 @@ public final class VoiceDebugReceiver extends BroadcastReceiver {
             root.debugPicture(source, image, title, summary, id);
         } else if (action.endsWith("DEBUG_TRANSCRIPT")) {
             root.debugTranscript(intent.getBooleanExtra("open", true), intent.getBooleanExtra("viewer", false));
+        } else if (action.endsWith("DEBUG_NOTE")) {
+            root.debugVoiceNote(extra(intent, "phase"), intent.getStringExtra("words"), intent.getStringExtra("line"));
         } else if (action.endsWith("DEBUG_ANNOUNCE")) {
             String json = extra(intent, "json");
             try {

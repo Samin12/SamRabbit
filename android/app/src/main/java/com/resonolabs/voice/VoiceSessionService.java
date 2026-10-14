@@ -18,6 +18,8 @@ import android.util.Log;
  * off (asleep, HOME drops to TOP_SLEEPING with no microphone otherwise). Started with a plain
  * {@code startService} while the user is interacting (HOME is the top app) and promoted in
  * {@link #onCreate}; stays up across always-on reconnects and stops when the session ends.
+ * A voice note holds it the same way ({@link #hold} / {@link #release} per holder), so a single
+ * press that turns the screen off while a note records still gets the last words in.
  */
 public final class VoiceSessionService extends Service {
     static final String LOG_TAG = "SamVoiceService";
@@ -26,8 +28,23 @@ public final class VoiceSessionService extends Service {
     /** Safety net only; the service releases the lock when the session ends. */
     private static final long WAKE_LOCK_MAX_MS = 8L * 60L * 60L * 1000L;
     private PowerManager.WakeLock wakeLock;
+    /** Who needs the microphone service: "voice" (a session), "note" (a voice note). Main thread. */
+    private static final java.util.Set<String> HOLDERS = new java.util.HashSet<>();
 
-    static void start(Context context) {
+    /** {@code holder} needs the service; it starts with the first holder. */
+    static void hold(Context context, String holder) {
+        boolean first = HOLDERS.isEmpty();
+        HOLDERS.add(holder);
+        if (first) start(context);
+    }
+
+    /** {@code holder} is done; the service stops with the last one. */
+    static void release(Context context, String holder) {
+        if (!HOLDERS.remove(holder) || !HOLDERS.isEmpty()) return;
+        stop(context);
+    }
+
+    private static void start(Context context) {
         try {
             context.startService(new Intent(context, VoiceSessionService.class));
         } catch (RuntimeException error) {
@@ -37,7 +54,7 @@ public final class VoiceSessionService extends Service {
         }
     }
 
-    static void stop(Context context) {
+    private static void stop(Context context) {
         context.stopService(new Intent(context, VoiceSessionService.class));
     }
 

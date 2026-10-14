@@ -34,6 +34,26 @@ public final class AnnouncementRoutingTest {
         assertNull(AnnouncementRouting.ackChannel(AnnouncementRouting.Route.IGNORE));
     }
 
+    @Test public void voiceNotesAndTheBriefAreSilentEvenInALiveSession() {
+        for (String kind : new String[]{"capture.routed", "capture.failed", "briefing.ready"}) {
+            assertEquals(kind, AnnouncementRouting.Route.SILENT, AnnouncementRouting.route(kind, true, false));
+            assertEquals(kind, AnnouncementRouting.Route.SILENT, AnnouncementRouting.route(kind, false, true));
+            assertEquals(kind, AnnouncementRouting.Route.SILENT, AnnouncementRouting.route(kind, false, false));
+        }
+        assertEquals("seen", AnnouncementRouting.ackChannel(AnnouncementRouting.Route.SILENT));
+    }
+
+    @Test public void captureChipUsesTheRuntimesLine() {
+        assertEquals("Added to your journal",
+                AnnouncementRouting.captureChip("capture.routed", "Added to your journal", "ignored"));
+        assertEquals("Saved as a note", AnnouncementRouting.captureChip("capture.routed", "", "Saved as a note"));
+        assertEquals("Couldn't save it", AnnouncementRouting.captureChip("capture.failed", null, null));
+        assertEquals("", AnnouncementRouting.captureChip("briefing.ready", "x", "y"));
+        assertTrue(AnnouncementRouting.captureOk("capture.routed", "done"));
+        assertFalse(AnnouncementRouting.captureOk("capture.routed", "failed"));
+        assertFalse(AnnouncementRouting.captureOk("capture.failed", "done"));
+    }
+
     @Test public void needsYouKinds() {
         assertTrue(AnnouncementRouting.needsYou("t3.thread.needs_approval"));
         assertTrue(AnnouncementRouting.needsYou("t3.thread.needs_input"));
