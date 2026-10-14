@@ -810,6 +810,70 @@ class SeenTest(InboxBase):
         again = self.by_id(self.fresh())["t3:t-error"]
         self.assertEqual(("error", True), (again["status"], again["unread"]))
 
+    def test_a_t3_session_that_fails_after_a_seen_finish_is_news_and_bookkeeping_is_not(self) -> None:
+        # The provider session goes to "error" after a turn that finished and was seen (a crash; T3 found the
+        # session orphaned when it started again): only the session's and the thread's times move, never the turn's.
+        self.build_world()
+        self.get_inbox()
+        def touch(*, session: Optional[str] = None, thread: Optional[str] = None, **fields: Any) -> None:
+            with self.fake_t3.lock:
+                value = self.fake_t3.get_thread("t-done")
+                value["session"].update(fields)
+                if session:
+                    value["session"]["updatedAt"] = session
+                if thread:
+                    value["updatedAt"] = thread
+            self.hub.invalidate()
+        done = self.by_id(self.get_inbox())["t3:t-done"]
+        self.assertEqual(("done", False), (done["status"], done["unread"]))
+        turn = dict(self.fake_t3.get_thread("t-done")["latestTurn"])
+        touch(status="error", lastError="The provider stopped unexpectedly.", session="2026-10-08T18:30:00.000Z",
+              thread="2026-10-08T18:30:00.000Z")
+        value = self.fresh()
+        failed = self.by_id(value)["t3:t-done"]
+        self.assertEqual(("error", "Failed", True, "The provider stopped unexpectedly."),
+                         (failed["status"], failed["statusLabel"], failed["unread"], failed["summary"]))
+        self.assertEqual("2026-10-08T18:30:00Z", failed["updatedAt"], "its time is when it failed")
+        self.assertIn("seen", failed["can"])
+        self.assertTrue(inbox._needs_you(failed))  # noqa: SLF001
+        self.assertEqual(len([item for item in value["items"] if inbox._needs_you(item)]),  # noqa: SLF001
+                         value["counts"]["needsYou"])
+        self.assertEqual(turn, self.fake_t3.get_thread("t-done")["latestTurn"], "the turn never moved")
+        self.assertEqual((200, {"ok": True}), self.act("t3:t-done", "seen"))
+        settled = self.by_id(self.fresh())["t3:t-done"]
+        self.assertEqual(("idle", "Failed", False), (settled["status"], settled["statusLabel"], settled["unread"]))
+        self.assertFalse(inbox._needs_you(settled))  # noqa: SLF001
+        touch(thread="2026-10-08T19:00:00.000Z")  # T3's own bookkeeping: the thread's time only
+        touched = self.by_id(self.fresh())["t3:t-done"]
+        self.assertEqual(("idle", False), (touched["status"], touched["unread"]), "bookkeeping is no news")
+        # It fails again, the session's own time ahead of the thread's: news, and seeing it settles it.
+        touch(session="2026-10-08T19:20:00.000Z", lastError="The provider stopped again.")
+        again = self.by_id(self.fresh())["t3:t-done"]
+        self.assertEqual(("error", True), (again["status"], again["unread"]))
+        self.assertEqual((200, {"ok": True}), self.act("t3:t-done", "seen"))
+        seen_again = self.by_id(self.fresh())["t3:t-done"]
+        self.assertEqual(("idle", False), (seen_again["status"], seen_again["unread"]))
+
+    def test_a_seen_failure_snoozed_in_t3_is_shelved_and_an_unseen_one_is_not(self) -> None:
+        self.build_world()
+        self.get_inbox()  # the first look: both seen
+        with self.fake_t3.lock:
+            for thread_id in ("t-error", "t-done"):
+                self.fake_t3.get_thread(thread_id)["snoozedUntil"] = "2099-01-01T00:00:00.000Z"
+        self.hub.invalidate()
+        items = self.by_id(self.fresh())
+        self.assertNotIn("t3:t-error", items, "a seen failure is settled: snoozed, it is shelved like the rest")
+        self.assertNotIn("t3:t-done", items)
+        with self.fake_t3.lock:
+            thread = self.fake_t3.get_thread("t-error")
+            thread["latestTurn"]["completedAt"] = thread["updatedAt"] = "2026-10-08T18:30:00.000Z"
+        self.hub.invalidate()
+        failed = self.by_id(self.fresh()).get("t3:t-error")
+        self.assertIsNotNone(failed, "a failure he hasn't seen needs him, snoozed or not")
+        self.assertEqual(("error", True), (failed["status"], failed["unread"]))
+        self.assertEqual((200, {"ok": True}), self.act("t3:t-error", "seen"))
+        self.assertNotIn("t3:t-error", self.by_id(self.fresh()))
+
 
 # ====================================================================== actions on T3 threads
 
