@@ -496,9 +496,10 @@ class ListTest(InboxBase):
         self.assertEqual(("working", "Working · step 2/4", 0.25, "Running unit tests", ["reply", "stop", "open"]),
                          (running["status"], running["statusLabel"], running["progress"], running["phase"],
                           running["can"]))
-        self.assertEqual(("error", "Failed", "The provider stopped unexpectedly."),
+        self.assertEqual(("idle", "Failed", "The provider stopped unexpectedly."),
                          (items["t3:t-error"]["status"], items["t3:t-error"]["statusLabel"],
-                          items["t3:t-error"]["summary"]))
+                          items["t3:t-error"]["summary"]),
+                         "a failure from before the first look is seen like the rest: settled, not Needs you")
         self.assertEqual(("idle", "New"), (items["t3:t-new"]["status"], items["t3:t-new"]["statusLabel"]))
         self.assertEqual(("done", "Stopped"), (items["t3:t-stopped"]["status"], items["t3:t-stopped"]["statusLabel"]))
         self.assertEqual("/Users/test/jackrabbit-src", approval["cwd"], "a T3 thread runs in its project's folder")
@@ -784,6 +785,30 @@ class SeenTest(InboxBase):
         self.server.inbox = again
         items = self.by_id(self.get_inbox())
         self.assertFalse(items["t3:t-done"]["unread"])
+
+
+    def test_a_t3_failure_is_news_until_seen_then_settled_until_it_fails_again(self) -> None:
+        # Samin: "if I say 'Mark as seen,' it should settle it, and I shouldn't be seeing it in 'Needs You.'"
+        self.build_world()
+        self.get_inbox()
+        def fail_at(stamp: str) -> None:
+            with self.fake_t3.lock:
+                thread = self.fake_t3.get_thread("t-error")
+                thread["latestTurn"]["completedAt"] = thread["updatedAt"] = stamp
+            self.hub.invalidate()
+        fail_at("2026-10-08T18:30:00.000Z")
+        failed = self.by_id(self.fresh())["t3:t-error"]
+        self.assertEqual(("error", True), (failed["status"], failed["unread"]))
+        self.assertIn("seen", failed["can"])
+        self.assertTrue(inbox._needs_you(failed))  # noqa: SLF001
+        self.assertEqual((200, {"ok": True}), self.act("t3:t-error", "seen"))
+        settled = self.by_id(self.fresh())["t3:t-error"]
+        self.assertEqual(("idle", "Failed", False), (settled["status"], settled["statusLabel"], settled["unread"]))
+        self.assertNotIn("seen", settled["can"])
+        self.assertFalse(inbox._needs_you(settled))  # noqa: SLF001
+        fail_at("2026-10-08T19:10:00.000Z")  # it ran and failed again: news again
+        again = self.by_id(self.fresh())["t3:t-error"]
+        self.assertEqual(("error", True), (again["status"], again["unread"]))
 
 
 # ====================================================================== actions on T3 threads

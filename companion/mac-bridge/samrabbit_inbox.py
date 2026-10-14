@@ -1663,6 +1663,10 @@ class InboxService:
         pending = detail[1] if detail is not None and status in (NEEDS_APPROVAL, NEEDS_INPUT) else None
         answer = detail[2] if detail is not None else ""
         marker = None if status == WORKING else t3.unread_marker(thread, t3.thread_status(thread))
+        if status == ERROR:
+            # A failure is news until Samin has seen it: from then on it is settled (Earlier, not Needs you) until it
+            # fails again or runs. Its time is its turn's, not T3's own bookkeeping, which touches failed threads.
+            marker = str(base.get("updatedAt") or "") or marker
         unread = t3.is_unread(marker, self.seen.get(item_id))
         label = _t3_label(thread, status, base, pending)
         if pending is not None and pending.approvals:
@@ -1686,6 +1690,8 @@ class InboxService:
             can = ["reply", "open"]
         if unread:
             can.append("seen")
+        elif status == ERROR:
+            status = IDLE  # seen: settled (the label still says it failed)
         project_id = str(thread.get("projectId") or "")
         return {
             "id": item_id, "source": "t3",
