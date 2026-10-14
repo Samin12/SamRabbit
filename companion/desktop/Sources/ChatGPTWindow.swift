@@ -27,6 +27,8 @@ enum ChatGPTAPI {
         let email: String?
         let reason: String?
         let login: Login?
+        /// "codex": the bridge borrows Codex's login on this Mac (read-only) because the Mac has none of its own.
+        let source: String?
     }
 
     struct Failure: Error, Equatable {
@@ -99,6 +101,7 @@ final class ChatGPTModel: ObservableObject {
     private var busy = false
 
     var expired: Bool { expiresAt.map { $0 <= now } ?? false }
+    var borrowed: Bool { status?.source == "codex" }
     var account: String {
         let parts = [status?.email, status?.plan.map { "\($0.capitalized) plan" }].compactMap { $0 }
         return parts.isEmpty ? "Your ChatGPT account" : parts.joined(separator: " · ")
@@ -133,16 +136,18 @@ final class ChatGPTModel: ObservableObject {
         switch await ChatGPTAPI.status() {
         case .success(let value):
             status = value
-            if value.connected {
-                if phase != .connected { Log.write("chatgpt connected") }
-                phase = .connected
-                code = nil
-                link = nil
-            } else if let login = value.login, login.state == "waiting", let pending = login.userCode {
+            // A code on screen wins over "connected": with Codex's login borrowed, Samin may still be giving the
+            // Mac a login of its own.
+            if let login = value.login, login.state == "waiting", let pending = login.userCode {
                 code = pending
                 link = login.verificationUrl.flatMap(URL.init(string:))
                 expiresAt = PairingModel.date(login.expiresAt)
                 phase = .waiting
+            } else if value.connected {
+                if phase != .connected { Log.write(value.source == "codex" ? "chatgpt via codex" : "chatgpt connected") }
+                phase = .connected
+                code = nil
+                link = nil
             } else {
                 if phase == .waiting, let state = value.login?.state, state != "waiting" {
                     notice = state == "expired" ? "The code expired. Get a new one."
@@ -317,11 +322,19 @@ struct ChatGPTView: View {
             Text("ChatGPT is connected").font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.ink)
             Text(model.account).font(.system(size: 12, design: .monospaced)).foregroundStyle(Palette.pale)
                 .textSelection(.enabled)
-            Text("Your watch assistant now talks with gpt-realtime-2.1 in the R1’s voice. The Mac has its own login, "
-                 + "separate from your R1 and from the ChatGPT app.")
-                .font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Disconnect…") { model.confirmDisconnect = true }.padding(.top, 4)
+            if model.borrowed {
+                Text("Your watch assistant talks with gpt-realtime-2.1 in the R1’s voice, using the Codex login on "
+                     + "this Mac. SamRabbit only reads it, so Codex stays signed in; Codex renews it as you use it.")
+                    .font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Give SamRabbit Its Own Login") { Task { await model.connect() } }.padding(.top, 4)
+            } else {
+                Text("Your watch assistant now talks with gpt-realtime-2.1 in the R1’s voice. The Mac has its own login, "
+                     + "separate from your R1 and from the ChatGPT app.")
+                    .font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Disconnect…") { model.confirmDisconnect = true }.padding(.top, 4)
+            }
         }
         .frame(height: 260)
     }
