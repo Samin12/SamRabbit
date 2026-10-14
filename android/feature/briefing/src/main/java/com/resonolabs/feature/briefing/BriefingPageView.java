@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
@@ -70,6 +71,7 @@ public final class BriefingPageView extends View implements AutoCloseable {
         String chip = "";
         float chipWidth;
         int color;
+        boolean twoLines;
         String[] lines = new String[0];
     }
 
@@ -82,6 +84,8 @@ public final class BriefingPageView extends View implements AutoCloseable {
     private final Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
     private final Typeface regular = Typeface.create("sans-serif", Typeface.NORMAL);
     private final RectF rect = new RectF();
+    /** "Read it" play mark, built once (onDraw never allocates). */
+    private final Path play = new Path();
     private final List<Row> rows = new ArrayList<>();
     private final List<Row> focusRows = new ArrayList<>();
     private final List<RectF> buttonRects = new ArrayList<>();
@@ -106,6 +110,9 @@ public final class BriefingPageView extends View implements AutoCloseable {
     private String[] detailSuggestion = new String[0];
     private String detailEyebrow = "";
     private String[] buttonLabels = new String[0];
+    /** The first suggested action is the filled button; the rest are glass. */
+    private int filledButton = -1;
+    private float detailContentBottom;
     private String feedback = "";
     private String[] feedbackLines = new String[0];
     private int feedbackColor = SamTheme.MUTED;
@@ -120,6 +127,10 @@ public final class BriefingPageView extends View implements AutoCloseable {
         this.host = host;
         setFocusable(true);
         setContentDescription("Morning brief");
+        play.moveTo(-5f, -8f);
+        play.lineTo(8f, 0f);
+        play.lineTo(-5f, 8f);
+        play.close();
     }
 
     // ------------------------------------------------------------------ data
@@ -406,8 +417,8 @@ public final class BriefingPageView extends View implements AutoCloseable {
         if (!loaded) subtitle = failed ? "Unavailable right now" : "Loading…";
         else if (!brief.configured) subtitle = "Connect your Mac to get one";
         else if (!brief.available) subtitle = "off".equals(brief.status) ? "Update the Mac bridge" : "Not ready yet";
-        else subtitle = (built.isEmpty() ? "" : "Built " + built + " · ") + (open == 0 ? "All handled"
-                : open + " to do");
+        else subtitle = built.isEmpty() ? (open == 0 ? "All handled" : "Today")
+                : "Built " + built + (open == 0 ? " · All handled" : "");
         needsText = brief.needsYou > 0 ? brief.needsYou + (brief.needsYou == 1 ? " needs you" : " need you") : "";
         float y = 4f;
         if (!brief.available) {
@@ -434,13 +445,15 @@ public final class BriefingPageView extends View implements AutoCloseable {
                 row.color = accent(section.id);
                 row.chip = TextFit.line(measure, item.chip(), 130f, 14f, medium);
                 row.chipWidth = row.chip.isEmpty() ? 0f : measure.measureText(row.chip) + 26f;
-                float textRight = 446f - (row.chipWidth > 0f ? row.chipWidth + 12f : 0f);
-                row.title = TextFit.line(measure, item.title, textRight - 64f, 19f, medium);
+                float besideChip = 446f - (row.chipWidth > 0f ? row.chipWidth + 12f : 0f);
                 String why = item.why;
                 if (item.conflict) why = why.isEmpty() ? "Conflict" : "Conflict · " + why;
                 if (!item.account.isEmpty() && "email".equals(item.kind)) why = why.isEmpty() ? item.account
                         : why + " · " + item.account;
-                row.why = TextFit.line(measure, why, textRight - 64f, 15f, regular);
+                // With a why line the title gets the full width and the chip sits beside the why.
+                row.twoLines = !why.isEmpty();
+                row.title = TextFit.line(measure, item.title, (row.twoLines ? 446f : besideChip) - 64f, 19f, medium);
+                row.why = TextFit.line(measure, why, besideChip - 64f, 15f, regular);
                 focusRows.add(row);
                 y += ROW_H + ROW_GAP;
             }
@@ -477,8 +490,12 @@ public final class BriefingPageView extends View implements AutoCloseable {
         detailWhy = TextFit.firstLines(measure, why, 404f, 3, 18f, regular);
         detailSuggestion = item.suggestion.isEmpty() ? new String[0]
                 : TextFit.firstLines(measure, "Suggested: " + item.suggestion, 404f, 2, 17f, regular);
+        detailContentBottom = 132f + detailTitle.length * 34f + 14f + detailWhy.length * 25f
+                + (detailSuggestion.length > 0 ? 8f + detailSuggestion.length * 24f : 0f);
         buttons = item.buttons();
         buttonFocus = Math.min(buttonFocus, Math.max(0, buttons.size() - 1));
+        filledButton = -1;
+        for (int i = 0; i < buttons.size() && filledButton < 0; i++) if (buttons.get(i).primary()) filledButton = i;
         buttonRects.clear();
         int count = buttons.size();
         int rowsOfButtons = (count + 1) / 2;
@@ -594,15 +611,11 @@ public final class BriefingPageView extends View implements AutoCloseable {
         paint.setColor(SamTheme.withAlpha(SamTheme.ORB_BLUE, 220));
         canvas.drawRoundRect(rect, 20f, 20f, paint);
         paint.setColor(SamTheme.INK);
-        float cx = 58f, cy = top + 20f;
-        canvas.drawRect(cx - 7f, cy - 4f, cx - 3f, cy + 4f, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(2.2f);
-        paint.setColor(SamTheme.INK);
-        rect.set(cx - 6f, cy - 9f, cx + 8f, cy + 9f);
-        canvas.drawArc(rect, -45f, 90f, false, paint);
-        paint.setStyle(Paint.Style.FILL);
-        SamTheme.text(canvas, paint, "Read it", 76f, top + 27f, 18f, SamTheme.INK, Paint.Align.LEFT, true);
+        canvas.save();
+        canvas.translate(60f, top + 20f);
+        canvas.drawPath(play, paint);
+        canvas.restore();
+        SamTheme.text(canvas, paint, "Read it", 80f, top + 27f, 18f, SamTheme.INK, Paint.Align.LEFT, true);
         if (!needsText.isEmpty()) {
             SamTheme.text(canvas, paint, needsText, 442f, top + 27f, 16f, SamTheme.AMBER, Paint.Align.RIGHT, true);
         }
@@ -628,19 +641,19 @@ public final class BriefingPageView extends View implements AutoCloseable {
             paint.setStyle(Paint.Style.FILL);
         }
         int ink = open ? SamTheme.INK : SamTheme.withAlpha(SamTheme.INK, 120);
-        boolean twoLines = !row.why.isEmpty();
-        SamTheme.text(canvas, paint, row.title, 64f, twoLines ? row.top + 33f : mid + 7f, 19f, ink, Paint.Align.LEFT,
-                true);
-        if (twoLines) {
-            SamTheme.text(canvas, paint, row.why, 64f, row.top + 58f, 15f,
+        SamTheme.text(canvas, paint, row.title, 64f, row.twoLines ? row.top + 32f : mid + 7f, 19f, ink,
+                Paint.Align.LEFT, true);
+        if (row.twoLines) {
+            SamTheme.text(canvas, paint, row.why, 64f, row.top + 59f, 15f,
                     open ? SamTheme.MUTED : SamTheme.withAlpha(SamTheme.MUTED, 130), Paint.Align.LEFT, false);
         }
         if (row.chipWidth > 0f) {
-            rect.set(446f - row.chipWidth, mid - 16f, 446f, mid + 16f);
+            float chipMid = row.twoLines ? row.top + 54f : mid;
+            rect.set(446f - row.chipWidth, chipMid - 14f, 446f, chipMid + 14f);
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(open ? SamTheme.withAlpha(row.color, 46) : SamTheme.withAlpha(SUCCESS, 34));
-            canvas.drawRoundRect(rect, 16f, 16f, paint);
-            SamTheme.text(canvas, paint, row.chip, rect.centerX(), mid + 5f, 14f,
+            canvas.drawRoundRect(rect, 14f, 14f, paint);
+            SamTheme.text(canvas, paint, row.chip, rect.centerX(), chipMid + 5f, 14f,
                     open ? ChipColors.pale(row.color) : SUCCESS, Paint.Align.CENTER, true);
         }
     }
@@ -661,11 +674,13 @@ public final class BriefingPageView extends View implements AutoCloseable {
         Briefing.Item item = brief.find(detailId);
         SamTheme.text(canvas, paint, detailEyebrow, 65f, 76f, 15f, SamTheme.MUTED, Paint.Align.LEFT, false);
         if (item == null) return;
-        float panelBottom = buttonRects.isEmpty() ? 610f : buttonRects.get(0).top - 14f;
+        float limit = buttonRects.isEmpty() ? 610f : buttonRects.get(0).top - 14f;
+        float wanted = detailContentBottom + 12f + (showFeedback ? 14f + feedbackLines.length * 24f : 0f);
+        float panelBottom = Math.min(limit, Math.max(250f, wanted));
         rect.set(18f, 96f, 462f, panelBottom);
         glass.draw(canvas, paint, rect, 24f, false);
         paint.setColor(accent(item.section));
-        canvas.drawCircle(42f, 124f, 6f, paint);
+        canvas.drawRoundRect(18f, 120f, 23f, 150f, 2.5f, 2.5f, paint);
         float y = 132f;
         for (String line : detailTitle) {
             SamTheme.text(canvas, paint, line, 38f, y + 12f, 26f, SamTheme.INK, Paint.Align.LEFT, true);
@@ -691,7 +706,7 @@ public final class BriefingPageView extends View implements AutoCloseable {
         for (int i = 0; i < buttonRects.size(); i++) {
             RectF button = buttonRects.get(i);
             boolean focused = i == buttonFocus;
-            if (buttons.get(i).primary()) {
+            if (i == filledButton) {
                 canvas.save();
                 canvas.translate(button.left, button.top);
                 paint.setStyle(Paint.Style.FILL);

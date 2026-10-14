@@ -87,8 +87,8 @@ public final class SettingsPanelView extends View implements UiInputTarget {
     /** Display page: "Screen off · After 10 min / Never" (the HOME idle timeout). */
     private static final RectF DISPLAY_SCREEN_OFF = new RectF(20f, 422f, 460f, 498f);
     // Side button page: the talk line, then the three voice-note choices.
-    private static final float SIDE_TALK_TOP = 100f;
-    private static final float SIDE_OPTION_TOP = 214f;
+    private static final float SIDE_TALK_TOP = 96f;
+    private static final float SIDE_OPTION_TOP = 222f;
     private static final float SIDE_OPTION_HEIGHT = 74f;
     private static final float SIDE_OPTION_GAP = 10f;
     private static final String[] SIDE_OPTION_LINES = {
@@ -450,12 +450,12 @@ public final class SettingsPanelView extends View implements UiInputTarget {
      * update): the status line says when it is not active yet. Allocation-free.
      */
     private void drawSideButtonPage(Canvas canvas) {
-        glassPainter.draw(canvas, paint, 20f, SIDE_TALK_TOP, 460f, SIDE_TALK_TOP + 84f, 22f, false);
+        glassPainter.draw(canvas, paint, 20f, SIDE_TALK_TOP, 460f, SIDE_TALK_TOP + 80f, 22f, false);
         SamTheme.text(canvas, paint, "Double-press", 40f, SIDE_TALK_TOP + 36f, 20f, SamTheme.INK, Paint.Align.LEFT, true);
         SamTheme.text(canvas, paint, "Talk: starts or ends a voice chat", 40f, SIDE_TALK_TOP + 62f, 15f,
                 SamTheme.MUTED, Paint.Align.LEFT, false);
         paint.setLetterSpacing(0.14f);
-        SamTheme.text(canvas, paint, "VOICE NOTE", 40f, SIDE_OPTION_TOP - 14f, 13f,
+        SamTheme.text(canvas, paint, "VOICE NOTE", 40f, SIDE_OPTION_TOP - 16f, 13f,
                 SamTheme.withAlpha(SamTheme.INK, 190), Paint.Align.LEFT, true);
         paint.setLetterSpacing(0f);
         SideButtonSetting.VoiceNote current = SideButtonSetting.voiceNote(activity);
@@ -482,7 +482,7 @@ public final class SettingsPanelView extends View implements UiInputTarget {
         String status;
         int color = SamTheme.MUTED;
         switch (current.triple() ? SideButtonSetting.tripleState() : SideButtonSetting.TripleState.UNKNOWN) {
-            case READY -> status = "Triple press is on · presses 0.3 s apart";
+            case READY -> status = "Triple press is ready · each press within 0.3 s";
             case NEEDS_RESTART -> { status = "Triple press works after the next restart"; color = SamTheme.AMBER; }
             case UNAVAILABLE -> { status = "Triple press isn't available on this R1"; color = SamTheme.AMBER; }
             default -> status = current.hold() ? "Hold the button until the note opens" : "";

@@ -44,4 +44,11 @@ public final class IdleScreenClockTest {
         clock.interaction(10_000L);
         assertEquals(50_000L, clock.lastInteractionAt());
     }
+
+    @Test public void theFlagGoesOneSystemTimeoutEarlySoTheScreenIsOffAtTenMinutes() {
+        assertEquals(9L * 60_000L, IdleScreenPolicy.releaseAfterMs(TEN_MIN, 60_000L));
+        assertEquals("a short debug idle never flaps", 5_000L, IdleScreenPolicy.releaseAfterMs(60_000L, 60_000L));
+        assertEquals(5_000L, IdleScreenPolicy.releaseAfterMs(TEN_MIN, 30L * 60_000L));
+        assertEquals(IdleScreenClock.NEVER, IdleScreenPolicy.releaseAfterMs(IdleScreenClock.NEVER, 60_000L));
+    }
 }

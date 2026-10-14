@@ -137,7 +137,9 @@ public final class BriefingWidget implements BoardWidget {
         y += header.height;
         String built = brief.builtAt(ZoneId.systemDefault());
         int open = brief.openCount();
-        summary = (built.isEmpty() ? "" : built + " · ") + open + " to do";
+        String count = brief.needsYou > 0 ? brief.needsYou + (brief.needsYou == 1 ? " needs you" : " need you")
+                : open + " to do";
+        summary = (built.isEmpty() ? "" : built + " · ") + count;
         Row headline = add(HEADLINE, y, 0f);
         headline.lines = BoardPaint.wrap(paint, brief.headline.isEmpty() ? "Your morning brief" : brief.headline,
                 width - 2 * PAD, 2, 18f, BoardPaint.MEDIUM);

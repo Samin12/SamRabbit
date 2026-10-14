@@ -18,9 +18,12 @@ import java.util.function.BooleanSupplier;
  * <p>HOME's window disables user activity ({@link DisplayPolicy}), so its touches and the wheel
  * never reach PowerManager's own timeout; only this flag kept the screen on. Interactions arrive
  * from the activity (touch, keys, the wheel, side-button gestures, resume, screen on); the busy
- * probe is asked again whenever something says it changed and every 30 s while busy. On release
- * the flag is cleared and PowerManager sleeps the panel through its normal timeout path (its
- * last user activity is long past). The next interaction, resume or screen-on arms it again.
+ * probe is asked again whenever something says it changed and every 30 s while busy. The
+ * window's keep-on wake lock is ON_AFTER_RELEASE: clearing the flag pokes PowerManager, which then
+ * keeps the panel on for its own {@code screen_off_timeout} (60 s on the R1), dims it for the last
+ * few seconds and sleeps it. So the flag goes that much before the idle time is up, and the screen
+ * goes off right at it (10 min). The next interaction, resume or screen-on arms it again (also from
+ * the dim).
  *
  * <p>Debug builds: {@code adb shell setprop debug.sam.idle_ms 60000} shortens the idle time
  * (read on start and resume). Main thread only.
@@ -28,6 +31,8 @@ import java.util.function.BooleanSupplier;
 public final class IdleScreenPolicy implements AutoCloseable {
     private static final String TAG = "SamIdleScreen";
     public static final String DEBUG_PROPERTY = "debug.sam.idle_ms";
+    /** Never release sooner than this after an interaction, whatever the system timeout is. */
+    private static final long MIN_HOLD_MS = 5_000L;
 
     private final Window window;
     private final Context context;
@@ -37,6 +42,7 @@ public final class IdleScreenPolicy implements AutoCloseable {
     private final Runnable check = this::evaluate;
     private final Runnable settingChanged = this::onSettingChanged;
     private long debugIdleMs;
+    private long systemTimeoutMs = 60_000L;
     private boolean held;
     private boolean started;
     private long scheduledAt = Long.MAX_VALUE;
@@ -53,6 +59,7 @@ public final class IdleScreenPolicy implements AutoCloseable {
         started = true;
         IdleScreenSetting.addListener(settingChanged);
         debugIdleMs = readDebugIdleMs();
+        systemTimeoutMs = readSystemTimeoutMs();
         hold();
         evaluate();
     }
@@ -69,6 +76,7 @@ public final class IdleScreenPolicy implements AutoCloseable {
     /** The activity resumed or the screen came on: counts as an interaction. */
     public void onResume() {
         debugIdleMs = readDebugIdleMs();
+        systemTimeoutMs = readSystemTimeoutMs();
         clock.interaction(SystemClock.elapsedRealtime());
         if (!started) return;
         if (!held) hold();
@@ -111,7 +119,7 @@ public final class IdleScreenPolicy implements AutoCloseable {
         }
         clock.busy(busy, now);
         if (busy && !held) hold();
-        IdleScreenClock.Decision decision = clock.decide(now, idleMs());
+        IdleScreenClock.Decision decision = clock.decide(now, releaseAfterMs(idleMs(), systemTimeoutMs));
         if (decision.keep) {
             if (!held) hold();
             schedule(decision.nextCheckAt, now);
@@ -143,7 +151,26 @@ public final class IdleScreenPolicy implements AutoCloseable {
         scheduledAt = Long.MAX_VALUE;
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         held = false;
-        Log.i(TAG, "idle " + describe(idleMs()) + ": screen may sleep");
+        Log.i(TAG, "idle: screen off in " + describe(systemTimeoutMs) + " (after " + describe(idleMs()) + " in all)");
+    }
+
+    /**
+     * When to clear the flag so the screen goes off at {@code idleMs}: PowerManager adds its own
+     * timeout after the release (pure; never sooner than 5 s after the last interaction).
+     */
+    static long releaseAfterMs(long idleMs, long systemTimeoutMs) {
+        if (idleMs <= 0L) return idleMs;
+        long lead = Math.max(0L, Math.min(systemTimeoutMs, idleMs));
+        return Math.max(MIN_HOLD_MS, idleMs - lead);
+    }
+
+    private long readSystemTimeoutMs() {
+        try {
+            return android.provider.Settings.System.getLong(context.getContentResolver(),
+                    android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 60_000L);
+        } catch (RuntimeException unreadable) {
+            return 60_000L;
+        }
     }
 
     private static String describe(long ms) {

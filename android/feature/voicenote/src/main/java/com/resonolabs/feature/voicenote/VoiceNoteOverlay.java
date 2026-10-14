@@ -27,7 +27,9 @@ import com.resonolabs.ui.design.TextFit;
  */
 public final class VoiceNoteOverlay extends View {
     private static final float W = 480f, H = 640f;
-    private static final float ORB_X = 240f, ORB_Y = 228f, ORB_R = 104f;
+    /** Below the system's microphone chip, which shows at the top while a note records. */
+    private static final float HEADER_Y = 98f;
+    private static final float ORB_X = 240f, ORB_Y = 262f, ORB_R = 100f;
     private static final long CHIP_MS = 4_500L;
     /** Recording red (the orb), saved green, waiting amber. */
     public static final int RECORDING = Color.rgb(255, 96, 110);
@@ -136,13 +138,13 @@ public final class VoiceNoteOverlay extends View {
         SamTheme.background(canvas, paint, W, H, ORB_X, ORB_Y + 20f, 330f, color);
         // Header: a red dot and VOICE NOTE, the time recorded on the right.
         paint.setColor(color);
-        canvas.drawCircle(44f, 58f, 6f, paint);
+        canvas.drawCircle(44f, HEADER_Y - 6f, 6f, paint);
         paint.setLetterSpacing(0.16f);
-        SamTheme.text(canvas, paint, "VOICE NOTE", 60f, 64f, 15f, SamTheme.withAlpha(SamTheme.INK, 220),
+        SamTheme.text(canvas, paint, "VOICE NOTE", 60f, HEADER_Y, 15f, SamTheme.withAlpha(SamTheme.INK, 220),
                 Paint.Align.LEFT, true);
         paint.setLetterSpacing(0f);
         if (machine.durationMs(now) > 0L || phase == VoiceNoteMachine.Phase.LISTENING) {
-            SamTheme.text(canvas, paint, clock(machine.durationMs(now)), 436f, 64f, 17f, SamTheme.MUTED,
+            SamTheme.text(canvas, paint, clock(machine.durationMs(now)), 436f, HEADER_Y, 17f, SamTheme.MUTED,
                     Paint.Align.RIGHT, false);
         }
         // The orb: lively and pulsing with the voice while recording, calm once it is over.
@@ -168,22 +170,22 @@ public final class VoiceNoteOverlay extends View {
         } else if (!machine.active()) {
             drawDash(canvas);
         }
-        SamTheme.text(canvas, paint, machine.title(), 240f, 420f, 32f, SamTheme.INK, Paint.Align.CENTER, true);
-        float y = 458f;
+        SamTheme.text(canvas, paint, machine.title(), 240f, 446f, 32f, SamTheme.INK, Paint.Align.CENTER, true);
+        float y = 482f;
         if (machine.active()) {
             String hint = machine.hint();
             if (!hint.isEmpty()) {
                 SamTheme.text(canvas, paint, hint, 240f, y, 16f, SamTheme.MUTED, Paint.Align.CENTER, false);
             }
-            y = 500f;
+            y = 522f;
             for (String line : wordLines) {
                 SamTheme.text(canvas, paint, line, 240f, y, 19f, SamTheme.withAlpha(SamTheme.INK, 205),
                         Paint.Align.CENTER, false);
                 y += 27f;
             }
             if (machine.countdown(now, controller.maxListenMs())) {
-                SamTheme.text(canvas, paint, countdown(machine.remainingMs(now, controller.maxListenMs())), 240f,
-                        606f, 17f, SamTheme.AMBER, Paint.Align.CENTER, true);
+                SamTheme.text(canvas, paint, countdown(machine.remainingMs(now, controller.maxListenMs())), 436f,
+                        HEADER_Y + 26f, 15f, SamTheme.AMBER, Paint.Align.RIGHT, true);
             }
         } else {
             for (String line : resultLines) {
@@ -191,7 +193,7 @@ public final class VoiceNoteOverlay extends View {
                         Paint.Align.CENTER, false);
                 y += 28f;
             }
-            SamTheme.text(canvas, paint, machine.hint(), 240f, 606f, 15f, SamTheme.withAlpha(SamTheme.MUTED, 200),
+            SamTheme.text(canvas, paint, machine.hint(), 240f, 612f, 15f, SamTheme.withAlpha(SamTheme.MUTED, 200),
                     Paint.Align.CENTER, false);
         }
     }
