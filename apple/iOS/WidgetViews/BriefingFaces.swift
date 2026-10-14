@@ -44,10 +44,9 @@ struct BriefingHeader: View {
     }
 }
 
-/// One item: its verb-first title, why, and Done (and Dismiss on the large face), which run in the background.
+/// One item: its verb-first title, why, Dismiss and Done, which run in the background.
 struct BriefingWidgetRow: View {
     let item: BriefingItem
-    var dismiss = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -68,17 +67,15 @@ struct BriefingWidgetRow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if dismiss {
-                Button(intent: BriefingItemIntent(itemId: item.id, action: .dismiss)) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(SamTheme.muted)
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color.white.opacity(0.07)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Dismiss")
+            Button(intent: BriefingItemIntent(itemId: item.id, action: .dismiss)) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(SamTheme.muted)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.white.opacity(0.07)))
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
             Button(intent: BriefingItemIntent(itemId: item.id, action: .done)) {
                 Image(systemName: "checkmark")
                     .font(.system(size: 12, weight: .bold))
@@ -122,7 +119,7 @@ struct BriefingEmptyLine: View {
     }
 }
 
-/// Medium: the headline and the first two items, each with Done.
+/// Medium: the headline and the first two items, each with Dismiss and Done.
 struct BriefingMediumFace: View {
     let snapshot: WidgetSnapshot
 
@@ -172,7 +169,7 @@ struct BriefingLargeFace: View {
                         .foregroundStyle(SamTheme.ink)
                         .lineLimit(2)
                     VStack(spacing: 9) {
-                        ForEach(items) { BriefingWidgetRow(item: $0, dismiss: true) }
+                        ForEach(items) { BriefingWidgetRow(item: $0) }
                     }
                 } else {
                     Spacer(minLength: 0)
