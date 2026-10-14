@@ -1,6 +1,6 @@
 import Foundation
 
-/// The four global shortcuts as data (DockShortcut.swift): names, parsing, recorded keys, the rules Settings applies
+/// The global shortcuts as data (DockShortcut.swift): names, parsing, recorded keys, the rules Settings applies
 /// and how they are kept.
 enum ShortcutTests {
     static let all: [(String, () throws -> Void)] = [
@@ -18,14 +18,16 @@ enum ShortcutTests {
     static let controlOption = DockShortcut.control | DockShortcut.option
 
     static func defaults() throws {
-        expectEqual(DockShortcutAction.allCases.map { $0.defaultShortcut.display }, ["⌃⌥Space", "⌃⌥K", "⌃⌥D", "⌃⌥M"])
+        expectEqual(DockShortcutAction.allCases.map { $0.defaultShortcut.display }, ["⌃⌥Space", "⌃⌥K", "⌃⌥D", "⌃⌥M", "⌃⌥N"])
         expectEqual(DockShortcuts.defaults[.talk], DockShortcut(keyCode: 49, modifiers: controlOption))
-        expectEqual(DockShortcuts.defaults.count, 4)
+        expectEqual(DockShortcuts.defaults[.voiceNote], DockShortcut(keyCode: 45, modifiers: controlOption), "⌃⌥N: a voice note")
+        expectEqual(DockShortcutAction.voiceNote.label, "Voice note")
+        expectEqual(DockShortcuts.defaults.count, 5)
         // The defaults pass the rules, and differ from each other.
         for action in DockShortcutAction.allCases {
             expect(DockShortcuts.problem(action.defaultShortcut, for: action, among: DockShortcuts.defaults) == nil, "\(action)")
         }
-        expectEqual(Set(DockShortcuts.defaults.values).count, 4)
+        expectEqual(Set(DockShortcuts.defaults.values).count, 5)
     }
 
     static func parsesWhatPeopleWrite() throws {
@@ -133,7 +135,7 @@ enum ShortcutTests {
         expectEqual(problem(49, c), "⌃Space is macOS’s shortcut for switching the input source.")
         expectEqual(problem(123, c), "⌃← is macOS’s shortcut for Mission Control and Spaces.")
         expectEqual(problem(21, s | cmd), "⇧⌘4 is macOS’s shortcut for screenshots.")
-        // The four differ; an action may keep its own.
+        // They all differ; an action may keep its own.
         expectEqual(problem(40, c | o, .showHide), "⌃⌥K is already “New task”.")
         expectEqual(problem(49, c | o, .minimize), "⌃⌥Space is already “Talk to SamRabbit”.")
         expect(problem(2, c | o, .showHide) == nil, "⌃⌥D for show / hide is its own")

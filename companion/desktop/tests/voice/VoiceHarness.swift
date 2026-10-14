@@ -12,6 +12,10 @@ import Foundation
 ///     voice-harness mute      mute ends with the conversation; muted, "Hey Rabbit" waits; a muted one ends by itself
 ///     voice-harness devices   this Mac's audio inputs and the wake listener's choice (read only)
 ///     voice-harness listen N  only the wake listener, for N seconds (for its CPU use)
+///     voice-harness note      a voice note from the dock's button: it stops on the pause, goes to the bridge, says how
+///                             it went; "Hey Rabbit" waits meanwhile and no conversation starts
+///     voice-harness note-hold ⌃⌥N held while it is said, released: sent on the release
+///     voice-harness note-offline  the bridge refuses it for now (503): kept in the outbox, then sent when it is back
 ///
 /// The wake phrase setting comes from the arguments (`-VoiceWakeEnabled YES|NO`, the argument domain), so nothing is
 /// written to any defaults.
@@ -137,12 +141,85 @@ struct VoiceHarness {
             let wall = Date().timeIntervalSince(started)
             print(String(format: "HARNESS_CPU %.2f%% (%.2f s of CPU in %.1f s)", cpu / wall * 100, cpu, wall))
             ok = check(voice.wakeArmed && voice.state == .idle, "still listening, nothing started")
+        case "note", "note-hold", "note-offline":
+            ok = await note(scenario, voice: voice)
         default:
             Log.write("harness: unknown scenario \(scenario)")
         }
         print("HARNESS_STATES " + states.joined(separator: ","))
         print(ok ? "HARNESS_OK \(scenario)" : "HARNESS_FAILED \(scenario)")
         exit(ok ? 0 : 1)
+    }
+
+    /// The voice note scenarios (VoiceNotes with the fixture microphone and the fake's /v1/desktop/capture; the outbox
+    /// in the temp folder headless.sh names in SAMRABBIT_CAPTURE_OUTBOX).
+    @MainActor
+    static func note(_ scenario: String, voice: MacVoice) async -> Bool {
+        guard ProcessInfo.processInfo.environment["SAMRABBIT_CAPTURE_OUTBOX"] != nil else {
+            return check(false, "SAMRABBIT_CAPTURE_OUTBOX names a temp outbox")
+        }
+        let notes = VoiceNotes()
+        var phases: [String] = []
+        notes.$snapshot.map { "\($0.phase)" }.removeDuplicates().sink { phase in
+            phases.append(phase)
+            Log.write("harness: note \(phase)")
+        }.store(in: &bag)
+        voice.activate(shortcut: false)
+        var ok = check(await waitUntil(within: 20) { voice.wakeArmed }, "listening for the wake phrase before")
+        if scenario == "note-offline" { await post("/dev/capture", ["mode": "busy"]) }
+        if scenario == "note-hold" {
+            notes.press()
+            ok = check(await waitUntil(within: 2) { notes.isRecording }, "⌃⌥N down: recording at once") && ok
+            // Held while the file is said (0.6 s of room, then about 3 s of words), then let go.
+            try? await Task.sleep(for: .seconds(6))
+            ok = check(notes.isRecording, "still recording while held (a pause doesn't send a held note)") && ok
+            notes.release()
+            ok = check(!notes.isRecording, "the release sends it") && ok
+        } else {
+            notes.toggle(source: "button")
+            ok = check(await waitUntil(within: 2) { notes.isRecording }, "recording at once") && ok
+            ok = check(!voice.wakeArmed, "“Hey Rabbit” waits while a note records") && ok
+            voice.start(reason: "button")
+            ok = check(voice.state == .idle, "no conversation starts while a note records") && ok
+            // It stops by itself: the file, then 3 s of quiet.
+            ok = check(await waitUntil(within: 15) { !notes.isRecording }, "a tapped note ends on the pause") && ok
+        }
+        if scenario == "note-offline" {
+            ok = check(await waitUntil(within: 10) { notes.snapshot.phase == .queued }, "the bridge refused it for now: kept") && ok
+            ok = check(notes.outbox.items().count == 1 && notes.snapshot.waiting == 1, "one note in the outbox") && ok
+            ok = check(notes.snapshot.line == "Saved on this Mac", "the bar says so (\(notes.snapshot.detail))") && ok
+            await post("/dev/capture", ["mode": "ok"])
+            notes.retryNow()
+            ok = check(await waitUntil(within: 15) { notes.outbox.items().isEmpty }, "sent once the bridge took it again") && ok
+            ok = check(notes.snapshot.waiting == 0, "nothing waits") && ok
+        } else {
+            ok = check(await waitUntil(within: 25) { notes.snapshot.line == "Added to your journal" },
+                       "the bar says what the bridge did (\(notes.snapshot.line) / \(notes.snapshot.detail))") && ok
+            ok = check(notes.outbox.items().isEmpty, "the outbox let it go once the bridge had it") && ok
+            ok = check(phases.contains("sending") && phases.contains("sent"), "recording, sending, sent: \(phases)") && ok
+        }
+        ok = check(await waitUntil(within: 10) { voice.wakeArmed }, "the wake listener is back after the note") && ok
+        // What the fake received: one note, from the Mac, a WAV of about the right length.
+        guard let arrived = await get("/dev/capture"), let captures = arrived["captures"] as? [[String: Any]] else {
+            return check(false, "the fake says what arrived")
+        }
+        ok = check(captures.count == 1, "one capture arrived (\(captures.count))") && ok
+        if let first = captures.first {
+            let seconds = first["seconds"] as? Double ?? 0
+            ok = check(first["source"] as? String == "mac" && first["contentType"] as? String == "audio/wav", "a WAV from the Mac") && ok
+            ok = check(seconds >= 3 && seconds <= 9, String(format: "about the length said (%.1f s)", seconds)) && ok
+            ok = check((first["capturedAt"] as? String)?.count == 25, "captured-at with its offset") && ok
+        }
+        print("HARNESS_NOTE_PHASES " + phases.joined(separator: ","))
+        return ok
+    }
+
+    /// A dev read on the fake server (desktop token).
+    static func get(_ path: String) async -> [String: Any]? {
+        var request = URLRequest(url: Config.origin.appendingPathComponent(String(path.dropFirst())))
+        request.setValue(Config.token(), forHTTPHeaderField: "X-SamRabbit-Desktop")
+        guard let (data, _) = try? await URLSession.shared.data(for: request) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     static func name(_ state: MacVoice.State) -> String {

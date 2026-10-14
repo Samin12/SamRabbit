@@ -239,8 +239,62 @@ enum DockSnapshots {
                 save(name, canvas, VStack { sheet }.frame(width: canvas.width, height: canvas.height))
             }
         }
+        // 19. The voice note's bar (CONTRACTS-WAVE8 §D1): recording after a tap and while ⌃⌥N is held, sending, sent
+        //     with what the bridge did, kept on this Mac while the bridge is away, and too short.
+        do {
+            let (_, ui) = fixture.make()
+            func note(_ phase: VoiceNoteSnapshot.Phase, _ line: String = "", _ detail: String = "", level: Double = 0,
+                      seconds: TimeInterval = 0) -> VoiceNoteSnapshot {
+                var note = VoiceNoteSnapshot()
+                note.phase = phase
+                note.line = line
+                note.detail = detail
+                note.level = level
+                note.startedAt = seconds > 0 ? Date().addingTimeInterval(-seconds) : nil
+                return note
+            }
+            let states = [
+                note(.recording(held: false), level: 0.62, seconds: 7.4),
+                note(.recording(held: true), level: 0.2, seconds: 2.2),
+                note(.sending, "On its way to your Mac’s bridge…"),
+                note(.sent, "Added to your journal", "“shipped the voice notes on the Mac today.”"),
+                note(.sent, "Saved as a note", "Start it as a T3 task?"),
+                note(.queued, "Saved on this Mac", "The bridge isn’t running — it goes as soon as it can."),
+                note(.discarded, "Too short", "Hold ⌃⌥N while you talk, or tap it, talk, and tap again."),
+            ]
+            save("dock-19-note.png", CGSize(width: 760, height: 640), VStack(spacing: 16) {
+                ForEach(Array(states.enumerated()), id: \.offset) { _, state in
+                    DockNoteBar(note: state, scale: ui.pillScale, commands: DockCommands()).fixedSize()
+                }
+            }.padding(.bottom, 24))
+        }
+        // 20–21. Before noon, the list opens with the morning brief (CONTRACTS-WAVE8 §D2): the headline, what to do first
+        //        with its verbs, today's next events. Then after Draft reply (saved in Gmail, opened, nothing sent) and
+        //        Make task, with "Remind me" open on the clash and a failed try's note. At 8:20 today, whatever the time.
+        if let start = Calendar.current.date(bySettingHour: 8, minute: 20, second: 0, of: Date()),
+           let early = Fixture.load(now: start), let brief = early.brief {
+            do {
+                let (store, ui) = early.make()
+                ui.expanded = true
+                save("dock-20-morning.png", CGSize(width: 680, height: 1200), Stage { panel(store, ui, idleVoice) })
+            }
+            do {
+                let (store, ui) = early.make()
+                ui.expanded = true
+                let first = brief.section(.doFirst)?.items ?? []
+                if first.count == 3 {
+                    store.morning.act(first[0], "draft_reply")
+                    store.morning.act(first[1], "make_task")
+                    store.morning.showNote(DockStore.note(for: DockAPI.Failure(status: 502, code: "gmail_failed",
+                                                                               message: "Gmail didn’t answer. Nothing was changed.")),
+                                           for: first[2].id)
+                    store.morning.remindOpen = first[2].id
+                }
+                save("dock-21-morning-acted.png", CGSize(width: 680, height: 1200), Stage { panel(store, ui, idleVoice) })
+            }
+        }
         for path in written { print(path) }
-        return written.count == 18 ? 0 : 1
+        return written.count == 21 ? 0 : 1
     }
 
     /// A small label under a state (dev snapshots only).
@@ -358,8 +412,11 @@ enum DockSnapshots {
         let details: [String: [DockMessage]]
         let targets: DockTargets?
         let now: Date
+        /// The morning brief (dev/samples/briefing.json next to the inbox), moved to `now`'s day.
+        var brief: DockBrief? = nil
 
-        static func load() -> Fixture? {
+        /// `now`: the moment the fixture's times are moved to (the morning snapshots use 8:20 today).
+        static func load(now: Date = Date()) -> Fixture? {
             let fallbacks: [String?] = [
                 Config.argument("--dock-fixture"),
                 ProcessInfo.processInfo.environment["SAMRABBIT_DOCK_FIXTURE"],
@@ -369,9 +426,9 @@ enum DockSnapshots {
                     .appendingPathComponent("dev/samples/inbox.json").path,
             ]
             for candidate in fallbacks.compactMap({ $0 }) {
-                guard let data = FileManager.default.contents(atPath: (candidate as NSString).expandingTildeInPath),
+                let path = (candidate as NSString).expandingTildeInPath
+                guard let data = FileManager.default.contents(atPath: path),
                       var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-                let now = Date()
                 if let base = (json["base"] as? String).flatMap(DockDate.parse) {
                     json = shift(json, by: now.timeIntervalSince(base)) as? [String: Any] ?? json
                 }
@@ -388,9 +445,24 @@ enum DockSnapshots {
                 }
                 let targets = (try? JSONSerialization.data(withJSONObject: json["targets"] ?? [:]))
                     .flatMap { try? JSONDecoder().decode(DockTargets.self, from: $0) }
-                return Fixture(inbox: inbox, details: details, targets: targets, now: now)
+                let brief = briefing(next: path, now: now)
+                return Fixture(inbox: inbox, details: details, targets: targets, now: now, brief: brief)
             }
             return nil
+        }
+
+        /// briefing.json beside the inbox fixture, moved by whole days to `now`'s (its clock times stay, like the fake's).
+        static func briefing(next inboxPath: String, now: Date) -> DockBrief? {
+            let path = (inboxPath as NSString).deletingLastPathComponent + "/briefing.json"
+            guard let data = FileManager.default.contents(atPath: path),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let base = (json["base"] as? String).flatMap(DockDate.parse),
+                  var brief = json["briefing"] as? [String: Any] else { return nil }
+            let calendar = Calendar.current
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: base), to: calendar.startOfDay(for: now)).day ?? 0
+            brief = shift(brief, by: TimeInterval(days) * 86_400) as? [String: Any] ?? brief
+            brief["date"] = DockBrief.day(now)
+            return DockBrief.from(brief)
         }
 
         /// Moves every ISO time in the fixture by `delta`, so "2 minutes ago" stays 2 minutes ago.
@@ -418,7 +490,7 @@ enum DockSnapshots {
             for item in inbox.items {
                 if let messages = details[item.id] { detailMap[item.id] = DockItemDetail(item: item, messages: messages) }
             }
-            let store = DockStore(fixture: inbox, details: detailMap, targets: targets, now: now, connection: connection)
+            let store = DockStore(fixture: inbox, details: detailMap, targets: targets, now: now, connection: connection, brief: brief)
             let ui = DockUIState()
             ui.pillScale = 1
             ui.panelScale = 1

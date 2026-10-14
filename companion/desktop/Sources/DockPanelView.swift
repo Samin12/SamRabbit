@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 // The expanded panel (opens on the side of the pill with room, ≈440 pt wide, at most 60% of the screen, scrolls):
-// Needs you, Working, Recent chats (SamRabbit) and a folded Earlier; a row opens in place with its last messages and
+// Morning (the brief, before noon: CONTRACTS-WAVE8 §D2), Needs you, Working, Recent chats (SamRabbit) and a folded
+// Earlier; a row opens in place with its last messages and
 // the actions the item supports right now (`can`); the compose bar is pinned at the bottom.
 
 struct DockPanel: View {
@@ -27,7 +28,7 @@ struct DockPanel: View {
                     if !store.isOnline {
                         DockStateCard(title: store.offlineText, detail: store.offlineDetail, dim: true, scale: p,
                                       retry: store.connection == .connecting ? nil : { store.retryNow() })
-                    } else if store.items.isEmpty {
+                    } else if store.items.isEmpty && !(store.morning.brief?.isMorning(now: store.now) ?? false) {
                         DockStateCard(title: "Nothing is waiting for you",
                                       detail: "Agents that need you show up here. Ask one below.", dim: false, scale: p, retry: nil)
                     } else {
@@ -119,6 +120,7 @@ struct DockPanel: View {
 
     private func rows(_ p: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 2 * p) {
+            DockMorningSection(morning: store.morning, now: store.now, scale: p)
             ForEach(store.sections) { section in
                 sectionHeader(section, p)
                 if section.kind != .earlier || ui.earlierOpen {
@@ -127,6 +129,13 @@ struct DockPanel: View {
                             .id(item.id)
                     }
                 }
+            }
+            if store.items.isEmpty {
+                Text("No agent is waiting for you.")
+                    .font(.system(size: 12 * p))
+                    .foregroundStyle(DockPalette.tertiary)
+                    .padding(.horizontal, 10 * p)
+                    .padding(.top, 10 * p)
             }
         }
         .padding(.horizontal, 6 * p)

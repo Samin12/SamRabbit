@@ -5,6 +5,8 @@ import Foundation
 // real ~/Library/Logs/samrabbit-desktop.log, never the app's defaults).
 
 enum Config {
+    static let tokenHeader = "X-SamRabbit-Desktop"
+
     static var origin: URL {
         let raw = ProcessInfo.processInfo.environment["SAMRABBIT_APP_URL"] ?? "http://127.0.0.1:3790/app/"
         var components = URLComponents(string: raw) ?? URLComponents()

@@ -33,3 +33,18 @@ extension MacVoice {
         return false
     }
 }
+
+/// The menu bar extra's voice note item (CONTRACTS-WAVE8 §D1): "Voice Note ⌃⌥N" starts one (it records until the next
+/// tap of ⌃⌥N, ↑ on the dock's bar, or a pause), "Send Voice Note" while one records; and how many notes wait for the
+/// bridge, when any do.
+struct VoiceNoteMenuItems: View {
+    @ObservedObject var notes = VoiceNotes.shared
+
+    var body: some View {
+        let shortcut = notes.snapshot.shortcut.isEmpty ? "" : "  \(notes.snapshot.shortcut)"
+        Button((notes.isRecording ? "Send Voice Note" : "Voice Note") + shortcut) { notes.toggle(source: "menu") }
+        if notes.snapshot.waiting > 0 {
+            Text(notes.snapshot.waiting == 1 ? "1 voice note waiting for the bridge" : "\(notes.snapshot.waiting) voice notes waiting for the bridge")
+        }
+    }
+}

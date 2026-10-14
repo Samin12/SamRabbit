@@ -15,6 +15,9 @@ struct DockVisibilityInput: Equatable {
     var mainWindowMinimized = false
     /// A voice conversation is on: the voice bar is its only control (stop, mute, end), so it always shows.
     var voiceActive = false
+    /// A voice note is recording, being sent, or saying how it went (CONTRACTS-WAVE8 §D1): its bar is the live
+    /// microphone and its only control, so it shows like the voice bar.
+    var noteActive = false
     /// Samin asked for it (⌃⌥K, "Show Agent Dock", a notification): it shows until he lets the list close.
     var summoned = false
     /// ⌃⌥D put it away: hidden until he presses it again (DockPresence).
@@ -25,12 +28,13 @@ struct DockVisibilityInput: Equatable {
 
 enum DockVisibility {
     enum Reason: String, Equatable {
-        case voice, summoned, off, userHidden, hiddenForAWhile, inApp, shown
+        case voice, note, summoned, off, userHidden, hiddenForAWhile, inApp, shown
     }
 
     static func reason(_ input: DockVisibilityInput) -> Reason {
         // A live microphone is never out of sight: the voice bar shows through every hide.
         if input.voiceActive { return .voice }
+        if input.noteActive { return .note }
         if input.summoned { return .summoned }
         if !input.enabled { return .off }
         if input.userHidden { return .userHidden }
@@ -43,7 +47,7 @@ enum DockVisibility {
 
     static func shows(_ input: DockVisibilityInput) -> Bool {
         switch reason(input) {
-        case .voice, .summoned, .shown: return true
+        case .voice, .note, .summoned, .shown: return true
         case .off, .userHidden, .hiddenForAWhile, .inApp: return false
         }
     }

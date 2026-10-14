@@ -1,8 +1,8 @@
 import Foundation
 
 // What the window's page (web/native.js) and the Swift shell say to each other beyond loading the page
-// (CONTRACTS-WAVE7 §B): the page's requests (voice, "Hey Rabbit", the Agent Dock switch, the native windows) and the
-// state the shell pushes into `window.SamRabbitApp.native(…)`. Pure (Foundation only), so tests/window can pin it;
+// (CONTRACTS-WAVE7 §B): the page's requests (voice, "Hey Rabbit", the Agent Dock switch, the native windows, a voice
+// note: WAVE8 §D1) and the state the shell pushes into `window.SamRabbitApp.native(…)`. Pure (Foundation only), so tests/window can pin it;
 // MainWindowBridge.swift wires it to MacVoice, the dock and the web view.
 
 /// One request from the page (`postNative({type, …})`), or nil for what the bridge doesn't handle (the window's own
@@ -12,8 +12,15 @@ enum WindowCommand: Equatable {
         case start, end, toggle, mute, unmute, stopSpeaking
     }
 
+    enum NoteAction: String, CaseIterable {
+        case toggle, send, cancel
+    }
+
     /// The page asks MacVoice: talk, end, mute, unmute, stop speaking.
     case voice(VoiceAction)
+    /// Home's "Voice note": start one (it records until the next tap of ⌃⌥N, the dock's ↑, or a pause), send it, or
+    /// throw it away. The recording is the shell's (VoiceNotes); the page only asks.
+    case note(NoteAction)
     /// "Listen for “Hey Rabbit”" in Settings.
     case wake(Bool)
     /// "Show the Agent Dock" in Settings.
@@ -35,6 +42,8 @@ enum WindowCommand: Equatable {
         case "dock":
             guard let on = body["enabled"] as? Bool else { return nil }
             return .dock(on)
+        case "note":
+            return (body["action"] as? String).flatMap(NoteAction.init(rawValue:)).map { .note($0) }
         case "ready":
             return .ready
         case "connectChatGPT":

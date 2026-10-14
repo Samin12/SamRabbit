@@ -3,7 +3,7 @@
 # against the fake sync server's canned /v1/desktop/assistant/* routes, one scenario at a time.
 #
 #   companion/desktop/tests/voice/headless.sh [turns] [wake] [wake-alone] [wake-pause] [wake-later] [wake-noise]
-#                                             [bargein] [talkover] [mute] [devices]
+#                                             [bargein] [talkover] [mute] [devices] [note] [note-hold] [note-offline]
 #                                             [listen <seconds>] [listen-speech <seconds>]   (default: all but listen*)
 #
 # * The "Hey Rabbit" scenarios: `wake` (the phrase and the question in one breath, the first sound the listener
@@ -11,6 +11,9 @@
 #   3 s, the question), `wake-later` (a sentence, 2 s, "So, hey Rabbit, what's on my calendar…"), `wake-noise` (20
 #   bursts of noise a second apart, then the phrase: the listener must never stop or pause). Each must wake, and the
 #   first utterance sent must be the question without the phrase (transcribed again on device).
+# * `note`, `note-hold`, `note-offline`: a voice note (VoiceNote*.swift) from the dock's button (it ends on the pause),
+#   with ⌃⌥N held, and with the bridge refusing it for now (kept in the outbox, sent when it is back); against the fake's
+#   /v1/desktop/capture, the outbox in the temp folder. What went up is transcribed again on device.
 # * `mute`: mute is the conversation's; a muted conversation still ends by itself; muted while idle, "Hey Rabbit"
 #   waits and says why. `devices`: reads this Mac's audio inputs (CoreAudio, no microphone opened) and the wake
 #   listener's choice.
@@ -39,7 +42,7 @@ cleanup() {
 trap cleanup EXIT
 
 SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake wake-alone wake-pause wake-later wake-noise bargein talkover mute devices)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake wake-alone wake-pause wake-later wake-noise bargein talkover mute devices note note-hold note-offline)
 
 # 1. Build: SamRabbitKit (cached next to build.sh's default output) and the harness.
 KIT=${SAMRABBIT_KIT_CACHE:-$DESKTOP/build/SamRabbitKit}
@@ -64,6 +67,7 @@ voice bye "Thanks, that's all."
 voice alone "Hey Rabbit."
 voice pause "Hey Rabbit. [[slnc 3000]] What's on my calendar this afternoon?"
 voice later "I was testing the new build this morning. [[slnc 2000]] So, hey Rabbit, what's on my calendar this afternoon?"
+voice note "Put this in my journal: shipped the voice notes on the Mac today."
 # 20 bursts of noise (0.15 s at about -29 dBFS, a second apart: dishes, a cough, a door), then the phrase; and a
 # moment of digital quiet (the fixture's room noise is added to it).
 /usr/bin/python3 -I - "$WORK/hey.wav" "$WORK/noise.wav" "$WORK/quiet.wav" <<'EOF'
@@ -95,7 +99,7 @@ mkdir -p "$WORK/home"
 start_server() {
   PORT=$(/usr/bin/python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
   rm -rf "$WORK/sent"; mkdir -p "$WORK/sent"
-  HOME="$WORK/home" SAMRABBIT_FAKE_ASSISTANT_SAVE="$WORK/sent" \
+  HOME="$WORK/home" SAMRABBIT_FAKE_ASSISTANT_SAVE="$WORK/sent" SAMRABBIT_FAKE_CAPTURE_SAVE="$WORK/sent" \
     /usr/bin/python3 -I "$DESKTOP/dev/fake_sync_server.py" --port "$PORT" --token-file "$WORK/token" \
     --live-delay -1 --empty 2> "$WORK/server.log" > /dev/null &
   SERVER=$!
@@ -196,6 +200,7 @@ run() {
     wake-later) fixture="$WORK/later.wav,$WORK/bye.wav"; wake=1 ;;
     wake-noise) fixture="$WORK/noise.wav,$WORK/bye.wav"; wake=1 ;;
     mute|devices) fixture="$WORK/quiet.wav"; idle=5 ;;
+    note|note-hold|note-offline) fixture="$WORK/note.wav" ;;
     listen) fixture="$WORK/bye.wav" ;;
     listen-speech) fixture="$WORK/talk.wav"; wake=1 ;;
     *) echo "unknown scenario $scenario" >&2; exit 64 ;;
@@ -203,6 +208,7 @@ run() {
   [ "$scenario" = bargein ] && fixture="$WORK/ask.wav"
   local enabled=NO harness=$scenario
   [ "$wake" = 1 ] || [ "$scenario" = listen ] || [ "$scenario" = mute ] && enabled=YES
+  case "$scenario" in note*) enabled=YES ;; esac
   [ "$scenario" = listen-speech ] && harness=listen
   case "$scenario" in wake-*) harness=wake ;; esac
   echo "== $scenario"
@@ -212,14 +218,14 @@ run() {
   : > "$WORK/speech-samples.txt"
   SAMRABBIT_APP_URL="http://127.0.0.1:$PORT/app/" SAMRABBIT_DESKTOP_TOKEN_FILE="$WORK/token" \
     SAMRABBIT_VOICE_FIXTURE="$fixture" SAMRABBIT_VOICE_FIXTURE_WAKE=$wake SAMRABBIT_VOICE_IDLE=$idle \
-    SAMRABBIT_VOICE_BARGE_IN=$([ "$scenario" = talkover ] && echo 1 || echo 0) \
+    SAMRABBIT_VOICE_BARGE_IN=$([ "$scenario" = talkover ] && echo 1 || echo 0) SAMRABBIT_CAPTURE_OUTBOX="$WORK/outbox-$scenario" \
     "$WORK/voice-harness" "$harness" "${@:2}" -VoiceWakeEnabled "$enabled" > "$WORK/out.txt" 2> "$WORK/harness.log" &
   pid=$!
   sample_speech "$pid" &
   sampler=$!
   wait "$pid" || status=$?
   wait "$sampler" || true
-  grep -E "harness: (state|heard|ok|FAILED)|voice: (fixture|wake|a wake|the wake|audio started|turn|microphone)" \
+  grep -E "harness: (state|heard|ok|FAILED)|voice: (fixture|wake|a wake|the wake|audio started|turn|microphone)|note: " \
     "$WORK/harness.log" | sed 's/^/  /'
   cat "$WORK/out.txt" | sed 's/^/  /'
   if [ "$harness" = wake ]; then
@@ -251,6 +257,23 @@ EOF
   fi
   if [ "$harness" = listen ]; then
     echo "  localspeechrecognition CPU meanwhile: $(speech_cpu)"
+  elif [ "$status" = 0 ] && [ "${scenario#note}" != "$scenario" ]; then
+    # What went up is the note as said (the bridge's own on-device transcriber hears it again).
+    if [ -x "$WORK/transcribe" ]; then
+      local said
+      said=$("$WORK/transcribe" --file "$WORK/sent/capture-1.wav" | /usr/bin/python3 -I -c \
+        'import json, sys; print(json.load(sys.stdin).get("text", ""))')
+      echo "  the note transcribes as: “${said}”"
+      /usr/bin/python3 -I -c '
+import re, sys
+words = re.sub(r"[^a-z\x27 ]", "", sys.argv[1].lower())
+good = "journal" in words and "voice notes" in words
+print(("  ok: " if good else "  FAILED: ") + "the whole note went up (“journal” … “voice notes”)")
+sys.exit(0 if good else 1)' "$said" || status=1
+    fi
+    local left
+    left=$(find "$WORK/outbox-$scenario" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$left" = 0 ]; then echo "  ok: the temp outbox is empty"; else echo "  FAILED: $left file(s) left in the outbox"; status=1; fi
   elif [ "$status" = 0 ] && [ "$scenario" != devices ]; then
     check_log "$scenario" || status=1
     if [ -x "$WORK/transcribe" ] && { [ "$harness" = wake ] || [ "$scenario" = talkover ]; }; then

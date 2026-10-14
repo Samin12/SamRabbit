@@ -122,3 +122,27 @@ func shortcutsSayWhenTalkIsTaken() {
     expectEqual(one["problem"] as? String, "Not available — taken by another app")
     expectEqual(one["keys"] as? String, "⌃⌥D")
 }
+
+func parsesTheVoiceNoteRequests() {
+    for action in WindowCommand.NoteAction.allCases {
+        expectEqual(WindowCommand.parse(["type": "note", "action": action.rawValue]), .note(action), action.rawValue)
+    }
+    expect(WindowCommand.parse(["type": "note", "action": "record forever"]) == nil, "an unknown action")
+    expect(WindowCommand.parse(["type": "note"]) == nil, "no action")
+}
+
+func noteStateAsThePageReadsIt() {
+    var note = VoiceNoteSnapshot()
+    note.phase = .sent
+    note.line = "Added to your journal"
+    note.detail = "“shipped the dock”"
+    note.level = 0.8
+    let json = note.json
+    expectEqual(json["state"] as? String, "sent")
+    expectEqual(json["line"] as? String, "Added to your journal")
+    expect(json["level"] == nil, "the level never goes to the page (it changes many times a second)")
+    expect(json["startedAt"] is NSNull)
+    expect(JSONSerialization.isValidJSONObject(json))
+    expect(WindowScript.native(["note": json]) != nil, "pushed like the rest")
+}
+

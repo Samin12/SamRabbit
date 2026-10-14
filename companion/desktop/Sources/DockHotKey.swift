@@ -7,10 +7,12 @@ private let dockHotKeySignature: OSType = 0x5352_446B  // 'SRDk'
 /// permission (the system only tells the app about its own combination). The dock registers ⌃⌥K, ⌃⌥D and ⌃⌥M (or what
 /// Settings recorded instead, DockShortcutCenter); the voice work registers the talk shortcut with its own handler on
 /// the same event target, so this handler answers only hot keys carrying its own signature and passes every other one
-/// on (`eventNotHandledErr`).
+/// on (`eventNotHandledErr`). A key that wants its release too (⌃⌥N: a voice note records while it is held) gets
+/// `kEventHotKeyReleased` as well, also without any permission.
 @MainActor
 final class DockHotKey {
     private static var actions: [UInt32: () -> Void] = [:]
+    private static var releases: [UInt32: () -> Void] = [:]
     private static var handler: EventHandlerRef?
     private static var nextId: UInt32 = 1
     /// What Carbon answered the last registration (`eventHotKeyExistsErr`: another app has the combination).
@@ -23,7 +25,8 @@ final class DockHotKey {
     /// (keys held only for a moment, like the dock's size keys while the pointer is on it). `exclusive`: Carbon refuses
     /// it while another app holds it exclusively too, and refuses such an app while SamRabbit holds it (a registration
     /// without exclusivity, ours or another app's, is never refused: the combination is shared and nobody is told).
-    init?(keyCode: Int, modifiers: Int, name: String, quiet: Bool = false, exclusive: Bool = false, action: @escaping () -> Void) {
+    init?(keyCode: Int, modifiers: Int, name: String, quiet: Bool = false, exclusive: Bool = false, action: @escaping () -> Void,
+          release: (() -> Void)? = nil) {
         Self.installHandler()
         id = Self.nextId
         Self.nextId += 1
@@ -39,6 +42,7 @@ final class DockHotKey {
         }
         self.ref = ref
         Self.actions[id] = action
+        Self.releases[id] = release
         if !quiet { Log.write("shortcut \(name) registered") }
     }
 
@@ -46,11 +50,13 @@ final class DockHotKey {
         if let ref { UnregisterEventHotKey(ref) }
         ref = nil
         Self.actions[id] = nil
+        Self.releases[id] = nil
     }
 
     private static func installHandler() {
         guard handler == nil else { return }
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var specs = [EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+                     EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))]
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
             guard let event else { return OSStatus(eventNotHandledErr) }
             var hotKey = EventHotKeyID()
@@ -58,10 +64,13 @@ final class DockHotKey {
                                            MemoryLayout<EventHotKeyID>.size, nil, &hotKey)
             guard status == noErr, hotKey.signature == dockHotKeySignature else { return OSStatus(eventNotHandledErr) }
             let id = hotKey.id
+            let released = GetEventKind(event) == UInt32(kEventHotKeyReleased)
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { DockHotKey.actions[id]?() }
+                MainActor.assumeIsolated {
+                    if released { DockHotKey.releases[id]?() } else { DockHotKey.actions[id]?() }
+                }
             }
             return noErr
-        }, 1, &spec, nil, &handler)
+        }, specs.count, &specs, nil, &handler)
     }
 }

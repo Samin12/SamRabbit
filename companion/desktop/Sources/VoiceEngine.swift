@@ -166,9 +166,13 @@ final class MacVoice: ObservableObject {
 
     // MARK: - What the app asks for
 
-    /// Opens a conversation ("button", "shortcut", "wake"); nothing while one is open.
+    /// Opens a conversation ("button", "shortcut", "wake"); nothing while one is open, or while a voice note records.
     func start(reason: String) {
         guard machine.phase == .idle else { return }
+        guard !noteRecording else {
+            Log.write("voice: not started, a voice note is recording (\(reason))")
+            return
+        }
         self.reason = reason
         errorTask?.cancel()
         errorTask = nil
@@ -197,6 +201,16 @@ final class MacVoice: ObservableObject {
     func end() {
         guard machine.phase.inConversation else { return }
         handle(.stop)
+    }
+
+    /// A voice note has the microphone (VoiceNotes, CONTRACTS-WAVE8 §D1): "Hey Rabbit" waits and no conversation
+    /// starts until it is done; then the listener comes back once the note's microphone is let go.
+    private(set) var noteRecording = false
+
+    func setNoteRecording(_ on: Bool) {
+        guard on != noteRecording else { return }
+        noteRecording = on
+        updateWake(after: on ? 0 : 0.6)
     }
 
     /// The mic button, ⌃⌥Space: talk, or end the conversation that is open.
@@ -522,7 +536,7 @@ final class MacVoice: ObservableObject {
         wakeTask?.cancel()
         wakeTask = nil
         let inConversation = machine.phase.inConversation
-        let wanted = activated && wakeEnabled && !micMuted && !noMicrophone && !inConversation
+        let wanted = activated && wakeEnabled && !micMuted && !noMicrophone && !inConversation && !noteRecording
         guard wanted else {
             wake.stop()
             if !wakeEnabled {

@@ -22,6 +22,8 @@ let tests: [(String, () -> Void)] = [
     ("throttlesOnlyTheLevel", throttlesOnlyTheLevel),
     ("scriptIsSafeJavaScript", scriptIsSafeJavaScript),
     ("shortcutsSayWhenTalkIsTaken", shortcutsSayWhenTalkIsTaken),
+    ("parsesTheVoiceNoteRequests", parsesTheVoiceNoteRequests),
+    ("noteStateAsThePageReadsIt", noteStateAsThePageReadsIt),
 ]
 
 for (name, test) in tests {

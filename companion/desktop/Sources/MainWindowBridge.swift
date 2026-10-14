@@ -3,7 +3,8 @@ import Combine
 import WebKit
 
 /// The window's half of Talk and Settings (CONTRACTS-WAVE7 §B): the page's requests go to MacVoice, the Agent Dock's
-/// switch and the native windows; MacVoice's published state (with the dock's switch, the shortcuts, the app's version
+/// switch, the native windows and voice notes (WAVE8 §D1: Home's "Voice note"; the note's state, without its level,
+/// goes back as `note`); MacVoice's published state (with the dock's switch, the shortcuts, the app's version
 /// and whether the window is on screen) goes into the page through `window.SamRabbitApp.native(…)`, where Talk draws the
 /// live transcript. The voice is MacVoice's alone (the same conversation ⌃⌥Space, "Hey Rabbit" and the dock start):
 /// the page has no audio engine. The message rules are in MainWindowMessages.swift (unit-tested in tests/window).
@@ -16,6 +17,8 @@ final class MainWindowBridge {
     private var throttle = WindowPushThrottle()
     private var ready = false
     private var subscription: AnyCancellable?
+    private var noteSubscription: AnyCancellable?
+    private var lastNote: [String: Any]?
     private var later: Timer?
     private var lastShortcut: String?
     /// The window is on screen (not closed, minimised or hidden): the page reads the bridge only then.
@@ -32,6 +35,10 @@ final class MainWindowBridge {
         subscription = self.voice.objectWillChange.sink { [weak self] _ in
             // objectWillChange comes before the new value is in place: read it on the next turn of the run loop.
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.voiceChanged() } }
+        }
+        // The note's state but not its level (the page has no bar of its own): only when that changed.
+        noteSubscription = VoiceNotes.shared.$snapshot.receive(on: DispatchQueue.main).sink { [weak self] note in
+            MainActor.assumeIsolated { self?.noteChanged(note) }
         }
     }
 
@@ -58,6 +65,14 @@ final class MainWindowBridge {
             if live { AppModel.shared.openChatGPT() }
         case .dockSettings:
             if live { WindowDock.openSettings() }
+        case .note(let action):
+            Log.write("window: voice note \(action.rawValue)")
+            guard live else { break }
+            switch action {
+            case .toggle: VoiceNotes.shared.toggle(source: "window")
+            case .send: VoiceNotes.shared.send()
+            case .cancel: VoiceNotes.shared.cancel()
+            }
         }
         onCommand?(command)
         return true
@@ -149,8 +164,10 @@ final class MainWindowBridge {
         windowVisible = isWindowVisible()
         throttle.pushed(state, at: Date())
         voicePushes += 1
+        let note = VoiceNotes.shared.snapshot.json
+        lastNote = note
         push(["app": ["version": Config.version, "bridge": host], "dock": dockState(),
-              "shortcuts": shortcuts(), "voice": state.json, "window": ["visible": windowVisible]])
+              "shortcuts": shortcuts(), "voice": state.json, "window": ["visible": windowVisible], "note": note])
     }
 
     private func voiceChanged() {
@@ -182,6 +199,18 @@ final class MainWindowBridge {
         }
     }
 
+    private func noteChanged(_ note: VoiceNoteSnapshot) {
+        guard ready else { return }
+        let json = note.json
+        if let lastNote, NSDictionary(dictionary: lastNote).isEqual(to: json) { return }
+        let shortcutBefore = lastNote?["shortcut"] as? String
+        lastNote = json
+        var patch: [String: Any] = ["note": json]
+        // The note's shortcut is one of the shortcuts Settings lists.
+        if shortcutBefore != json["shortcut"] as? String { patch["shortcuts"] = shortcuts() }
+        push(patch)
+    }
+
     private func push(_ patch: [String: Any]) {
         guard ready, let webView, let script = WindowScript.native(patch) else { return }
         webView.evaluateJavaScript(script)
@@ -195,6 +224,7 @@ final class MainWindowBridge {
         case .ready: return "ready"
         case .connectChatGPT: return "connectChatGPT"
         case .dockSettings: return "dockSettings"
+        case .note(let action): return "note.\(action.rawValue)"
         }
     }
 }
