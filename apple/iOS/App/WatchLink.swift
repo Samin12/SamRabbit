@@ -18,6 +18,9 @@ private let log = Logger(subsystem: "com.samrabbit.mobile", category: "watch")
 /// * passes on the watch's voice recordings the same way: they arrive in chunks (`VoiceRelay`), are put
 ///   back together here and uploaded for transcription with the watch's token
 ///   (`BridgeAccount.performRelayedTranscription`); the reply to the last chunk is the bridge's answer;
+/// * passes on the watch's voice notes: in chunks like a recording (purpose `capture`, uploaded to
+///   `/v1/mobile/capture` with the watch's token, `BridgeAccount.performRelayedCapture`), or handed over with
+///   `transferFile` into this iPhone's outbox (`CaptureUploader` sends it on);
 /// * carries the watch's assistant turns (`TurnRelay`): the utterance in chunks, then the turn goes to the Mac
 ///   with the watch's token and its answer is handed back piece by piece as the Mac streams it
 ///   (`TurnRelayHost`); a buffered answer (an older bridge, the Claude fallback) comes through the same way.
@@ -136,6 +139,9 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
             switch recordings.add(chunk) {
             case .waiting: reply([VoiceRelay.ackKey: chunk.seq])
             case .refused(let response): reply(response.message)
+            case .complete(let upload) where upload.purpose == VoiceRelay.capturePurpose:
+                // A voice note: to `/v1/mobile/capture` with the watch's own token and the note's headers.
+                awake { reply(await self.account.performRelayedCapture(upload).message) }
             case .complete(let upload) where upload.purpose == TurnRelay.purpose:
                 // A turn's utterance: kept until its `start` arrives.
                 turns.keep(upload)
@@ -157,6 +163,24 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
         }
         // With the watch's own token: a watch revoked on the Mac is refused here too (401).
         awake { reply(await self.account.performRelayed(request).message) }
+    }
+
+    /// A voice note the watch handed over with `transferFile` (it couldn't reach the Mac or this iPhone just then):
+    /// kept in this iPhone's outbox as the watch's (sent with the watch's own token) and sent on. The file is
+    /// deleted when this returns, so it is moved first.
+    func session(_ session: WCSession, didReceive file: WCSessionFile) {
+        guard let meta = CaptureMeta(transferMetadata: file.metadata) else { return }
+        let kept = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(meta.captureId).m4a")
+        do {
+            try? FileManager.default.removeItem(at: kept)
+            try FileManager.default.moveItem(at: file.fileURL, to: kept)
+            try CaptureOutbox.shared.add(recording: kept, meta: meta, relayedFor: .watch)
+            log.notice("a voice note from the watch")
+            CaptureUploader.shared.flush()
+        } catch {
+            try? FileManager.default.removeItem(at: kept)
+            log.notice("a voice note from the watch could not be kept")
+        }
     }
 
     /// Runs `work` under a background-task assertion (the phone may be in the background when the watch asks).

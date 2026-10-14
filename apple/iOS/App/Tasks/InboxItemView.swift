@@ -106,7 +106,18 @@ struct InboxItemView: View {
     }
 
     @ViewBuilder private func bottom(_ item: InboxItem) -> some View {
-        if let hold = item.heldOnMac {
+        if item.source == .note {
+            // A voice note the Mac saved: what it heard is above; its suggestion here.
+            VStack(alignment: .leading, spacing: 10) {
+                if let suggestion = item.suggestion {
+                    Label(suggestion.label, systemImage: "lightbulb")
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .foregroundStyle(SamTheme.ink)
+                }
+                NoteActions(item: item)
+            }
+            .glassCard(radius: 22, tint: SourceGlyph.tint(.note), padding: 14)
+        } else if let hold = item.heldOnMac {
             VStack(alignment: .leading, spacing: 12) {
                 InboxHoldNote(item: item, hold: hold)
                 PendingSummary(pending: item.pending)

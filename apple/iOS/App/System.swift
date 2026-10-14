@@ -88,6 +88,10 @@ import UIKit
 @MainActor
 enum UIApplicationOpener {
     static func open(_ url: URL) {
+        #if DEBUG
+        // `-SamRabbitOpenLinks off` (the UI tests): links stay in the app (a Gmail draft would bring up Safari).
+        if UserDefaults.standard.string(forKey: "SamRabbitOpenLinks") == "off" { return }
+        #endif
         UIApplication.shared.open(url)
     }
 }
@@ -107,6 +111,8 @@ enum BackgroundRefresh {
 
     static func run() async {
         schedule()
+        // Voice notes still waiting for the Mac go again (a background upload of their own).
+        CaptureUploader.shared.flush()
         let account = BridgeAccount.shared
         guard let client = account.client() else { return }
         do {

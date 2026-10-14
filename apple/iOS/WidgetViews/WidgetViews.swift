@@ -351,8 +351,9 @@ struct DashboardLargeFace: View {
                 }
                 Spacer(minLength: 0)
                 HStack(spacing: 10) {
-                    Button(intent: OpenAskIntent()) {
-                        Label("Ask", systemImage: "sparkles")
+                    // Talk: straight into the live call (the app comes up already in the conversation).
+                    Button(intent: TalkToSamRabbitIntent()) {
+                        Label("Talk", systemImage: "waveform")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity, minHeight: 38)
@@ -360,13 +361,14 @@ struct DashboardLargeFace: View {
                                                                       startPoint: .top, endPoint: .bottom)))
                     }
                     .buttonStyle(.plain)
-                    Button(intent: BlockTimeIntent(minutes: 30)) {
-                        Label("Block 30m", systemImage: "calendar.badge.clock")
+                    // A one-shot voice note: the recorder, recording; the Mac files it.
+                    Button(intent: VoiceNoteIntent()) {
+                        Label("Voice note", systemImage: "waveform.badge.mic")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(SamTheme.ink)
                             .frame(maxWidth: .infinity, minHeight: 38)
-                            .background(Capsule().fill(SamTheme.violet.opacity(0.22)))
-                            .overlay(Capsule().strokeBorder(SamTheme.violet.opacity(0.4), lineWidth: 0.8))
+                            .background(Capsule().fill(SamTheme.red.opacity(0.2)))
+                            .overlay(Capsule().strokeBorder(SamTheme.red.opacity(0.42), lineWidth: 0.8))
                     }
                     .buttonStyle(.plain)
                 }

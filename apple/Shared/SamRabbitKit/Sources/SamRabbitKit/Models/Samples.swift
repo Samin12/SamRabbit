@@ -59,6 +59,8 @@ extension MobileSummary {
                           project: "Assistant", status: .working, statusLabel: "Working",
                           summary: "Collecting closed issues…", updatedAt: now.addingTimeInterval(-40),
                           can: ["reply", "stop"]),
-            ]))
+            ]),
+            briefing: Briefing.sample(now: now).overview(),
+            captures: CapturesOverview(recent: 2, failed: 0))
     }
 }

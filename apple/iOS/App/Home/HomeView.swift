@@ -7,12 +7,15 @@ struct HomeView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 26) {
                 OrbHeader()
                 if !model.isPaired {
                     PairPromptCard()
                 } else {
+                    // The morning brief first, until noon (what needs you, the verb is the button).
+                    MorningSection()
                     TalkButton()
                     QuickActionsGrid()
                     if let error = model.lastError, model.summary != nil { OfflineBanner(error: error) }
@@ -28,6 +31,16 @@ struct HomeView: View {
         }
         .scrollIndicators(.hidden)
         .refreshable { await model.refresh(quiet: false) }
+        .onChange(of: model.briefFocus, initial: true) { _, focus in
+            // `samrabbit://brief[/<id>]` (the brief's widgets): the brief, or that item.
+            guard let focus else { return }
+            Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                withAnimation(.smooth) { proxy.scrollTo(focus, anchor: .top) }
+                model.briefFocus = nil
+            }
+        }
+        }
         .samScreen()
         .toolbar(.hidden, for: .navigationBar)
     }
@@ -48,18 +61,20 @@ struct OrbHeader: View {
                 ConnectionPill()
             }
             .padding(.top, 6)
-            // Tap the orb to talk, like the big button under it.
+            // Tap the orb to talk, like the big button under it. Smaller in the morning, so the brief under it
+            // starts on the first screen.
+            let morning = model.showsBriefing
             Button {
                 model.startTalk()
             } label: {
                 OrbView(mood: model.orbMood)
-                    .frame(width: 136, height: 136)
+                    .frame(width: morning ? 92 : 136, height: morning ? 92 : 136)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .disabled(!model.isPaired)
-            .padding(.top, 26)
-            .padding(.bottom, 36)
+            .padding(.top, morning ? 14 : 26)
+            .padding(.bottom, morning ? 22 : 36)
             .accessibilityLabel(headline)
             .accessibilityHint(model.isPaired ? "Talk to SamRabbit" : "")
             Text(headline)
@@ -212,7 +227,6 @@ struct TalkButton: View {
 
 struct QuickActionsGrid: View {
     @Environment(AppModel.self) private var model
-    @State private var blocking = false
 
     var body: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
@@ -220,13 +234,10 @@ struct QuickActionsGrid: View {
             LazyVGrid(columns: columns, spacing: 12) {
                 QuickActionTile(title: "Ask", symbol: "sparkles", tint: SamTheme.orb2) { model.sheet = .ask(prefill: "") }
                 QuickActionTile(title: "Note", symbol: "square.and.pencil", tint: SamTheme.mint) { model.sheet = .note(prefill: "") }
-                QuickActionTile(title: blocking ? "Blocking…" : "Block 30m", symbol: "calendar.badge.clock", tint: SamTheme.violet) {
-                    guard !blocking else { return }
-                    blocking = true
-                    Task {
-                        await model.block(minutes: 30)
-                        blocking = false
-                    }
+                // A one-shot voice note: records at once, the Mac files it (Block lives on in Siri and the Up Next
+                // widget).
+                QuickActionTile(title: "Voice note", symbol: "waveform.badge.mic", tint: SamTheme.red) {
+                    model.startVoiceNote(record: true)
                 }
                 QuickActionTile(title: "Screenshot", symbol: "camera.viewfinder", tint: SamTheme.cyan) {
                     model.pendingScreenshot = true

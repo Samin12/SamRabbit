@@ -86,6 +86,12 @@ public enum AppLink: Sendable, Equatable {
     /// complications. The link itself writes nothing: what is said does, and the assistant asks before it approves,
     /// denies, stops or deletes anything.
     case talk
+    /// `capture` (also `voicenote`, `note/voice`): the voice-note recorder. `record`: it starts recording at once,
+    /// kept only for the app's own intents (`fromApp`: the Action Button, the Voice Note control and widget
+    /// buttons). A link from a web page or a message opens it waiting for a tap: it never turns the microphone on.
+    case capture(record: Bool)
+    /// `brief[/<itemId>]` (also `briefing`, `morning`): Home with the morning brief at the top.
+    case briefing(String?)
 
     public enum Composer: String, Sendable {
         case ask, note, generate, openOnMac
@@ -118,6 +124,10 @@ public enum AppLink: Sendable, Equatable {
         case "ask", "new", "newtask":
             self = value("text", "q").map { .confirm(.ask(text: $0)) } ?? .compose(.ask, listen: listen)
         case "note", "journal":
+            if target == "note", parts.first?.lowercased() == "voice" {
+                self = .capture(record: fromApp)
+                return
+            }
             self = value("text").map { .confirm(.note(text: $0)) } ?? .compose(.note, listen: listen)
         case "generate":
             self = value("text", "prompt").map { .confirm(.generate(prompt: $0)) } ?? .compose(.generate, listen: listen)
@@ -140,6 +150,10 @@ public enum AppLink: Sendable, Equatable {
             self = .tab(name)
         case "talk", "voice", "assistant":
             self = .talk
+        case "capture", "voicenote", "voice-note":
+            self = .capture(record: fromApp)
+        case "brief", "briefing", "morning":
+            self = .briefing(parts.first)
         case "mac":
             switch parts.first?.lowercased() {
             case "open":

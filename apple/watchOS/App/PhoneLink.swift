@@ -19,7 +19,8 @@ extension Notification.Name {
 ///   request goes to the iPhone with `sendMessage` (`WatchRelay`) and the phone performs it; a voice
 ///   recording goes in chunks of at most 40 KB (`VoiceRelay`) and the phone uploads it for transcription;
 ///   an assistant turn goes the same way and its answer comes back in pieces as the Mac streams it
-///   (`TurnRelay`: the watch pulls each piece).
+///   (`TurnRelay`: the watch pulls each piece); a voice note goes in chunks too (`relayCapture`), or with
+///   `transferFile` when the phone can't answer now (`transferCapture`).
 final class PhoneLink: NSObject, WCSessionDelegate, BridgeRelay, TurnRelayLink, @unchecked Sendable {
     static let shared = PhoneLink()
 
@@ -104,6 +105,43 @@ final class PhoneLink: NSObject, WCSessionDelegate, BridgeRelay, TurnRelayLink, 
             guard !chunk.isLast, reply.ack == chunk.seq else { break }
         }
         throw BridgeError.unreachable("iPhone: the recording got no answer")
+    }
+
+    /// A voice note through the iPhone: the recording in chunks like a transcription (`VoiceRelay`, purpose
+    /// `capture`, with the note's id, time and source); the phone uploads it to `POST /v1/mobile/capture` with the
+    /// watch's own token and answers the last chunk with the bridge's status and body. Throws
+    /// `BridgeError.unreachable` when the phone can't be reached or stops answering (a note is safe to send again).
+    func relayCapture(_ audio: Data, meta: CaptureMeta) async throws -> (status: Int, body: Data) {
+        let chunks = VoiceRelay.chunks(of: audio, id: meta.captureId, contentType: meta.contentType,
+                                       language: meta.language, purpose: VoiceRelay.capturePurpose, capture: meta)
+        for chunk in chunks {
+            let reply = try await exchange(timeout: chunk.isLast ? 40 : 15) { chunk.message }
+            if let data = reply.relay, let response = WatchRelay.Response(message: [WatchRelay.responseKey: data]) {
+                state.withLock { $0.lastRoute = .phone }
+                return (response.status, response.body)
+            }
+            guard !chunk.isLast, reply.ack == chunk.seq else { break }
+        }
+        throw BridgeError.unreachable("iPhone: the voice note got no answer")
+    }
+
+    /// Hands a voice note to the iPhone with `WCSession.transferFile` (watchOS queues it and delivers it in the
+    /// background, whenever the phone is near): the phone keeps it in its own outbox and sends it on. The recording
+    /// stays here until the transfer finished (`didFinish`). False when the link isn't up at all.
+    func transferCapture(_ file: URL, meta: CaptureMeta) -> Bool {
+        guard WCSession.isSupported(), WCSession.default.activationState == .activated,
+              FileManager.default.fileExists(atPath: file.path) else { return false }
+        guard !transferring(meta.captureId) else { return true }
+        WCSession.default.transferFile(file, metadata: meta.transferMetadata)
+        return true
+    }
+
+    /// A transfer of this note to the iPhone is still on its way.
+    func transferring(_ captureId: String) -> Bool {
+        guard WCSession.isSupported(), WCSession.default.activationState == .activated else { return false }
+        return WCSession.default.outstandingFileTransfers.contains {
+            CaptureMeta(transferMetadata: $0.file.metadata)?.captureId == captureId
+        }
     }
 
     /// An assistant turn through the iPhone (`TurnRelay`): the utterance in chunks, then the phone sends the turn
@@ -267,6 +305,18 @@ final class PhoneLink: NSObject, WCSessionDelegate, BridgeRelay, TurnRelayLink, 
     func sessionReachabilityDidChange(_ session: WCSession) {
         if session.isReachable, !account.isPaired {
             Task { await requestContext() }
+        }
+    }
+
+    /// A voice note handed to the iPhone arrived there (the phone sends it on): its recording goes here. One that
+    /// didn't make it waits in the outbox for another try.
+    func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
+        guard let meta = CaptureMeta(transferMetadata: fileTransfer.file.metadata) else { return }
+        if error == nil {
+            CaptureOutbox.shared.handedOff(meta.captureId)
+            log.notice("a voice note reached the iPhone")
+        } else {
+            CaptureOutbox.shared.failed(meta.captureId, error: "transfer_failed", retryable: true)
         }
     }
 }

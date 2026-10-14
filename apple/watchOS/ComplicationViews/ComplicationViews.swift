@@ -22,6 +22,11 @@ struct ComplicationSnapshot: Sendable {
     var needsYou: Int { summary?.t3.needsYou ?? 0 }
     var working: Int { summary?.t3.working ?? 0 }
     var next: CalendarEvent? { summary?.nextEvent(after: date) }
+    /// Today's morning brief, if the Mac has one.
+    var brief: BriefingOverview? {
+        guard let brief = summary?.briefing, brief.current(now: date) else { return nil }
+        return brief
+    }
 
     /// "Standup in 25m", "Standup now".
     func eventLine(_ event: CalendarEvent) -> String {
@@ -154,6 +159,80 @@ struct StatusInlineComplication: View {
             Label(Formatting.clip(snapshot.eventLine(next), 24), systemImage: "calendar")
         } else {
             Label("\(snapshot.working) working", systemImage: "circle.dotted.circle")
+        }
+    }
+}
+
+/// accessoryCircular: a mic: tap to record a voice note.
+struct VoiceNoteCircularComplication: View {
+    var body: some View {
+        ZStack {
+            AccessoryWidgetBackground()
+            VStack(spacing: 0) {
+                Image(systemName: "waveform.badge.mic")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(SamTheme.red)
+                Text("Note").font(.system(size: 10, weight: .semibold))
+            }
+            .widgetAccentable()
+        }
+        .accessibilityLabel("Record a voice note")
+    }
+}
+
+/// accessoryCorner: the mic in the corner, "Voice note" along the bezel.
+struct VoiceNoteCornerComplication: View {
+    var body: some View {
+        ZStack {
+            AccessoryWidgetBackground()
+            Image(systemName: "waveform.badge.mic")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(SamTheme.red)
+                .widgetAccentable()
+        }
+        .widgetLabel { Text("Voice note").foregroundStyle(SamTheme.orbPale) }
+        .accessibilityLabel("Record a voice note")
+    }
+}
+
+/// accessoryRectangular: "☀ 3 to do" and the headline of today's brief.
+struct BriefRectangularComplication: View {
+    let snapshot: ComplicationSnapshot
+
+    var body: some View {
+        let brief = snapshot.brief
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Image(systemName: "sun.max.fill").font(.system(size: 11, weight: .bold))
+                Text(brief.map { $0.needsYou > 0 ? $0.countLine : "Brief done" } ?? "Morning brief")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundStyle(SamTheme.amber)
+            .widgetAccentable()
+            Text(line(brief))
+                .font(.system(size: 13.5))
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .opacity(snapshot.stale ? 0.6 : 1)
+    }
+
+    private func line(_ brief: BriefingOverview?) -> String {
+        guard snapshot.paired else { return "Pair on your iPhone" }
+        guard let brief else { return "Ready by 7:00" }
+        return brief.headline.isEmpty ? (brief.needsYou > 0 ? "Open to see it" : "Nothing waits for you") : brief.headline
+    }
+}
+
+/// accessoryInline: "☀ 3 to do · 4 meetings".
+struct BriefInlineComplication: View {
+    let snapshot: ComplicationSnapshot
+
+    var body: some View {
+        if let brief = snapshot.brief {
+            Label(brief.needsYou > 0 ? brief.countLine : "Brief done", systemImage: "sun.max.fill")
+        } else {
+            Label("Morning brief", systemImage: "sun.max.fill")
         }
     }
 }

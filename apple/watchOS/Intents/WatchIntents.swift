@@ -8,22 +8,26 @@ import SamRabbitKit
 
 /// Where `OpenSamRabbitWatchIntent` opens the watch app.
 enum WatchDestination: String, AppEnum {
-    case ask, needs, working, upnext, quick
+    case ask, note, brief, needs, working, upnext, quick
 
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "SamRabbit page"
     static let caseDisplayRepresentations: [WatchDestination: DisplayRepresentation] = [
         .ask: DisplayRepresentation(title: "Talk", synonyms: ["ask", "voice", "assistant", "conversation"]),
+        .note: DisplayRepresentation(title: "Voice Note", synonyms: ["note", "capture", "record"]),
+        .brief: DisplayRepresentation(title: "Morning Brief", synonyms: ["brief", "briefing", "morning"]),
         .needs: DisplayRepresentation(title: "Needs You", synonyms: ["approvals"]),
         .working: "Working",
         .upnext: DisplayRepresentation(title: "Up Next", synonyms: ["calendar"]),
         .quick: DisplayRepresentation(title: "Quick Actions", synonyms: ["quick"]),
     ]
 
-    /// The route the watch app follows: Talk opens the conversation, already listening.
+    /// The route the watch app follows: Talk opens the conversation, already listening; Voice Note the recorder,
+    /// recording (it sends itself when he pauses).
     var route: String {
         switch self {
         case .ask: PendingRoute.askListening
-        case .needs, .working, .upnext, .quick: "samrabbit://tab/\(rawValue)"
+        case .note: PendingRoute.capture
+        case .brief, .needs, .working, .upnext, .quick: "samrabbit://tab/\(rawValue)"
         }
     }
 }

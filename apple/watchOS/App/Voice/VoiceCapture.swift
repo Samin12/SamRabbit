@@ -10,7 +10,8 @@ private let voiceLog = Logger(subsystem: "com.samrabbit.mobile.watchkitapp", cat
 
 // The watch takes text only by voice: no keyboard, no Scribble, no system text input. A recording goes to
 // the Mac bridge (directly, or through the iPhone in chunks) and comes back as words; the person checks
-// them and sends.
+// them and sends. A voice note (`.capture`) skips all that: it goes to the Mac as it is, which files it, and the
+// watch only says that it went (nothing is said back).
 
 /// What a recording is for. Send performs it with the words.
 enum VoicePurpose: Equatable {
@@ -22,6 +23,9 @@ enum VoicePurpose: Equatable {
     case answer(TaskThread, PendingAction?)
     /// A line in today's journal (the person's own words).
     case note
+    /// A voice note (CONTRACTS-WAVE8 §C3): no words back, no review; the recording itself goes to the Mac
+    /// (`/v1/mobile/capture`), which files it: the journal on an explicit cue, a task, the calendar, else a note.
+    case capture
 
     var title: String {
         switch self {
@@ -29,6 +33,7 @@ enum VoicePurpose: Equatable {
         case .reply(let thread): "Reply · \(Formatting.clip(thread.title, 22))"
         case .answer: "Answer"
         case .note: "Journal note"
+        case .capture: "Voice note"
         }
     }
 
@@ -39,6 +44,7 @@ enum VoicePurpose: Equatable {
         case .reply: "Say your reply"
         case .answer(let thread, let pending): Formatting.clip((pending ?? thread.pending)?.text ?? "Say your answer", 60)
         case .note: "What should I add to today's journal?"
+        case .capture: "Say it. Pause and it's sent."
         }
     }
 
@@ -49,6 +55,7 @@ enum VoicePurpose: Equatable {
         case .reply(let thread): "Reply to “\(Formatting.clip(thread.title, 26))”"
         case .answer(let thread, _): "Answer for “\(Formatting.clip(thread.title, 24))”"
         case .note: "Today's journal"
+        case .capture: "Voice note"
         }
     }
 
@@ -58,6 +65,7 @@ enum VoicePurpose: Equatable {
         case .reply: "arrowshape.turn.up.left.fill"
         case .answer: "questionmark.bubble.fill"
         case .note: "book.pages.fill"
+        case .capture: "waveform.badge.mic"
         }
     }
 
@@ -67,8 +75,15 @@ enum VoicePurpose: Equatable {
         case .reply: SamTheme.cyan
         case .answer: SamTheme.violet
         case .note: SamTheme.mint
+        case .capture: SamTheme.red
         }
     }
+
+    /// The longest recording: a minute for words to check, two for a voice note.
+    var limit: TimeInterval { self == .capture ? CaptureFormat.watchMaxSeconds : VoiceFormat.maxSeconds }
+
+    /// Quiet this long after speech ends it (a note has pauses an answer doesn't).
+    var silence: TimeInterval { self == .capture ? CaptureFormat.silenceToStop : VoiceFormat.silenceToStop }
 
     /// The busy key of the action (`WatchModel.busy`).
     var busyKey: String {
@@ -76,6 +91,7 @@ enum VoicePurpose: Equatable {
         case .ask: "ask"
         case .reply(let thread), .answer(let thread, _): thread.threadId
         case .note: "note"
+        case .capture: "capture"
         }
     }
 }
@@ -86,62 +102,6 @@ struct VoiceRequest: Identifiable {
     let id = UUID()
     var purpose: VoicePurpose
     var after: (@MainActor () async -> Void)?
-}
-
-/// Where a recording's sound comes from: the watch's microphone, or in debug builds a made-up voice for
-/// the simulator (`VoiceFixtureSource`).
-@MainActor
-protocol VoiceSource: AnyObject {
-    /// Whether the microphone may be used (asks the first time).
-    func allowed() async -> Bool
-    /// Starts recording into `file` (AAC, `VoiceFormat.recorderSettings`).
-    func start(into file: URL) throws
-    /// The average power right now, in dBFS.
-    func power() -> Double
-    /// Stops; the file is complete afterwards.
-    func stop()
-}
-
-/// The watch's microphone (`AVAudioRecorder` with metering, the `.record` audio session).
-@MainActor
-final class MicrophoneSource: VoiceSource {
-    private var recorder: AVAudioRecorder?
-
-    struct StartFailed: Error {}
-
-    func allowed() async -> Bool {
-        switch AVAudioApplication.shared.recordPermission {
-        case .granted: true
-        case .denied: false
-        default: await AVAudioApplication.requestRecordPermission()
-        }
-    }
-
-    func start(into file: URL) throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default)
-        try session.setActive(true)
-        let recorder = try AVAudioRecorder(url: file, settings: VoiceFormat.recorderSettings)
-        recorder.isMeteringEnabled = true
-        // A little past the cap: `VoiceCapture` stops at 60 s itself.
-        guard recorder.prepareToRecord(), recorder.record(forDuration: VoiceFormat.maxSeconds + 1) else {
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
-            throw StartFailed()
-        }
-        self.recorder = recorder
-    }
-
-    func power() -> Double {
-        guard let recorder else { return -160 }
-        recorder.updateMeters()
-        return Double(recorder.averagePower(forChannel: 0))
-    }
-
-    func stop() {
-        recorder?.stop()
-        recorder = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-    }
 }
 
 /// One voice capture: listen (the orb follows the level), stop on quiet / Stop / 60 s, turn the recording
@@ -157,6 +117,10 @@ final class VoiceCapture {
         case review(String)
         case sending(String)
         case failed(VoiceProblem)
+        /// A voice note on its way to the Mac.
+        case delivering
+        /// What became of a voice note ("Sent ✓ — Added to your journal", "Saved", ...).
+        case delivered(CaptureNotice)
     }
 
     let request: VoiceRequest
@@ -172,6 +136,8 @@ final class VoiceCapture {
     @ObservationIgnored private let makeSource: @MainActor () -> VoiceSource
     @ObservationIgnored private var source: VoiceSource?
     @ObservationIgnored private var file: URL?
+    /// A voice note's id and time (made when it starts recording).
+    @ObservationIgnored private var meta: CaptureMeta?
     @ObservationIgnored private var activity = VoiceActivity()
     @ObservationIgnored private var startedAt = Date()
     @ObservationIgnored private var meter: Task<Void, Never>?
@@ -184,16 +150,17 @@ final class VoiceCapture {
     init(request: VoiceRequest, model: WatchModel, source: (@MainActor () -> VoiceSource)? = nil) {
         self.request = request
         self.model = model
-        makeSource = source ?? VoiceCapture.defaultSource
+        let limit = request.purpose.limit
+        makeSource = source ?? { MicrophoneSource.source(limit: limit) }
     }
 
-    /// The microphone, or in debug builds the simulator's made-up voice (`-SamRabbitVoiceFixture`).
+    /// The microphone, or in debug builds the simulator's made-up voice (`-SamRabbitVoiceFixture`; silence in the
+    /// simulator without one).
     static func defaultSource() -> VoiceSource {
-        #if DEBUG
-        if let fixture = VoiceFixtureSource.fromLaunchArguments() { return fixture }
-        #endif
-        return MicrophoneSource()
+        MicrophoneSource.source(limit: VoiceFormat.maxSeconds)
     }
+
+    var isCapture: Bool { request.purpose == .capture }
 
     var tint: Color { request.purpose.tint }
 
@@ -205,7 +172,7 @@ final class VoiceCapture {
     func appear() {
         closed = false
         switch phase {
-        case .review, .sending, .failed: return
+        case .review, .sending, .failed, .delivering, .delivered: return
         case .starting, .listening, .transcribing: begin()
         }
     }
@@ -216,7 +183,8 @@ final class VoiceCapture {
         reset()
         attempt += 1
         let current = attempt
-        if !summaryChecked {
+        // A voice note never waits for words here (the Mac keeps it until it can transcribe it).
+        if !summaryChecked, !isCapture {
             summaryChecked = true
             if let problem = VoiceProblem(status: model.summary?.transcribe) {
                 phase = .failed(problem)
@@ -248,7 +216,8 @@ final class VoiceCapture {
         }
         self.source = source
         self.file = file
-        activity = VoiceActivity()
+        meta = isCapture ? CaptureMeta(source: .watch) : nil // the id and the time are the recording's start
+        activity = VoiceActivity(silence: request.purpose.silence, limit: request.purpose.limit)
         startedAt = .now
         elapsed = 0
         level = 0
@@ -289,6 +258,12 @@ final class VoiceCapture {
             phase = .failed(.tooShort)
             return
         }
+        if var meta, isCapture {
+            meta.seconds = (duration * 10).rounded() / 10
+            self.meta = nil
+            deliver(file, meta: meta)
+            return
+        }
         phase = .transcribing
         let current = attempt
         work = Task { [weak self] in await self?.transcribe(file, attempt: current) }
@@ -323,6 +298,32 @@ final class VoiceCapture {
         }
     }
 
+    // MARK: - A voice note
+
+    /// Into the watch's outbox (so nothing is lost), then to the Mac (directly, through the iPhone, or handed to the
+    /// iPhone); the result face closes by itself. Not cancelled when the screen goes: the note is kept either way.
+    private func deliver(_ file: URL, meta: CaptureMeta) {
+        let entry: CaptureOutbox.Entry
+        do {
+            entry = try model.captures.outbox.add(recording: file, meta: meta)
+        } catch {
+            try? FileManager.default.removeItem(at: file)
+            phase = .failed(.recorderFailed)
+            return
+        }
+        phase = .delivering
+        let current = attempt
+        Task { [model] in
+            let notice = await model.captures.send(entry)
+            WKInterfaceDevice.current().play(notice.tone == .failed ? .failure : .success)
+            guard self.attempt == current, !self.closed else { return }
+            self.phase = .delivered(notice)
+            guard notice.tone != .failed else { return }
+            try? await Task.sleep(for: .seconds(notice.tone == .sent ? 1.6 : 2.2))
+            if case .delivered = self.phase, self.attempt == current { model.voice = nil }
+        }
+    }
+
     // MARK: - Send
 
     /// Performs the purpose with the words. On success the capture closes right away (the page shows the
@@ -349,6 +350,7 @@ final class VoiceCapture {
     func cancel() {
         closed = true
         reset()
+        meta = nil
     }
 
     private func reset() {

@@ -44,6 +44,9 @@ targets:
       # Talk (the live conversation) runs the watch's conversation engine: the same files, with #if os(...) where
       # the platforms differ (the audio session, voice processing, haptics).
       - path: watchOS/App/Assistant
+      # The recorder's sound sources (the microphone, and in debug builds a made-up voice), shared with the watch:
+      # the iPhone's voice notes record the same way the watch's voice input does.
+      - path: Shared/Voice
     dependencies:
       - package: SamRabbitKit
       - target: SamRabbitWidgets
@@ -172,6 +175,7 @@ targets:
       - path: watchOS/ComplicationViews
       - path: watchOS/Intents
       - path: watchOS/Resources
+      - path: Shared/Voice
     dependencies:
       - package: SamRabbitKit
       - target: SamRabbitWatchWidgets

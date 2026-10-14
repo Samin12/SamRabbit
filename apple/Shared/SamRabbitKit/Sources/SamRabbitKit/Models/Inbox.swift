@@ -12,6 +12,8 @@ public enum InboxSource: String, Codable, Sendable, CaseIterable {
     case codex
     /// A SamRabbit conversation (R1, Watch, iPhone, Mac): shown in Chats, not in Tasks.
     case samrabbit
+    /// A voice note the Mac saved (`note:<captureId>`), with what it suggests doing with it.
+    case note
     case unknown
 
     public init(raw: String?) {
@@ -20,6 +22,7 @@ public enum InboxSource: String, Codable, Sendable, CaseIterable {
         case "claude", "claude-code", "claudecode": self = .claude
         case "codex": self = .codex
         case "samrabbit", "chat": self = .samrabbit
+        case "note", "notes", "capture", "voice_note": self = .note
         default: self = .unknown
         }
     }
@@ -35,6 +38,7 @@ public enum InboxSource: String, Codable, Sendable, CaseIterable {
         case .claude: "Claude Code"
         case .codex: "Codex"
         case .samrabbit: "SamRabbit"
+        case .note: "Voice note"
         case .unknown: "Agent"
         }
     }
@@ -46,6 +50,7 @@ public enum InboxSource: String, Codable, Sendable, CaseIterable {
         case .claude: "Claude"
         case .codex: "Codex"
         case .samrabbit: "Chats"
+        case .note: "Notes"
         case .unknown: "Other"
         }
     }
@@ -54,6 +59,9 @@ public enum InboxSource: String, Codable, Sendable, CaseIterable {
 /// What an item supports right now (`item.can`). Unknown words are kept and ignored.
 public enum InboxCapability: String, Sendable {
     case approve, answer, reply, stop, seen, open
+    /// A voice note: do its suggestion (`POST /v1/mobile/captures/<id>/act`).
+    case act
+    case dismiss
 }
 
 /// One approval an item waits on (`pending.approvals[]`): T3's own choices (`accept`, `acceptForSession`,
@@ -212,11 +220,13 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
     public var live: Bool
     public var progress: Double?
     public var phase: String?
+    /// A voice note's suggestion ("Start it as a T3 task?"), done with `act`.
+    public var suggestion: CaptureSuggestion?
 
     public init(id: String, source: InboxSource, agent: String? = nil, title: String, project: String? = nil,
                 cwd: String? = nil, status: ThreadStatus, statusLabel: String = "", summary: String = "",
                 updatedAt: Date? = nil, unread: Bool = false, pending: InboxPending = InboxPending(), can: [String] = [],
-                live: Bool = false, progress: Double? = nil, phase: String? = nil) {
+                live: Bool = false, progress: Double? = nil, phase: String? = nil, suggestion: CaptureSuggestion? = nil) {
         self.id = id
         self.source = source
         self.agent = agent
@@ -233,6 +243,7 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
         self.live = live
         self.progress = progress
         self.phase = phase
+        self.suggestion = suggestion
     }
 
     public init(from decoder: Decoder) throws {
@@ -258,6 +269,7 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
         live = c.bool("live")
         progress = c.value(Double.self, "progress")
         phase = c.text("phase")
+        suggestion = c.value(CaptureSuggestion.self, "suggestion")
     }
 
     /// The id without its source (`<threadId>` of `t3:<threadId>`).

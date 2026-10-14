@@ -11,6 +11,8 @@ public struct AudioSessionClaims: Sendable, Equatable {
         case conversation
         /// The iPhone's dictation (a composer's mic button).
         case dictation
+        /// A voice note's recorder (the iPhone's and the watch's).
+        case capture
     }
 
     public private(set) var holders: Set<Holder> = []
