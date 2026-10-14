@@ -3,7 +3,7 @@ import Foundation
 import SamRabbitKit
 
 /// No sound at all: what a conversation hears in the simulator unless a fixture is asked for, so the simulator
-/// never listens through the Mac's own microphone.
+/// never listens through the Mac's own microphone (the watch and the iPhone alike).
 @MainActor
 final class SilentInput: ConversationInput {
     var isFixture: Bool { true }
@@ -14,8 +14,8 @@ final class SilentInput: ConversationInput {
 }
 
 #if DEBUG
-/// Debug builds only (never in a release build): a made-up voice for the conversation, for the simulator and the
-/// watch UI tests. Each time the microphone opens it waits a moment, then "says" something for about 1.6 s (a
+/// Debug builds only (never in a release build): a made-up voice for the conversation, for the simulators and the
+/// watch and iPhone UI tests. Each time the microphone opens it waits a moment, then "says" something for about 1.6 s (a
 /// voice-like buzz in syllables at speaking level over a quiet room), then stays quiet; after `turns` utterances
 /// it stays quiet for good, so the conversation's end after a quiet while can be seen too.
 ///
@@ -34,7 +34,12 @@ final class SilentInput: ConversationInput {
 /// WAV and the same turns to the (fake) bridge.
 @MainActor
 final class ConversationFixture: ConversationInput {
-    let mode: VoiceFixtureSource.Mode
+    /// The same words as the watch's voice capture fixture (`-SamRabbitVoiceFixture`).
+    enum Mode: String {
+        case speech, hold, quiet
+    }
+
+    let mode: Mode
     let permitted: Bool
     let turns: Int
     let lead: TimeInterval
@@ -50,7 +55,7 @@ final class ConversationFixture: ConversationInput {
 
     var isFixture: Bool { true }
 
-    init(mode: VoiceFixtureSource.Mode, permitted: Bool = true, turns: Int = 2, lead: TimeInterval = 0.8,
+    init(mode: Mode, permitted: Bool = true, turns: Int = 2, lead: TimeInterval = 0.8,
          micDelay: TimeInterval = 0, length: TimeInterval = 1.6) {
         self.mode = mode
         self.permitted = permitted
@@ -69,7 +74,7 @@ final class ConversationFixture: ConversationInput {
         let lead = defaults.object(forKey: "SamRabbitFixtureLead") == nil ? 0.8 : defaults.double(forKey: "SamRabbitFixtureLead")
         let micDelay = defaults.double(forKey: "SamRabbitFixtureMicDelay")
         let length = defaults.object(forKey: "SamRabbitFixtureLength") == nil ? 1.6 : defaults.double(forKey: "SamRabbitFixtureLength")
-        return ConversationFixture(mode: VoiceFixtureSource.Mode(rawValue: raw) ?? .speech, permitted: !denied,
+        return ConversationFixture(mode: Mode(rawValue: raw) ?? .speech, permitted: !denied,
                                    turns: max(0, turns), lead: max(0, lead), micDelay: min(30, max(0, micDelay)),
                                    length: min(20, max(0.05, length)))
     }

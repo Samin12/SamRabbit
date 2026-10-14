@@ -20,8 +20,10 @@ import Foundation
 ///   `{"announce": id}` turn in the conversation's voice. The bridge counts one as told once the watch has it, so
 ///   none is ever dropped: one that waits when the conversation ends is said when the next one starts.
 /// * It ends on Stop, when the Mac says so (`endConversation`), after `idleTimeout` (about 2 minutes) without a
-///   turn that heard words (noise, coughs and empty transcripts don't count), or after the current reply when the
-///   app leaves the screen (coming back while it plays keeps the conversation going).
+///   turn that heard words (noise, coughs and empty transcripts don't count; while the iPhone's microphone is
+///   muted, `mutedTimeout`, about 5 minutes), or after the current reply when the app leaves the screen (coming back
+///   while it plays keeps the conversation going). Stop while paused means it: the paused conversation no longer
+///   goes on by itself.
 public struct ConversationMachine: Sendable {
     public enum Phase: String, Sendable, Equatable {
         /// No conversation.
@@ -208,6 +210,13 @@ public struct ConversationMachine: Sendable {
         /// The app is in front again (wrist raised, reopened): continues a paused conversation, or keeps one whose
         /// reply was still playing going.
         case resume
+        /// Words typed instead of said (the iPhone's keyboard): sent as a `{text}` turn. While a reply is on its
+        /// way or playing it is interrupted first, like a tap.
+        case typed(String)
+        /// The microphone was muted (the iPhone's mute button) or unmuted. The app stops hearing; the machine
+        /// counts the quiet from the mute (and the unmute), waits `mutedTimeout` instead of `idleTimeout` while
+        /// muted, and keeps the mute across a pause (a call): a new conversation starts unmuted.
+        case muted(Bool)
     }
 
     /// One exchange, for the captions and the scrollable history.
@@ -256,7 +265,12 @@ public struct ConversationMachine: Sendable {
     /// Noise never moves it, so a café, a car or a TV can't keep the microphone open forever.
     public private(set) var lastActivity: Date = .distantPast
     public private(set) var expectReply = false
+    /// The microphone is muted (`muted(true)`): nothing is heard, and the quiet end waits longer (`mutedTimeout`).
+    public private(set) var micMuted = false
     public var idleTimeout: TimeInterval
+    /// The quiet end while muted (never shorter than `idleTimeout`): muted and put away, the conversation still
+    /// ends, so it doesn't hold the microphone and read announcements out loud until someone comes back.
+    public var mutedTimeout: TimeInterval = 300
     /// A conversation that stopped because the app left (or the audio was taken) is resumed within this long.
     public var resumeWindow: TimeInterval = 180
     public static let maxExchanges = 12
@@ -383,7 +397,11 @@ public struct ConversationMachine: Sendable {
         case .tap:
             return tap(at: now)
         case .stop:
-            guard phase.inConversation else { return [] }
+            guard phase.inConversation else {
+                // Ended on purpose while paused (a call, the app away): it doesn't go on by itself afterwards.
+                resumable = false
+                return []
+            }
             return finish(at: now, problem: nil, haptic: .stop, tellMac: true)
         case .tick:
             return tick(at: now)
@@ -413,7 +431,43 @@ public struct ConversationMachine: Sendable {
             if phase.inConversation { return keepGoing() }
             guard canContinue(at: now) else { return [] }
             return start(at: now)
+        case .typed(let text):
+            return typed(text, at: now)
+        case .muted(let on):
+            micMuted = on
+            // The quiet end counts from now (not from the last words before the mute or the unmute).
+            if phase.inConversation { lastActivity = now }
+            return []
         }
+    }
+
+    /// A typed turn: sent at once while listening (an utterance being heard is dropped); a reply on its way or
+    /// playing is interrupted first. Nothing while starting, idle or saying a fatal failure.
+    ///
+    /// Only a reply the Mac is still sending is cancelled there: the Mac cancels whatever turn holds the conversation,
+    /// so a cancel for a reply that is over (its `done` came, the rest only plays here) could stop the typed turn
+    /// itself. The app sends the new turn once a cancel is through.
+    private mutating func typed(_ text: String, at now: Date) -> [Effect] {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty, !endAfterPlayback else { return [] }
+        var effects: [Effect] = []
+        switch phase {
+        case .idle, .starting:
+            return []
+        case .listening, .hearing:
+            break
+        case .thinking, .speaking:
+            if let current, current.kind == .bridge, current.done == nil {
+                effects.append(.cancel(turnId: current.id, conversationId: conversationId))
+            }
+            update { $0.interrupted = true }
+            effects.append(.stopPlayback)
+        }
+        lastActivity = now
+        effects += send(.text(words), kind: .utterance)
+        current?.accepted = true
+        update { $0.heard = words }
+        return effects
     }
 
     /// Back in front while the reply still plays: it no longer pauses afterwards.
@@ -431,7 +485,7 @@ public struct ConversationMachine: Sendable {
             if !queue.isEmpty, now.timeIntervalSince(listeningSince) >= Self.announceAfterQuiet {
                 return announce(queue.removeFirst(), at: now)
             }
-            guard now.timeIntervalSince(lastActivity) >= idleTimeout else { return [] }
+            guard now.timeIntervalSince(lastActivity) >= quietLimit else { return [] }
             return finish(at: now, problem: nil, haptic: .stop, tellMac: true)
         case .hearing:
             guard now.timeIntervalSince(hearingSince) >= Self.hearingLimit else { return [] }
@@ -453,9 +507,12 @@ public struct ConversationMachine: Sendable {
     /// announcement goes first; a conversation that has been idle too long ends.
     private mutating func listeningAgain(at now: Date) -> [Effect] {
         if !queue.isEmpty { return announce(queue.removeFirst(), at: now) }
-        guard now.timeIntervalSince(lastActivity) >= idleTimeout else { return [] }
+        guard now.timeIntervalSince(lastActivity) >= quietLimit else { return [] }
         return finish(at: now, problem: nil, haptic: .stop, tellMac: true)
     }
+
+    /// How long the conversation stays open without words: longer while the microphone is muted.
+    private var quietLimit: TimeInterval { micMuted ? max(idleTimeout, mutedTimeout) : idleTimeout }
 
     /// New announcements join the queue once each (the oldest go when too many wait).
     private mutating func enqueue(_ items: [Announcement]) {
@@ -480,6 +537,8 @@ public struct ConversationMachine: Sendable {
             conversationId = nil
             brain = .unknown
             exchanges = []
+            // A paused conversation keeps its mute; a new one starts unmuted.
+            micMuted = false
             // A new conversation hears of new events only; the ones still waiting are said in it.
             announced = Set(queue.map(\.id))
         }
@@ -636,8 +695,9 @@ public struct ConversationMachine: Sendable {
         let turn = current
         current = nil
         playing = false
-        // Only a turn with words counts: noise (an empty transcript) doesn't keep the conversation open.
-        if turn?.accepted == true { lastActivity = now }
+        // Only a turn with words counts: noise (an empty transcript) doesn't keep the conversation open. Nor do
+        // announcements while the microphone is muted (nobody is talking; T3 events alone mustn't keep it open).
+        if turn?.accepted == true, !(micMuted && turn?.announcement != nil) { lastActivity = now }
         if turn?.done?.endConversation == true { closing = true }
         if endAfterPlayback {
             // A fatal failure was said.
@@ -652,7 +712,7 @@ public struct ConversationMachine: Sendable {
         if !queue.isEmpty { return announce(queue.removeFirst(), at: now) }
         if closing { return finish(at: now, problem: nil, haptic: .stop, tellMac: false) }
         // Noise turns long after the last words: the quiet end (the tick may never see "listening" in a noisy room).
-        if now.timeIntervalSince(lastActivity) >= idleTimeout {
+        if now.timeIntervalSince(lastActivity) >= quietLimit {
             return finish(at: now, problem: nil, haptic: .stop, tellMac: true)
         }
         phase = .listening

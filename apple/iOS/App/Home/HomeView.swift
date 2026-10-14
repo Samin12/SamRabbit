@@ -1,8 +1,8 @@
 import SamRabbitKit
 import SwiftUI
 
-/// Home: the orb and its state, what needs you, what is running, what is next, the latest R1
-/// conversation and the quick actions.
+/// Home: the orb and its state, Talk (the live conversation), what needs you, what is running, what is
+/// next, the latest R1 conversation and the quick actions.
 struct HomeView: View {
     @Environment(AppModel.self) private var model
 
@@ -13,6 +13,7 @@ struct HomeView: View {
                 if !model.isPaired {
                     PairPromptCard()
                 } else {
+                    TalkButton()
                     QuickActionsGrid()
                     if let error = model.lastError, model.summary != nil { OfflineBanner(error: error) }
                     NeedsYouSection()
@@ -47,11 +48,20 @@ struct OrbHeader: View {
                 ConnectionPill()
             }
             .padding(.top, 6)
-            OrbView(mood: model.orbMood)
-                .frame(width: 136, height: 136)
-                .padding(.top, 26)
-                .padding(.bottom, 36)
-                .accessibilityLabel(headline)
+            // Tap the orb to talk, like the big button under it.
+            Button {
+                model.startTalk()
+            } label: {
+                OrbView(mood: model.orbMood)
+                    .frame(width: 136, height: 136)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.isPaired)
+            .padding(.top, 26)
+            .padding(.bottom, 36)
+            .accessibilityLabel(headline)
+            .accessibilityHint(model.isPaired ? "Talk to SamRabbit" : "")
             Text(headline)
                 .font(.system(size: 26, weight: .semibold))
                 .foregroundStyle(SamTheme.ink)
@@ -161,6 +171,37 @@ struct PairPromptCard: View {
             }
         }
         .glassCard(tint: SamTheme.orb)
+    }
+}
+
+// MARK: - Talk
+
+/// The big Talk button: a live voice conversation with SamRabbit (or back to the one that is running).
+struct TalkButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let talking = model.talk.active
+        Button {
+            Haptics.tap()
+            model.startTalk()
+        } label: {
+            HStack(spacing: 11) {
+                Image(systemName: talking ? "waveform.circle.fill" : "waveform")
+                    .font(.system(size: 19, weight: .semibold))
+                    .symbolEffect(.variableColor.iterative, options: .repeating, isActive: talking)
+                Text(talking ? "Back to the conversation" : "Talk to SamRabbit")
+                    .font(.system(size: 17, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 56)
+            .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.tint(SamTheme.orb.opacity(0.85)).interactive(), in: .capsule)
+        .shadow(color: SamTheme.orb.opacity(0.35), radius: 18, y: 6)
+        .accessibilityIdentifier("home-talk")
     }
 }
 

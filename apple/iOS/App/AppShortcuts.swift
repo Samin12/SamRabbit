@@ -3,14 +3,20 @@ import AppIntents
 /// Siri phrases and Shortcuts tiles (no setup: they work as soon as the app is installed).
 struct SamRabbitShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
+        // A live voice conversation, like the R1. The Action Button's Shortcut picker lists it too.
+        AppShortcut(intent: TalkToSamRabbitIntent(), phrases: [
+            "Talk to \(.applicationName)",
+            "Chat with \(.applicationName)",
+            "Start a conversation with \(.applicationName)",
+            "\(.applicationName) voice",
+        ], shortTitle: "Talk", systemImageName: "waveform")
         AppShortcut(intent: AskSamRabbitIntent(), phrases: [
             "Ask \(.applicationName)",
             "Ask \(.applicationName) to do something",
             "New \(.applicationName) task",
         ], shortTitle: "Ask SamRabbit", systemImageName: "sparkles")
-        // The Action Button's Shortcut picker lists these too: this one opens the app listening.
+        // The Action Button's Shortcut picker lists these too: this one opens Ask with dictation listening.
         AppShortcut(intent: OpenAskIntent(), phrases: [
-            "Talk to \(.applicationName)",
             "Dictate to \(.applicationName)",
             "Ask \(.applicationName) by voice",
         ], shortTitle: "Ask by Voice", systemImageName: "mic.fill")

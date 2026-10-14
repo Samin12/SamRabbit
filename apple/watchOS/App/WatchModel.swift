@@ -79,7 +79,7 @@ final class WatchModel {
         // iPhone as the relay for every request.
         account = BridgeAccount(relay: link)
         actions = SamRabbitActions(account: account)
-        conversation = ConversationEngine(account: account, link: link)
+        conversation = ConversationEngine(account: account)
         paired = account.isPaired
         if let cached = SummaryCache.shared.load() {
             summary = cached.summary

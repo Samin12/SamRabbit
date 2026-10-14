@@ -3,14 +3,17 @@ import Foundation
 import os
 import SamRabbitKit
 
-private let audioLog = Logger(subsystem: "com.samrabbit.mobile.watchkitapp", category: "audio")
+private let audioLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.samrabbit.mobile", category: "audio")
 
-/// Where the conversation's sound comes from: the watch's microphone, or (the simulator, debug builds) a made-up
-/// voice. Delivers 16 kHz mono 16-bit samples on the main actor.
+/// Where the conversation's sound comes from: the watch's (or the iPhone's) microphone, or (the simulator, debug
+/// builds) a made-up voice. Delivers 16 kHz mono 16-bit samples on the main actor.
 @MainActor
 protocol ConversationInput: AnyObject {
     /// Whether the microphone may be used (asks the first time).
     func allowed() async -> Bool
+    /// Sets up the new engine before anything is connected to it (the iPhone's voice processing changes the
+    /// engine's input and output formats, so it comes first).
+    func prepare(engine: AVAudioEngine)
     /// Starts delivering samples (the engine is already set up).
     func start(engine: AVAudioEngine, deliver: @escaping @MainActor ([Int16]) -> Void) throws
     func stop(engine: AVAudioEngine)
@@ -20,15 +23,40 @@ protocol ConversationInput: AnyObject {
     var isFixture: Bool { get }
 }
 
-/// One audio graph for the whole conversation (watchOS can't start recording from the background, so it is
+extension ConversationInput {
+    func prepare(engine: AVAudioEngine) {}
+}
+
+/// The app's one audio session (`AVAudioSession` is shared by the whole app): who holds it now, so nobody
+/// deactivates it under someone else (that stops their engine without telling them). The conversation and, on the
+/// iPhone, a composer's dictation claim it when they activate it and give it back through here.
+@MainActor
+enum AudioSessionUse {
+    static var claims = AudioSessionClaims()
+
+    static func claim(_ holder: AudioSessionClaims.Holder) {
+        claims.claim(holder)
+    }
+
+    /// `holder` is done with the session: deactivated only when it held it and nobody else still does.
+    static func release(_ holder: AudioSessionClaims.Holder) {
+        guard claims.release(holder) else { return }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+}
+
+/// One audio graph for the whole conversation (watchOS and iOS can't start recording from the background, so it is
 /// started once, in front, and kept running between turns): the input's tap, converted to 16 kHz, and a player
-/// node for the replies (streamed PCM, clips, the watch's own voice).
+/// node for the replies (streamed PCM, clips, the device's own voice). The same file runs the watch's and the
+/// iPhone's conversation; on the iPhone the session is a voice chat (echo cancellation, the loudspeaker, AirPods
+/// and car kits) and the microphone goes through voice processing, so the reply out of the speaker isn't heard.
 ///
 ///     microphone --tap--> 16 kHz Int16 --> SpeechDetector (the engine decides when it listens)
 ///     replies --> AVAudioPlayerNode (16 kHz float) --> main mixer --> speaker / AirPods
 ///
 /// It reports when something starts playing and when everything scheduled has played (`onPlaying`, `onDrained`),
-/// and an interruption (a call, Siri) or a lost route it couldn't recover from (`onInterrupted`).
+/// an interruption (a call, Siri) or a lost route it couldn't recover from (`onInterrupted`), and (the iPhone) the
+/// end of an interruption after which iOS says the audio may go on (`onResumable`).
 ///
 /// A streamed reply waits in a small jitter buffer (`PlaybackJitterBuffer`, 0.2 s) before it starts, so audio that
 /// arrives at the pace it is spoken doesn't stutter. Playback that never reports its end (a route change, a stuck
@@ -53,6 +81,8 @@ final class AudioGraph {
     var onPlaying: (@MainActor () -> Void)?
     var onDrained: (@MainActor () -> Void)?
     var onInterrupted: (@MainActor () -> Void)?
+    /// The interruption is over and the system says the audio may go on (a call ended). Not on the watch.
+    var onResumable: (@MainActor () -> Void)?
     /// The engine started or stopped (the microphone is live while true).
     var onRunning: (@MainActor (Bool) -> Void)?
 
@@ -87,6 +117,14 @@ final class AudioGraph {
     private var speaking = false
     private var speechTimer: Task<Void, Never>?
     private var observers: [any NSObjectProtocol] = []
+    /// The iPhone: the end of an interruption (kept while the graph is stopped).
+    private var resumeObserver: (any NSObjectProtocol)?
+    /// The iPhone: an interruption (a call) stopped this graph while it ran, and no start came since. Only then does
+    /// the interruption's end count (`onResumable`): not after one of dictation's, nor of a conversation that was
+    /// not running.
+    private var interruptedWhileRunning = false
+    /// The iPhone's mute: the microphone's sound stops in voice processing (kept across route changes and starts).
+    private var inputMuted = false
     private let muted: Bool
 
     init(input: ConversationInput, muted: Bool) {
@@ -103,6 +141,7 @@ final class AudioGraph {
     /// running, and whoever stopped it has already decided what the conversation does.
     func start() async throws {
         guard !running else { return }
+        interruptedWhileRunning = false
         startToken += 1
         let token = startToken
         pendingStart = token
@@ -115,8 +154,14 @@ final class AudioGraph {
             if input.isFixture {
                 try session.setCategory(.playback, mode: .default, options: [])
             } else {
+                #if os(iOS)
+                // A voice chat: echo cancellation, the loudspeaker rather than the earpiece, AirPods and car kits.
+                try session.setCategory(.playAndRecord, mode: .voiceChat,
+                                        options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP])
+                #else
                 try session.setCategory(.playAndRecord, mode: .default, policy: .default,
                                         options: [.allowBluetoothHFP, .allowBluetoothA2DP])
+                #endif
                 try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
             }
             try? session.setPrefersNoInterruptionsFromSystemAlerts(true)
@@ -130,8 +175,9 @@ final class AudioGraph {
                 try abandonIfOvertaken(token)
             }
             do {
-                _ = try await session.activate(options: [])
+                try await Self.activate(session)
                 sessionActive = true
+                AudioSessionUse.claim(.conversation)
             } catch {
                 try abandonIfOvertaken(token)
                 lastError = error
@@ -155,6 +201,16 @@ final class AudioGraph {
         throw StartFailure.engine("start")
     }
 
+    /// Activates the audio session: watchOS asks for it (it may connect AirPods first); iOS 26 has only the
+    /// blocking call, made off the main thread.
+    private static func activate(_ session: AVAudioSession) async throws {
+        #if os(watchOS)
+        _ = try await session.activate(options: [])
+        #else
+        try await Task.detached { try AVAudioSession.sharedInstance().setActive(true) }.value
+        #endif
+    }
+
     /// After each wait in `start()`: gives up when a `stop()` or a newer `start()` came meanwhile. Nothing was built
     /// yet; the session goes back unless a newer start is on its way (or running) and needs it.
     private func abandonIfOvertaken(_ token: Int) throws {
@@ -167,11 +223,14 @@ final class AudioGraph {
     private func releaseSession() {
         guard sessionActive else { return }
         sessionActive = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        AudioSessionUse.release(.conversation)
     }
 
     private func buildAndStart() throws {
         let engine = AVAudioEngine()
+        // First, before the player is attached or the mixer touched: the iPhone's voice processing changes the
+        // engine's formats.
+        input.prepare(engine: engine)
         let player = AVAudioPlayerNode()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
@@ -179,9 +238,28 @@ final class AudioGraph {
         self.engine = engine
         self.player = player
         try input.start(engine: engine) { [weak self] samples in self?.onSamples?(samples) }
+        applyInputMute()
         engine.prepare()
         try engine.start()
         player.play()
+    }
+
+    /// The iPhone's mute (`ConversationEngine.setMuted`): the microphone's sound stops in voice processing, so
+    /// nothing but silence reaches the tap (the engine itself keeps running: recording can't start again from the
+    /// background, and unmuting must work there too). The conversation also stops listening on its own.
+    func setInputMuted(_ on: Bool) {
+        inputMuted = on
+        applyInputMute()
+    }
+
+    private func applyInputMute() {
+        #if os(iOS)
+        guard !input.isFixture, let engine else { return }
+        let node = engine.inputNode
+        if node.isVoiceProcessingEnabled, node.isVoiceProcessingInputMuted != inputMuted {
+            node.isVoiceProcessingInputMuted = inputMuted
+        }
+        #endif
     }
 
     /// Stops everything and gives the audio session back. A start still on its way gives up (see `start()`).
@@ -217,6 +295,25 @@ final class AudioGraph {
             guard began else { return }
             MainActor.assumeIsolated { self?.interrupted() }
         })
+        #if os(iOS)
+        // The end of an interruption comes after the graph stopped (the conversation paused): observed for good, and
+        // honoured only when it ends the interruption that stopped this graph (`interruptedWhileRunning`).
+        if resumeObserver == nil {
+            resumeObserver = center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil,
+                                                queue: .main) { [weak self] note in
+                let info = note.userInfo
+                let ended = (info?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                    .flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .ended
+                let options = AVAudioSession.InterruptionOptions(rawValue: info?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
+                guard ended, options.contains(.shouldResume) else { return }
+                MainActor.assumeIsolated {
+                    guard let self, self.interruptedWhileRunning, !self.running else { return }
+                    self.interruptedWhileRunning = false
+                    self.onResumable?()
+                }
+            }
+        }
+        #endif
         observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil,
                                             queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.interrupted() }
@@ -234,6 +331,13 @@ final class AudioGraph {
         guard running else { return }
         audioLog.notice("audio interrupted")
         onInterrupted?()
+        // Set after the conversation paused (which stopped this graph): its end may continue it.
+        interruptedWhileRunning = true
+    }
+
+    /// The conversation was ended on purpose while paused: the end of the interruption no longer continues it.
+    func forgetInterruption() {
+        interruptedWhileRunning = false
     }
 
     private func reconfigure() {
@@ -246,6 +350,7 @@ final class AudioGraph {
         input.stop(engine: engine)
         do {
             try input.start(engine: engine) { [weak self] samples in self?.onSamples?(samples) }
+            applyInputMute()
             engine.prepare()
             try engine.start()
             player?.play()
@@ -476,7 +581,9 @@ final class AudioGraph {
     }
 }
 
-/// The watch's microphone: a tap on the engine's input in its own format, converted to 16 kHz mono 16-bit.
+/// The watch's (or the iPhone's) microphone: a tap on the engine's input in its own format, converted to 16 kHz
+/// mono 16-bit. On the iPhone the input goes through voice processing first (echo cancellation: the reply coming out
+/// of the loudspeaker is taken out of what the microphone hears).
 @MainActor
 final class MicrophoneInput: ConversationInput {
     var isFixture: Bool { false }
@@ -489,9 +596,31 @@ final class MicrophoneInput: ConversationInput {
         }
     }
 
+    /// The iPhone: voice processing (echo cancellation), switched on while the engine is new and stopped, before the
+    /// player is connected (it changes the I/O formats; the tap reads the input's format afterwards). Without it the
+    /// conversation still works (half duplex), only less well on the loudspeaker.
+    func prepare(engine: AVAudioEngine) {
+        #if os(iOS)
+        let input = engine.inputNode
+        guard !input.isVoiceProcessingEnabled else { return }
+        do {
+            try input.setVoiceProcessingEnabled(true)
+        } catch {
+            audioLog.notice("voice processing unavailable")
+        }
+        #endif
+    }
+
     func start(engine: AVAudioEngine, deliver: @escaping @MainActor ([Int16]) -> Void) throws {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
+        // Numbers only (for tuning the speech detector on the voice-processed input): rate, channels, processing.
+        #if os(iOS)
+        let processing = input.isVoiceProcessingEnabled ? "on" : "off"
+        #else
+        let processing = "n/a"
+        #endif
+        audioLog.notice("microphone \(format.sampleRate, format: .fixed(precision: 0), privacy: .public) Hz \(format.channelCount, privacy: .public) ch, voice processing \(processing, privacy: .public)")
         guard format.sampleRate > 0, format.channelCount > 0, let tap = TapConverter(from: format) else {
             throw AudioGraph.StartFailure.engine("input format")
         }
