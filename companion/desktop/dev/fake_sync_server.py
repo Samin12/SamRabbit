@@ -12,7 +12,9 @@ It serves, on 127.0.0.1 only:
 * ``GET /v1/sync/conversations?limit=&before=&q=``, ``GET /v1/sync/conversations/<id>/events?after=``,
   ``GET /v1/sync/stream?after=`` (SSE, ``event: sync``, ``id: <cursor>``, heartbeats),
   ``GET /v1/sync/blobs/<sha256>``, ``GET /v1/ui/artifacts/<id>`` and ``…/document``;
-* dev controls: ``POST /dev/live`` (start a new live conversation now), ``POST /dev/end``.
+* dev controls: ``POST /dev/live`` (start a new live conversation now), ``POST /dev/end``;
+* the Mac voice's routes ``/v1/desktop/assistant/*`` with canned streamed answers, and their dev controls
+  ``/dev/assistant``, ``/dev/announce`` (``fake_assistant.py``).
 
 The sample data is realistic: ten conversations over the last month with cards, a Mac screenshot,
 an R1 camera photo, T3 updates, tool calls, background results and generated UIs (Chart.js from
@@ -38,8 +40,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SAMPLES = os.path.join(HERE, "samples")
 WEB_DIR = os.path.normpath(os.path.join(HERE, "..", "web"))
 sys.path.append(os.path.normpath(os.path.join(HERE, "..", "..", "mac-bridge")))
+sys.path.append(HERE)  # fake_assistant.py (python3 -I leaves the script's folder off the path)
 
 import samrabbit_app  # noqa: E402  (the real /app module of the bridge)
+
+from fake_assistant import FakeAssistant  # noqa: E402  (the desktop voice routes)
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE
@@ -523,6 +528,7 @@ class FakeServer(ThreadingHTTPServer):
         self.store = store
         self.live = live
         self.site = site
+        self.assistant = FakeAssistant()
         super().__init__(address, FakeHandler)
 
 
@@ -551,6 +557,8 @@ class FakeHandler(BaseHTTPRequestHandler):
             return self.json(403, {"error": {"code": "forbidden", "message": "Loopback only."}})
         if not self.server.site.token.matches(samrabbit_app.presented_token(self.headers)):
             return self.json(401, {"error": {"code": "unauthorized", "message": "Desktop token required."}})
+        if FakeAssistant.handles(path):
+            return self.server.assistant.handle(self, method, path, split.query)
         if method == "POST" and path == "/dev/live":
             self.server.live.start(end_after=False)
             return self.json(202, {"ok": True})
