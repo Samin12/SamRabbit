@@ -1,6 +1,10 @@
 // SamRabbit on the Mac: the whole app in one window (CONTRACTS-WAVE7 §B). A sidebar with the orb, Talk and the views
 // (Home, Tasks, Chats, Calendar, Settings), live data from the bridge (the agent inbox long poll, the conversation
 // sync stream, the summary, the agenda) and the native voice through the shell. ⌘1–⌘5 switch views.
+//
+// The page lives as long as the app (it loads at launch, with --login too, and stays when the window closes): the
+// summary, the agenda and the inbox long poll run only while the window is on screen (`presence`), and each is read
+// once when it is back.
 
 import { AgentInbox } from './agents.js';
 import { desktop } from './api.js';
@@ -10,9 +14,10 @@ import { h } from './dom.js';
 import { createHome } from './home.js';
 import { icon } from './icons.js';
 import { keyName } from './inbox.js';
+import { windowShortcut } from './keys.js';
 import { nativeState, onNative, params, postNative, receiveNative } from './native.js';
 import { createOrb } from './orb.js';
-import { Resource } from './resource.js';
+import { Presence, Resource } from './resource.js';
 import { createSettings } from './settings.js';
 import { createTalk } from './talk.js';
 import { createTasks } from './tasks.js';
@@ -32,12 +37,14 @@ const $ = (id) => document.getElementById(id);
 
 // ---------------------------------------------------------------------------- shared data
 
+/** The window is on screen: the page is visible and the shell (MainWindowBridge) doesn't say the window is away. */
+const presence = new Presence({ shell: () => (nativeState().window ? nativeState().window.visible !== false : true) });
 const agents = new AgentInbox(desktop);
-const summary = new Resource(() => desktop.summary(), { every: 60_000 });
+const summary = new Resource(() => desktop.summary(), { every: 60_000, presence });
 const agenda = new Resource(async () => {
   const body = await desktop.agenda(7);
   return { ...body, events: normalizeEvents(body && body.events) };
-}, { every: 5 * 60_000 });
+}, { every: 5 * 60_000, presence });
 
 const ctx = {
   api: desktop,
@@ -45,6 +52,7 @@ const ctx = {
   chats,
   summary,
   agenda,
+  presence,
   show,
   current: () => current,
   toast,
@@ -156,33 +164,49 @@ chats.onChange = () => {
   renderNav();
   views.home.chatsChanged?.();
 };
-onNative(() => renderNav());
+onNative((_state, changed) => {
+  renderNav();
+  if (changed.includes('window')) presence.update();
+});
+
+// The inbox long poll only while the window is on screen (the nav badge and Home are its only readers; the dock polls
+// for itself). Back on screen it asks at once: the bridge answers right away when anything changed meanwhile.
+presence.on((watched) => {
+  if (watched) agents.start();
+  else agents.stop();
+});
 
 // ---------------------------------------------------------------------------- keys
 
+function runShortcut(shortcut) {
+  switch (shortcut.type) {
+    case 'view':
+      show(VIEWS[shortcut.index].id);
+      break;
+    case 'search':
+      show('chats');
+      chats.focusSearch();
+      break;
+    case 'newTask':
+      show('tasks', { compose: true });
+      break;
+    case 'settings':
+      show('settings');
+      break;
+    default:
+      break;
+  }
+}
+
 document.addEventListener('keydown', (event) => {
-  const meta = event.metaKey || event.ctrlKey;
   const typing = document.activeElement && (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)
     || document.activeElement.isContentEditable);
-  if (meta && !event.shiftKey && !event.altKey && /^[1-5]$/.test(event.key)) {
+  const shortcut = windowShortcut(event, current);
+  if (shortcut) {
+    // Handled here (so the menus don't run it a second time); behind a sheet (a journal note, an unpair) nothing
+    // moves: the sheet is modal.
     event.preventDefault();
-    show(VIEWS[Number(event.key) - 1].id);
-    return;
-  }
-  if (meta && (event.key === 'k' || (event.key === 'f' && current === 'chats'))) {
-    event.preventDefault();
-    show('chats');
-    chats.focusSearch();
-    return;
-  }
-  if (meta && event.key === 'n') {
-    event.preventDefault();
-    show('tasks', { compose: true });
-    return;
-  }
-  if (meta && event.key === ',') {
-    event.preventDefault();
-    show('settings');
+    if (!overlayOpen()) runShortcut(shortcut);
     return;
   }
   if (event.key === 'Escape') {
@@ -196,7 +220,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (overlayOpen()) return;
   if (views[current] && views[current].handleKey && views[current].handleKey(event)) return;
-  if (typing || meta || event.altKey) return;
+  if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
   // N anywhere (not typing): a new task, as in the dock.
   if (keyName(event) === 'compose') {
     event.preventDefault();
@@ -225,29 +249,33 @@ window.SamRabbitApp = {
     agenda.refresh();
   },
   summary() {
-    return { ...chats.summary(), view: current, inbox: agents.connection, needsYou: agents.counts().needsYou };
+    return {
+      ...chats.summary(), view: current, inbox: agents.connection, needsYou: agents.counts().needsYou,
+      watched: presence.watched, polling: Boolean(agents.poller && agents.poller.running),
+    };
   },
   confirmOpen(url) {
     chats.confirmOpen(url);
   },
-  /** ⌘1–⌘5 and Settings… from the app's menus: "home" | "tasks" | "chats" | "calendar" | "settings". */
+  /** ⌘1–⌘5 and Settings… from the app's menus: "home" | "tasks" | "chats" | "calendar" | "settings" (not behind a sheet). */
   show(view) {
-    show(view);
+    if (!overlayOpen()) show(view);
   },
   newTask() {
-    show('tasks', { compose: true });
+    if (!overlayOpen()) show('tasks', { compose: true });
   },
   focusSearch() {
+    if (overlayOpen()) return;
     show('chats');
     chats.focusSearch();
   },
-  /** The shell pushes MacVoice, the dock switch and the shortcuts here (MainWindowBridge.swift). */
+  /** The shell pushes MacVoice, the dock, the shortcuts and the window's state here (MainWindowBridge.swift). */
   native(patch) {
     receiveNative(patch);
   },
 };
 
-agents.start();
+if (presence.watched) agents.start();
 summary.refresh();
 summary.start();
 agenda.refresh();

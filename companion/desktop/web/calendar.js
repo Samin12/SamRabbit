@@ -6,7 +6,7 @@ import { groupByDay, nowIndex, relativeStart, timeRange, timing } from './agenda
 import { h } from './dom.js';
 import { hostOf, plural } from './format.js';
 import { icon } from './icons.js';
-import { openExternal, reportDragExclusions, spinner } from './ui.js';
+import { openExternal, redrawWhenFree, reportDragExclusions, spinner } from './ui.js';
 
 const DAYS = 7;
 
@@ -116,6 +116,11 @@ export function createCalendar(ctx, el) {
   }
 
   function render() {
+    // Never between a press and its release (Join and Block time are in what is redrawn; ui.js).
+    if (visible) redrawWhenFree('calendar', draw);
+  }
+
+  function draw() {
     if (!visible) return;
     const now = Date.now();
     renderHead();
@@ -152,7 +157,7 @@ export function createCalendar(ctx, el) {
   }
 
   agenda.on(() => {
-    if (agenda.loading) renderHead();
+    if (agenda.loading) redrawWhenFree('calendar-head', renderHead);
     else render();
   });
   setInterval(() => render(), 30_000);

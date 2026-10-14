@@ -1,10 +1,13 @@
 // The window's live transcript of a Mac voice conversation. The voice itself is native (MacVoice, Sources/Voice*.swift:
 // one audio engine, the wake phrase, the streaming turns); the shell pushes its published state here
-// ({state, error, heard, caption, level, micMuted, brain, conversationId}) and this turns the snapshots into turns:
-// each new `heard` is a line of yours, `caption` streams the reply. Pure (tests/voice.test.mjs).
+// ({state, error, heard, heardId, caption, level, micMuted, brain, conversationId}) and this turns the snapshots into
+// turns: each exchange that heard something (`heardId`; the text alone from an older shell) is a line of yours,
+// `caption` streams the reply. Pure (tests/status.test.mjs).
 
 const ACTIVE = new Set(['starting', 'listening', 'thinking', 'speaking']);
 export const MAX_TURNS = 40;
+/** Every turn gets its own id (the panel keeps one line per id and only patches what changed). */
+let turnSeq = 0;
 
 function text(value) {
   return typeof value === 'string' ? value : '';
@@ -19,6 +22,8 @@ export function normalizeVoice(raw) {
     state,
     error: text(value.error),
     heard: text(value.heard).trim(),
+    // The exchange `heard` belongs to: saying the same words twice is two lines.
+    heardId: typeof value.heardId === 'string' || typeof value.heardId === 'number' ? String(value.heardId) : null,
     caption: text(value.caption),
     level: Number.isFinite(level) ? Math.max(0, Math.min(1, level)) : 0,
     micMuted: value.micMuted === true,
@@ -60,9 +65,11 @@ export function idleCaption(snapshot) {
 }
 
 /**
- * The conversation so far, built from snapshots. A new `heard` adds your line and closes the reply before it; a
- * `caption` going empty closes the reply (the next one is a new turn, e.g. an announcement); a caption that doesn't
- * continue the open reply starts a new one. A conversation that starts clears the old one.
+ * The conversation so far, built from snapshots: turns `{id, role, text, final}`. A new exchange that heard something
+ * (a new `heardId`, or new words when the shell sends no id) adds your line and closes the reply before it; new words
+ * in the same exchange correct your line; a `caption` going empty closes the reply (the next one is a new turn, e.g.
+ * an announcement); a caption that doesn't continue the open reply starts a new one. A conversation that starts
+ * clears the old one.
  */
 export class VoiceTranscript {
   constructor() {
@@ -78,6 +85,7 @@ export class VoiceTranscript {
     this.conversationId = null;
     this.error = '';
     this.lastHeard = '';
+    this.lastHeardId = null;
     this.lastCaption = '';
   }
 
@@ -92,9 +100,16 @@ export class VoiceTranscript {
       this.active = true;
     }
     if (next.conversationId) this.conversationId = next.conversationId;
-    if (next.heard && next.heard !== this.lastHeard) {
-      this.closeReply();
-      this.turns.push({ role: 'user', text: next.heard, final: true });
+    if (next.heard) {
+      const sameExchange = next.heardId != null && next.heardId === this.lastHeardId;
+      const mine = sameExchange ? this.turns.findLast((turn) => turn.role === 'user') : null;
+      if (mine) {
+        mine.text = next.heard;
+      } else if (next.heardId != null || next.heard !== this.lastHeard) {
+        this.closeReply();
+        this.turns.push({ id: ++turnSeq, role: 'user', text: next.heard, final: true });
+      }
+      this.lastHeardId = next.heardId;
     }
     this.lastHeard = next.heard;
     if (next.caption !== this.lastCaption) {
@@ -106,7 +121,7 @@ export class VoiceTranscript {
         if (continues) last.text = next.caption;
         else {
           this.closeReply();
-          this.turns.push({ role: 'assistant', text: next.caption, final: false });
+          this.turns.push({ id: ++turnSeq, role: 'assistant', text: next.caption, final: false });
         }
       }
       this.lastCaption = next.caption;

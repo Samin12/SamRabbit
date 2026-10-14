@@ -19,8 +19,8 @@ It serves, on 127.0.0.1 only:
   ``GET /v1/desktop/inbox/items/<id>``, ``POST …/items/<id>/approve|answer|reply|stop|seen|open``,
   ``GET /v1/desktop/inbox/targets``, ``POST /v1/desktop/inbox/new``, from ``samples/inbox.json`` (every source and
   status, long titles, an approval with three options, a question); dev controls ``POST /dev/inbox/needs-you``
-  (a new approval arrives), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake`` (``{"fake": true}``: the dock's
-  smoke driver runs only against a server that answers it).
+  (a new approval arrives), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake`` (``{"fake": true, "polls"}``: the
+  dock's smoke driver runs only against a server that answers it; ``polls`` counts the inbox reads since start).
 * the SamRabbit window's desktop twins of the mobile routes (CONTRACTS-WAVE7 §A, ``fake_desktop.py``):
   ``GET /v1/desktop/summary``, ``GET /v1/desktop/calendar/agenda?days=``, ``POST /v1/desktop/calendar/block``,
   ``POST /v1/desktop/journal`` (kept in memory), ``GET|DELETE /v1/desktop/devices[/<id>]`` and
@@ -582,6 +582,8 @@ class InboxFixtures:
         self.path = path
         self.cond = threading.Condition()
         self.created = 0
+        # Inbox reads (long polls included) since start: the window's tests check that a hidden window doesn't poll.
+        self.polls = 0
         self.reset()
         if tick > 0:
             threading.Thread(target=self.ticker, args=(tick,), daemon=True).start()
@@ -622,6 +624,7 @@ class InboxFixtures:
 
     def wait(self, after: Optional[int], wait: float) -> Dict[str, Any]:
         with self.cond:
+            self.polls += 1
             if after is not None and after == self.revision and wait > 0:
                 self.cond.wait_for(lambda: self.revision != after, timeout=wait)
         return self.snapshot()
@@ -781,7 +784,8 @@ def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str
     try:
         if method == "GET" and path == "/dev/inbox/fake":
             # The dock's smoke driver approves and creates tasks: it runs only when the server answers this.
-            return handler.json(200, {"fake": True})
+            with inbox.cond:
+                return handler.json(200, {"fake": True, "polls": inbox.polls})
         if method == "POST" and path == "/dev/inbox/needs-you":
             inbox.needs_you()
             return handler.json(202, {"ok": True})

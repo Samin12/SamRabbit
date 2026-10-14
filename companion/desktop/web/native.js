@@ -26,10 +26,11 @@ if (nativeInfo && nativeInfo.trafficLights) {
 }
 
 /**
- * What the shell said last: `voice` (MacVoice: state, heard, caption, level, micMuted, wake…), `dock` ({enabled}),
- * `shortcuts` ([{id, label, keys, problem}]) and `app` ({version, bridge}). Each push replaces the keys it carries.
+ * What the shell said last: `voice` (MacVoice: state, heard, caption, level, micMuted, wake…), `dock` ({enabled,
+ * turnedOn, canCustomize}), `shortcuts` ([{id, label, keys, problem}]), `app` ({version, bridge}) and `window`
+ * ({visible}: on screen, not minimised, closed or hidden). Each push replaces the keys it carries.
  */
-const state = { voice: null, dock: null, shortcuts: [], app: null };
+const state = { voice: null, dock: null, shortcuts: [], app: null, window: null };
 const listeners = new Set();
 
 export function nativeState() {
@@ -50,7 +51,7 @@ export function onNative(listener) {
 export function receiveNative(patch) {
   if (!patch || typeof patch !== 'object') return;
   const changed = [];
-  for (const key of ['voice', 'dock', 'shortcuts', 'app']) {
+  for (const key of ['voice', 'dock', 'shortcuts', 'app', 'window']) {
     if (key in patch) {
       state[key] = patch[key];
       changed.push(key);

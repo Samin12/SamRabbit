@@ -14,7 +14,8 @@
 * ``GET /v1/assistant/chatgpt/status`` -> connected through the Codex login on this Mac.
 * Dev controls: ``POST /dev/desktop {calendar?, chatgpt?: "codex"|"own"|"off", r1Online?, journal?}`` switches the
   states the window shows (a calendar that can't be read, ChatGPT not connected, …), ``GET /dev/desktop`` says what
-  arrived (blocks, notes: counts and titles only), ``POST /dev/desktop/reset``.
+  arrived (blocks, notes: counts and titles only) and how often the window read each route (``reads``),
+  ``POST /dev/desktop/reset``.
 
 Stdlib only.
 """
@@ -79,6 +80,8 @@ class FakeDesktop:
             self.blocks: List[Dict[str, Any]] = []
             self.notes: List[Dict[str, Any]] = []
             self.created = 0
+            # What the window read (each summary read makes the real bridge look at the calendar and the journal).
+            self.reads = {"summary": 0, "agenda": 0, "devices": 0, "chatgpt": 0}
             now = self.started
             self.devices = [
                 {"deviceId": "dev_iphone_9f3a", "name": "Samin’s iPhone", "platform": "ios",
@@ -155,12 +158,15 @@ class FakeDesktop:
                 return handler.json(200, {"ok": True})
             if path == "/v1/assistant/chatgpt/status":
                 self.only(method, "GET")
+                self.count("chatgpt")
                 return handler.json(200, self.chatgpt_status())
             if path == "/v1/desktop/summary":
                 self.only(method, "GET")
+                self.count("summary")
                 return handler.json(200, self.summary())
             if path == "/v1/desktop/calendar/agenda":
                 self.only(method, "GET")
+                self.count("agenda")
                 return handler.json(200, self.agenda(parse_qs(query)))
             if path == "/v1/desktop/calendar/block":
                 self.only(method, "POST")
@@ -170,6 +176,7 @@ class FakeDesktop:
                 return handler.json(200, self.journal(body))
             if path == "/v1/desktop/devices":
                 self.only(method, "GET")
+                self.count("devices")
                 with self.lock:
                     return handler.json(200, {"devices": [dict(d) for d in self.devices]})
             if path.startswith("/v1/desktop/devices/"):
@@ -179,6 +186,10 @@ class FakeDesktop:
         except Refusal as refusal:
             handler.json(refusal.status, {"error": {"code": refusal.code, "message": refusal.message,
                                                     "retryable": refusal.retryable}})
+
+    def count(self, what: str) -> None:
+        with self.lock:
+            self.reads[what] += 1
 
     @staticmethod
     def only(method: str, allowed: str) -> None:
@@ -346,4 +357,4 @@ class FakeDesktop:
     def arrived(self) -> Dict[str, Any]:
         with self.lock:
             return {"blocks": [{"title": b["title"], "startsAt": b["startsAt"], "endsAt": b["endsAt"]} for b in self.blocks],
-                    "notes": len(self.notes), "devices": [d["deviceId"] for d in self.devices]}
+                    "notes": len(self.notes), "devices": [d["deviceId"] for d in self.devices], "reads": dict(self.reads)}

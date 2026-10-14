@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  assistantLine, chatgptStatus, deviceLine, deviceRows, greeting, groupDevices, headline, r1Status,
+  assistantLine, chatgptStatus, deviceLine, deviceRows, dockSwitch, greeting, groupDevices, headline, nextLine, r1Status,
 } from '../web/status.js';
 import { MAX_TURNS, VoiceTranscript, continuation, idleCaption, isActive, normalizeVoice, voiceLabel } from '../web/voice.js';
 
@@ -23,6 +23,40 @@ test('the greeting and the headline', () => {
   const next = { title: 'Standup', start: NOW + 30 * MIN, allDay: false };
   assert.match(headline({ needsYou: 3, working: 0 }, next, NOW), /^3 need you · Next: Standup at /);
   assert.equal(headline({ needsYou: 0, working: 0 }, { title: 'Holiday', allDay: true, start: NOW - MIN }, NOW), 'Nothing needs you · Today: Holiday');
+});
+
+test('the headline says the day of an event that isn’t today (the agenda is a week long)', () => {
+  const at = (day, hour, minute = 0) => new Date(2026, 9, day, hour, minute).getTime();  // October 2026, local time
+  const event = (title, start, hours = 1, allDay = false) => ({ title, start, end: start + hours * 3_600_000, allDay });
+  const wednesday9pm = at(14, 21);
+  const standup = nextLine(event('Standup', at(15, 9, 30)), wednesday9pm);
+  assert.match(standup, /^Next: Standup tomorrow at 9:30\sAM$/);
+  const thursday6pm = at(15, 18);
+  assert.match(nextLine(event('Offsite', at(19, 9)), thursday6pm), /^Next: Offsite Monday at 9:00\sAM$/);
+  assert.match(nextLine(event('Review', at(15, 19)), thursday6pm), /^Next: Review at 7:00\sPM$/, 'today: no day');
+  assert.equal(nextLine(event('Focus', at(15, 17, 30)), thursday6pm), 'Next: Focus now');
+  assert.equal(nextLine(event('Holiday', at(15, 0), 24, true), thursday6pm), 'Today: Holiday');
+  assert.equal(nextLine(event('Trip', at(14, 0), 48, true), thursday6pm), 'Today: Trip', 'began yesterday, covers today');
+  assert.equal(nextLine(event('Offsite', at(16, 0), 24, true), thursday6pm), 'Tomorrow: Offsite');
+  assert.equal(nextLine(event('Offsite', at(19, 0), 24, true), thursday6pm), 'Monday: Offsite');
+  assert.match(headline({ needsYou: 0, working: 0 }, event('Standup', at(15, 9, 30)), wednesday9pm),
+    /^Nothing needs you · Next: Standup tomorrow at 9:30\sAM$/);
+});
+
+test('the dock switch says what the dock really does (on, hidden for now, off) and how to bring it back', () => {
+  const shortcuts = [{ id: 'talk', keys: '⌃⌥Space' }, { id: 'compose', keys: '⌃⌥K', problem: null }];
+  assert.deepEqual(dockSwitch({ enabled: true, turnedOn: true }, shortcuts),
+    { on: true, line: 'On: it steps aside while you are in this window.' });
+  assert.deepEqual(dockSwitch({ enabled: false, turnedOn: true }, shortcuts),
+    { on: false, line: 'Hidden for now. Turn it on or press ⌃⌥K to bring it back.' });
+  assert.deepEqual(dockSwitch({ enabled: false, turnedOn: false }, shortcuts),
+    { on: false, line: 'Off until you turn it on here or press ⌃⌥K.' });
+  // The dock's show / hide key when it has one; a key another app took isn't offered.
+  const withShowHide = shortcuts.concat({ id: 'showHide', keys: '⌃⌥D', problem: null });
+  assert.equal(dockSwitch({ enabled: false, turnedOn: false }, withShowHide).line, 'Off until you turn it on here or press ⌃⌥D.');
+  const taken = [{ id: 'compose', keys: '⌃⌥K', problem: 'Not available — taken by another app' }];
+  assert.equal(dockSwitch({ enabled: false, turnedOn: false }, taken).line, 'Off until you turn it on here.');
+  assert.deepEqual(dockSwitch(null, shortcuts, false), { on: true, line: 'Works in the SamRabbit app.' });
 });
 
 test('the R1: live, active, seen a while ago, never; the battery only when the bridge knows it', () => {
@@ -109,6 +143,31 @@ test('the transcript: your lines from heard, the reply streams, a new caption is
   // The next conversation starts clean.
   t.apply({ state: 'starting' }, 30_000);
   assert.equal(t.turns.length, 0);
+});
+
+test('the same words twice are two lines of yours (each exchange has its id); new words in one exchange correct it', () => {
+  const t = new VoiceTranscript();
+  const push = (voice) => t.apply({ conversationId: 'mac-2', ...voice });
+  push({ state: 'listening', heard: '', caption: '' });
+  push({ state: 'thinking', heard: 'Yes.', heardId: 'turn-1', caption: '' });
+  push({ state: 'speaking', heard: 'Yes.', heardId: 'turn-1', caption: 'Blocked 30 minutes. Should I also move the gym?' });
+  push({ state: 'listening', heard: 'Yes.', heardId: 'turn-1', caption: '' });
+  push({ state: 'thinking', heard: 'Yes.', heardId: 'turn-2', caption: '' });
+  push({ state: 'speaking', heard: 'Yes.', heardId: 'turn-2', caption: 'Moved the gym to 7.' });
+  assert.deepEqual(t.turns.map((x) => [x.role, x.text]), [
+    ['user', 'Yes.'], ['assistant', 'Blocked 30 minutes. Should I also move the gym?'],
+    ['user', 'Yes.'], ['assistant', 'Moved the gym to 7.'],
+  ]);
+  push({ state: 'speaking', heard: 'Yes, please.', heardId: 'turn-2', caption: 'Moved the gym to 7.' });
+  assert.equal(t.turns.length, 4, 'a corrected transcript of the same exchange is no new line');
+  assert.equal(t.turns[2].text, 'Yes, please.');
+  assert.equal(new Set(t.turns.map((x) => x.id)).size, 4, 'every turn has its own id');
+  // A shell without ids: new words make a new line, the same words don't.
+  const old = new VoiceTranscript();
+  old.apply({ state: 'thinking', heard: 'Yes.' });
+  old.apply({ state: 'thinking', heard: 'Yes.' });
+  old.apply({ state: 'thinking', heard: 'No.' });
+  assert.deepEqual(old.turns.map((x) => x.text), ['Yes.', 'No.']);
 });
 
 test('a conversation that fails to start shows its problem; the transcript keeps at most 40 turns', () => {

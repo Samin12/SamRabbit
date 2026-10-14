@@ -11,7 +11,7 @@ import {
 } from './inbox.js';
 import { approvalCard, itemMeta, itemRow, noteLine, questionCard, shortAgo, sourceGlyph } from './items.js';
 import { createOrb } from './orb.js';
-import { autosize, keycap, reportDragExclusions, segmented, spinner } from './ui.js';
+import { autosize, keycap, redrawWhenFree, reportDragExclusions, segmented, spinner } from './ui.js';
 
 const FILTER_KEY = 'samrabbit.tasks.filter';
 
@@ -480,8 +480,12 @@ export function createTasks(ctx, el) {
 
   function render() {
     if (!visible) return;
-    renderList();
-    renderDetail();
+    // Never between a press and its release: the row or the button under the pointer would be gone (ui.js).
+    redrawWhenFree('tasks', () => {
+      if (!visible) return;
+      renderList();
+      renderDetail();
+    });
   }
 
   // ------------------------------------------------------------------ keys

@@ -75,6 +75,44 @@ export async function copyText(text) {
   }
 }
 
+// ---------------------------------------------------------------------------- redraws and the mouse
+
+// A click is a press and a release on the same element. The inbox, the agenda and the voice change while a finger is
+// down, and a redraw that replaces the element in between swallows the click. So the views' redraws wait while the
+// mouse button is held in the page and run once it is up: after the click, which comes right after the release. A
+// press held for long (a drag that left the page) stops holding them back after a few seconds.
+const HOLD_MAX_MS = 4000;
+let pressedAt = 0;
+const held = new Map();
+
+document.addEventListener('pointerdown', (event) => {
+  if (event.button === 0) pressedAt = Date.now();
+}, true);
+
+function released() {
+  if (!pressedAt) return;
+  pressedAt = 0;
+  if (!held.size) return;
+  setTimeout(() => {
+    const redraws = [...held.values()];
+    held.clear();
+    for (const redraw of redraws) redraw();
+  }, 0);
+}
+window.addEventListener('pointerup', released, true);
+window.addEventListener('pointercancel', released, true);
+window.addEventListener('blur', released);
+
+/** Runs `redraw` now, or (the latest one per `name`) once the mouse button is up. */
+export function redrawWhenFree(name, redraw) {
+  if (pressedAt && Date.now() - pressedAt < HOLD_MAX_MS) {
+    held.set(name, redraw);
+    return;
+  }
+  held.delete(name);
+  redraw();
+}
+
 // ---------------------------------------------------------------------------- overlays (sheets, lightboxes)
 
 export function overlayOpen() {

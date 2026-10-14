@@ -4,6 +4,8 @@
 # compiled with the tests here into a throwaway binary and run. Needs Xcode's command line tools.
 #
 #   companion/desktop/tests/window/run.sh
+#
+# The page itself under a real mouse and keys, in WebKit against the fake server: clicks.sh (next to this).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

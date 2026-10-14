@@ -6,8 +6,8 @@ import { h } from './dom.js';
 import { icon } from './icons.js';
 import { hasShell, nativeState, onNative, postNative } from './native.js';
 import { Resource } from './resource.js';
-import { assistantLine, chatgptStatus, deviceLine, groupDevices, platformLabel, r1Status } from './status.js';
-import { keycap, reportDragExclusions, sheet, spinner, toast, toggle } from './ui.js';
+import { assistantLine, chatgptStatus, deviceLine, dockSwitch, groupDevices, platformLabel, r1Status } from './status.js';
+import { keycap, redrawWhenFree, reportDragExclusions, sheet, spinner, toast, toggle } from './ui.js';
 import { isActive, normalizeVoice } from './voice.js';
 
 export function createSettings(ctx, el) {
@@ -17,8 +17,8 @@ export function createSettings(ctx, el) {
   const devices = new Resource(async () => {
     const answer = await ctx.api.devices();
     return answer && Array.isArray(answer.devices) ? answer.devices : [];
-  });
-  const chatgpt = new Resource(() => ctx.api.chatgpt());
+  }, { presence: ctx.presence });
+  const chatgpt = new Resource(() => ctx.api.chatgpt(), { presence: ctx.presence });
   const unpairing = new Set();
 
   const head = h('header', { class: 'view-head titlebar' });
@@ -166,15 +166,15 @@ export function createSettings(ctx, el) {
   function dockGroup() {
     const dock = nativeState().dock;
     const shell = hasShell() && dock !== null;
-    const enabled = dock ? dock.enabled !== false : true;
-    const shortcuts = (nativeState().shortcuts || []).filter((s) => s && s.id !== 'talk');
+    const all = nativeState().shortcuts || [];
+    const shortcuts = all.filter((s) => s && s.id !== 'talk');
+    const { on, line } = dockSwitch(dock, all, shell);
     return group('Agent Dock', 'The dock floats over other apps whenever this window isn’t in front: what needs you, what’s working, a new task and Talk.',
       row({
-        glyph: 'dock', title: 'Show the Agent Dock',
-        sub: !shell ? 'Works in the SamRabbit app.' : enabled ? 'On: it steps aside while you are in this window.' : 'Off until you turn it on here or press ⌃⌥K.',
+        glyph: 'dock', title: 'Show the Agent Dock', sub: line,
         trailing: toggle({
-          checked: enabled, disabled: !shell, label: 'Show the Agent Dock',
-          onchange: (on) => postNative({ type: 'dock', enabled: on }),
+          checked: on, disabled: !shell, label: 'Show the Agent Dock',
+          onchange: (value) => postNative({ type: 'dock', enabled: value }),
         }),
       }),
       shortcuts.map((shortcut) => row({
@@ -205,13 +205,19 @@ export function createSettings(ctx, el) {
   // ------------------------------------------------------------------ drawing
 
   function render(force = false) {
+    if (force) drawn = '';
+    // Never between a press and its release (ui.js).
+    if (visible) redrawWhenFree('settings', draw);
+  }
+
+  function draw() {
     if (!visible) return;
     const now = Date.now();
     const native = nativeState();
-    const voice = native.voice ? { ...normalizeVoice(native.voice), level: 0, caption: '', heard: '', state: isActive(normalizeVoice(native.voice)) } : null;
+    const voice = native.voice ? { ...normalizeVoice(native.voice), level: 0, caption: '', heard: '', heardId: null, state: isActive(normalizeVoice(native.voice)) } : null;
     const key = JSON.stringify([summary.loadedAt, Boolean(summary.error), devices.loadedAt, Boolean(devices.error), chatgpt.loadedAt,
       Boolean(chatgpt.error), voice, native.dock, native.shortcuts, native.app, [...unpairing], Math.floor(now / 60_000)]);
-    if (!force && key === drawn) return;
+    if (key === drawn) return;
     drawn = key;
     head.replaceChildren(h('div', { class: 'head-stack' }, h('h1', { class: 'view-title', text: 'Settings' })));
     const scroll = body.scrollTop;

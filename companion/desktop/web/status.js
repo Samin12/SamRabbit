@@ -2,7 +2,8 @@
 // /v1/assistant/chatgpt/status): the R1, the paired iPhones and watches, the ChatGPT login, the greeting and the
 // headline. Pure (tests/status.test.mjs).
 
-import { plural, relativeTime, timeLabel, toMs } from './format.js';
+import { dayName } from './agenda.js';
+import { plural, relativeTime, startOfDay, timeLabel, toMs } from './format.js';
 
 const MINUTE = 60_000;
 
@@ -23,11 +24,26 @@ export function headline(counts, next, now = Date.now()) {
   const parts = [];
   parts.push(counts.needsYou ? `${counts.needsYou} need${counts.needsYou === 1 ? 's' : ''} you` : 'Nothing needs you');
   if (counts.working) parts.push(`${counts.working} working`);
-  if (next) {
-    const startsSoon = next.start <= now ? 'now' : `at ${timeLabel(next.start)}`;
-    parts.push(next.allDay ? `Today: ${next.title}` : `Next: ${next.title} ${startsSoon}`);
-  }
+  if (next) parts.push(nextLine(next, now));
   return parts.join(' · ');
+}
+
+/**
+ * The next event as the headline says it, with its day when it isn't today (the agenda is a week long): "Next: Standup
+ * at 9:30 AM", "Next: Standup tomorrow at 9:30 AM", "Next: Offsite Monday at 9:00 AM", "Next: Focus now"; all day:
+ * "Today: Holiday" while it covers today, else "Tomorrow: Offsite", "Monday: Offsite".
+ */
+export function nextLine(event, now = Date.now()) {
+  const today = startOfDay(now);
+  const day = startOfDay(event.start);
+  if (event.allDay) {
+    const covers = event.start <= now && (event.end == null || event.end > today);
+    return `${covers || day === today ? 'Today' : dayName(day, now)}: ${event.title}`;
+  }
+  if (event.start <= now) return `Next: ${event.title} now`;
+  if (day === today) return `Next: ${event.title} at ${timeLabel(event.start)}`;
+  const name = dayName(day, now);
+  return `Next: ${event.title} ${name === 'Tomorrow' ? 'tomorrow' : name} at ${timeLabel(event.start)}`;
 }
 
 /** "Seen 3 min ago" with a floor: anything within two minutes reads as now. */
@@ -162,6 +178,20 @@ export function assistantLine(summary) {
   if (!part) return null;
   if (!part.available) return 'Voice assistant unavailable';
   return part.brain === 'realtime' ? 'Realtime voice (ChatGPT)' : 'Claude voice';
+}
+
+/**
+ * Settings' "Show the Agent Dock" from what the shell says (`dock`: {enabled, turnedOn}; `shortcuts`): `{on, line}`.
+ * `enabled` is whether it is really on (not hidden for a while); on but hidden says so, and how to bring it back.
+ */
+export function dockSwitch(dock, shortcuts, shell = true) {
+  if (!shell || !dock || typeof dock !== 'object') return { on: true, line: 'Works in the SamRabbit app.' };
+  const on = dock.enabled !== false;
+  const keys = (id) => ((Array.isArray(shortcuts) ? shortcuts : []).find((s) => s && s.id === id && s.keys && !s.problem) || {}).keys;
+  const back = keys('showHide') || keys('compose');
+  if (on) return { on, line: 'On: it steps aside while you are in this window.' };
+  if (dock.turnedOn) return { on, line: `Hidden for now. Turn it on${back ? ` or press ${back}` : ''} to bring it back.` };
+  return { on, line: `Off until you turn it on here${back ? ` or press ${back}` : ''}.` };
 }
 
 /** "3 events today" etc. for the calendar card's caption. */

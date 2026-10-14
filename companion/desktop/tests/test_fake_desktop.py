@@ -143,6 +143,17 @@ class FakeDesktopTest(unittest.TestCase):
         self.assertEqual(self.call("GET", "/dev/desktop")[1]["notes"], 1)
         self.assertEqual(self.call("POST", "/v1/desktop/journal", {"text": "   "})[0], 400)
 
+    def test_counts_what_the_window_reads(self) -> None:
+        # The window's tests check with these that a hidden window reads nothing (each summary read makes the real
+        # bridge look at the calendar and the journal).
+        self.assertEqual(self.call("GET", "/dev/desktop")[1]["reads"], {"summary": 0, "agenda": 0, "devices": 0, "chatgpt": 0})
+        self.call("GET", "/v1/desktop/summary")
+        self.call("GET", "/v1/desktop/summary")
+        self.call("GET", "/v1/desktop/calendar/agenda?days=7")
+        self.call("GET", "/v1/desktop/devices")
+        self.call("GET", "/v1/assistant/chatgpt/status")
+        self.assertEqual(self.call("GET", "/dev/desktop")[1]["reads"], {"summary": 2, "agenda": 1, "devices": 1, "chatgpt": 1})
+
     def test_unpairing_a_phone_unpairs_its_watch(self) -> None:
         devices = self.call("GET", "/v1/desktop/devices")[1]["devices"]
         phone = next(d for d in devices if d["platform"] == "ios")

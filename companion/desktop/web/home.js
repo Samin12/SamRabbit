@@ -9,7 +9,7 @@ import { needsYou, recommendedOption, supports } from './inbox.js';
 import { approvalCard, itemRow, shortAgo } from './items.js';
 import { createOrb } from './orb.js';
 import { deviceRows, greeting, headline, summaryDevices } from './status.js';
-import { openExternal, reportDragExclusions } from './ui.js';
+import { openExternal, redrawWhenFree, reportDragExclusions } from './ui.js';
 
 export function createHome(ctx, el) {
   const { agents, summary, agenda, chats } = ctx;
@@ -166,6 +166,11 @@ export function createHome(ctx, el) {
   }
 
   function render() {
+    // Never between a press and its release (an approval's buttons are in these cards; ui.js).
+    if (visible) redrawWhenFree('home', draw);
+  }
+
+  function draw() {
     if (!visible) return;
     const now = Date.now();
     const minute = Math.floor(now / 60_000);
@@ -188,7 +193,8 @@ export function createHome(ctx, el) {
   }
 
   async function loadDevices() {
-    if (summaryDevices(summary.value) || Date.now() - devicesAt < 30_000) return;
+    // Only while the window is on screen (the summary's own read brings them back when it is).
+    if (!ctx.presence.watched || summaryDevices(summary.value) || Date.now() - devicesAt < 30_000) return;
     devicesAt = Date.now();
     try {
       const answer = await ctx.api.devices();
