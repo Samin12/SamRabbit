@@ -36,6 +36,10 @@ Routes (CONTRACTS-WAVE4 "Mobile API"):
   assistant token (loopback only, and only the routes in ``INTERNAL_ROUTES``). The Mac's ChatGPT login for its
   realtime voice (desktop app only: loopback peer + desktop token): ``POST /v1/assistant/chatgpt/start``,
   ``GET /v1/assistant/chatgpt/status``, ``POST /v1/assistant/chatgpt/disconnect``.
+* The desktop app's voice (the Agent Dock): ``/v1/desktop/assistant/turn|session|cancel|end|announcements``, the same
+  handlers as the watch's, for the desktop token from this Mac only, as the one device ``mac``
+  (``samrabbit_assistant.MAC_DEVICE``: "Mac" conversations, the Mac's instructions). The dock's list itself is
+  ``samrabbit_inbox`` (``/v1/desktop/inbox*``), which checks the desktop token with ``desktop_denied`` here.
 
 Errors are ``{"error": {"code", "message", "retryable"}}``. Times in the routes this module answers itself are ISO
 8601 (``...Z`` or with the calendar's offset); the reused sync routes keep their epoch milliseconds. Tokens, codes,
@@ -95,6 +99,7 @@ _LOG = logging.getLogger("samrabbit-bridge.mobile")
 
 PREFIX = "/v1/mobile/"
 ASSISTANT_PREFIX = "/v1/assistant/"
+DESKTOP_ASSISTANT_PREFIX = "/v1/desktop/assistant/"  # the desktop app's voice: the same handlers, the "mac" device
 DEFAULT_DEVICES_FILE = "~/.config/samrabbit/mobile-devices.json"
 DEFAULT_TIMEZONE = "America/New_York"
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no I, O, 0 or 1
@@ -678,6 +683,15 @@ ROUTES: Tuple[_Route, ...] = (
     _Route(r"/v1/mobile/assistant/session", "/v1/mobile/assistant/session",
            {"POST": ("assistant_session", DEVICE)}),
     _Route(r"/v1/mobile/assistant/cancel", "/v1/mobile/assistant/cancel", {"POST": ("assistant_cancel", DEVICE)}),
+    # The desktop app's voice (CONTRACTS-WAVE6): the mobile assistant's own handlers, for the desktop token from this
+    # Mac only, as the one device "mac" (its conversations are the sync store's "Mac" ones).
+    _Route(r"/v1/desktop/assistant/turn", "/v1/desktop/assistant/turn", {"POST": ("assistant_turn", DESKTOP)}),
+    _Route(r"/v1/desktop/assistant/announcements", "/v1/desktop/assistant/announcements",
+           {"GET": ("assistant_announcements", DESKTOP)}),
+    _Route(r"/v1/desktop/assistant/end", "/v1/desktop/assistant/end", {"POST": ("assistant_end", DESKTOP)}),
+    _Route(r"/v1/desktop/assistant/session", "/v1/desktop/assistant/session",
+           {"POST": ("assistant_session", DESKTOP)}),
+    _Route(r"/v1/desktop/assistant/cancel", "/v1/desktop/assistant/cancel", {"POST": ("assistant_cancel", DESKTOP)}),
     _Route(r"/v1/assistant/chatgpt/start", "/v1/assistant/chatgpt/start", {"POST": ("chatgpt_start", DESKTOP)}),
     _Route(r"/v1/assistant/chatgpt/status", "/v1/assistant/chatgpt/status", {"GET": ("chatgpt_status", DESKTOP)}),
     _Route(r"/v1/assistant/chatgpt/disconnect", "/v1/assistant/chatgpt/disconnect",
@@ -784,7 +798,8 @@ class MobileService:
 
     @staticmethod
     def handles(route: str) -> bool:
-        return route.startswith(PREFIX) or route.startswith(ASSISTANT_PREFIX)
+        return route.startswith(PREFIX) or route.startswith(ASSISTANT_PREFIX) or \
+            route.startswith(DESKTOP_ASSISTANT_PREFIX)
 
     @staticmethod
     def route_label(route: str) -> str:
@@ -793,7 +808,7 @@ class MobileService:
             if match:
                 action = match.groupdict().get("action")
                 return spec.label.replace("{action}", action) if action else spec.label
-        return "/v1/mobile/(other)"
+        return "/v1/desktop/assistant/(other)" if route.startswith(DESKTOP_ASSISTANT_PREFIX) else "/v1/mobile/(other)"
 
     def health(self) -> Dict[str, Any]:
         status = self.t3.status() if self.t3 is not None else {"paired": False, "ok": False}
@@ -824,7 +839,7 @@ class MobileService:
                     found = (spec, match.groupdict())
                     break
             if found is None:
-                self._device(handler)
+                self._authorize(handler, DESKTOP if route.startswith(DESKTOP_ASSISTANT_PREFIX) else DEVICE)
                 raise MobileError(404, "not_found", "Not found.")
             spec, params = found
             entry = spec.methods.get(method)
@@ -850,17 +865,22 @@ class MobileService:
             isinstance(payload.get("error"), dict) else None
         return status, code
 
+    def desktop_denied(self, handler: Any) -> Optional[Exception]:
+        """The desktop app's rule (loopback peer, loopback Host/Origin, the desktop token), as the desktop sync API
+        and the ChatGPT login routes apply it: None when allowed, else the error to answer. The desktop inbox
+        (``samrabbit_inbox``) uses it too."""
+        service = getattr(self.server, "sync", None)
+        if service is not None:
+            return service.desktop_denied(handler)
+        if _sync is not None and self._desktop_token is not None:
+            return _sync._desktop_denied(handler, self._desktop_token)  # noqa: SLF001 - the same rule
+        return MobileError(503, "desktop_unavailable", "The desktop token check is not installed.")
+
     def _authorize(self, handler: Any, auth: str) -> Optional[Dict[str, Any]]:
         if auth == PUBLIC:
             return None
         if auth == DESKTOP:
-            service = getattr(self.server, "sync", None)
-            if service is not None:
-                denied = service.desktop_denied(handler)
-            elif _sync is not None and self._desktop_token is not None:
-                denied = _sync._desktop_denied(handler, self._desktop_token)  # noqa: SLF001 - the same rule
-            else:
-                raise MobileError(503, "desktop_unavailable", "The desktop token check is not installed.")
+            denied = self.desktop_denied(handler)
             if denied is not None:
                 raise denied
             return None
@@ -1598,25 +1618,33 @@ class MobileService:
             raise MobileError(503, "assistant_unavailable", "The voice assistant is not installed on the Mac bridge.")
         return self.assistant
 
-    def _r_assistant_turn(self, handler: Any, _params: Dict[str, str], device: Dict[str, Any],
+    @staticmethod
+    def _speaker(device: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Who talks: the paired phone or watch, or (the desktop token on /v1/desktop/assistant/*, no device) the
+        Mac itself."""
+        if device is not None:
+            return device
+        return dict(_assistant.MAC_DEVICE) if _assistant is not None else {"deviceId": "mac", "platform": "macos"}
+
+    def _r_assistant_turn(self, handler: Any, _params: Dict[str, str], device: Optional[Dict[str, Any]],
                           _route: str) -> Tuple[int, Any]:
-        return self._assistant().turn(handler, device)
+        return self._assistant().turn(handler, self._speaker(device))
 
-    def _r_assistant_announcements(self, handler: Any, _params: Dict[str, str], device: Dict[str, Any],
+    def _r_assistant_announcements(self, handler: Any, _params: Dict[str, str], device: Optional[Dict[str, Any]],
                                    _route: str) -> Tuple[int, Any]:
-        return self._assistant().announcements(handler, device)
+        return self._assistant().announcements(handler, self._speaker(device))
 
-    def _r_assistant_end(self, handler: Any, _params: Dict[str, str], device: Dict[str, Any],
+    def _r_assistant_end(self, handler: Any, _params: Dict[str, str], device: Optional[Dict[str, Any]],
                          _route: str) -> Tuple[int, Any]:
-        return self._assistant().end(handler, device)
+        return self._assistant().end(handler, self._speaker(device))
 
-    def _r_assistant_session(self, handler: Any, _params: Dict[str, str], device: Dict[str, Any],
+    def _r_assistant_session(self, handler: Any, _params: Dict[str, str], device: Optional[Dict[str, Any]],
                              _route: str) -> Tuple[int, Any]:
-        return self._assistant().session(handler, device)
+        return self._assistant().session(handler, self._speaker(device))
 
-    def _r_assistant_cancel(self, handler: Any, _params: Dict[str, str], device: Dict[str, Any],
+    def _r_assistant_cancel(self, handler: Any, _params: Dict[str, str], device: Optional[Dict[str, Any]],
                             _route: str) -> Tuple[int, Any]:
-        return self._assistant().cancel(handler, device)
+        return self._assistant().cancel(handler, self._speaker(device))
 
     def _chatgpt(self, handler: Any, action: str) -> Tuple[int, Any]:
         if action != "status":

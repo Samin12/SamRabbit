@@ -55,6 +55,12 @@ Routes (through ``samrabbit_mobile``: a paired device's token and the LAN / Tail
   turn tells the brain what was announced, so "approve it" works.
 * ``POST /v1/mobile/assistant/end {conversationId}`` (optional): the watch stopped listening (the realtime session
   closes too).
+* The desktop app's voice (the Agent Dock's mic, its shortcut, the wake phrase): the same five routes under
+  ``/v1/desktop/assistant/*``, for the desktop token from this Mac only (``samrabbit_mobile``), as the device "mac"
+  (``MAC_DEVICE``). Its conversations are "Mac" ones (``mac-<conversationId>``, titled ``Mac: <first words>``,
+  origin ``mac``), the Claude brain gets ``MAC_SYSTEM_PROMPT`` (one to three sentences, his T3 threads in the dock) and
+  ``device: mac``, the realtime brain the Mac addendum (``samrabbit_realtime_profile.MAC_INSTRUCTION``) instead of
+  the watch's. The Mac and the watch never share a conversation.
 * ChatGPT login (loopback + desktop token, for the desktop app and ``connect-chatgpt.sh``; see ``samrabbit_chatgpt``):
   ``POST /v1/assistant/chatgpt/start``, ``GET /v1/assistant/chatgpt/status``, ``POST /v1/assistant/chatgpt/disconnect``.
 
@@ -216,7 +222,11 @@ _TURN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
 _SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 SYNC_PREFIX = "watch-"
+MAC_SYNC_PREFIX = "mac-"
 INTERNAL_DEVICE_ID = "assistant"
+# The desktop app's voice (the Agent Dock's mic, the shortcut, the wake phrase) is one device, "mac": the
+# /v1/desktop/assistant/* routes (loopback + desktop token) turn with it.
+MAC_DEVICE: Dict[str, Any] = {"deviceId": "mac", "name": "Mac", "platform": "macos"}
 
 
 # --------------------------------------------------------------------------- errors
@@ -758,10 +768,10 @@ class ElevenLabsVoice:
 # --------------------------------------------------------------------------- the agent (claude -p)
 
 
-SYSTEM_PROMPT = """You are SamRabbit, Samin's voice assistant on his Apple Watch, the same assistant as on his Rabbit R1. Everything you write is spoken aloud by a voice, then the watch listens for his answer.
+_PROMPT = """You are SamRabbit, Samin's voice assistant on his {device}, the same assistant as on his {others}. Everything you write is spoken aloud by a voice, then the {listener} listens for his answer.
 
 How you talk:
-- One or two short sentences. Lead with the answer. No markdown, lists, headings, emoji, links or code.
+- {length} Lead with the answer. No markdown, lists, headings, emoji, links or code.
 - Say numbers, times and dates the way a person says them ("two thirty", "in about ten minutes", "Friday the ninth").
 - Never read out ids, request ids or URLs.
 - If you ask him something, end with a question mark. Don't add "anything else?" style questions.
@@ -785,10 +795,23 @@ Journal:
 
 Mac and visuals:
 - mac_open opens an app or a website; mac_look shows you the screen.
-- For a chart, graph or other visual, use generate_ui and say it will appear on his phone and Mac.
-
-Each message starts with a line like [Now: Thursday, October 8, 2026, 2:37 PM America/New_York · device: watch]: that is his local time. Lines starting with [Announced to him ...] are what you just told him about his tasks, so "approve it" or "what does it need?" refers to them.
+- For a chart, graph or other visual, use generate_ui and say it will appear {visuals}.
+{addendum}
+Each message starts with a line like [Now: Thursday, October 8, 2026, 2:37 PM America/New_York · device: {tag}]: that is his local time. Lines starting with [Announced to him ...] are what you just told him about his tasks, so "approve it" or "what does it need?" refers to them.
 """
+
+# The watch (and the iPhone's Siri path).
+SYSTEM_PROMPT = _PROMPT.format(device="Apple Watch", others="Rabbit R1", listener="watch",
+                               length="One or two short sentences.", visuals="on his phone and Mac", addendum="",
+                               tag="watch")
+# The desktop app (the Agent Dock's voice): the same rules, a little more room, and what he does at his Mac.
+MAC_SYSTEM_PROMPT = _PROMPT.format(
+    device="Mac", others="Rabbit R1 and his Apple Watch", listener="Mac", length="One to three short sentences.",
+    visuals="in the SamRabbit desktop app and on his phone", tag="mac", addendum="""
+At his Mac:
+- He is usually managing his T3 Code tasks from the SamRabbit Agent Dock: what needs him, approving, answering, replying to, starting and stopping them. Name a task by its title and say what it needs.
+- The Mac tools act on this Mac: mac_open, mac_look.
+""")
 
 
 class AgentRun:
@@ -910,6 +933,14 @@ class ClaudeAgent:
     def system_prompt_file(self) -> str:
         return os.path.join(str(self.workdir), "system-prompt.md")
 
+    @property
+    def mac_prompt_file(self) -> str:
+        return os.path.join(str(self.workdir), "system-prompt-mac.md")
+
+    def prompt_file_for(self, platform: str) -> str:
+        """The desktop app's conversations get the Mac's prompt; the watch and the phone the watch's."""
+        return self.mac_prompt_file if platform == "macos" else self.system_prompt_file
+
     def executable(self) -> Optional[str]:
         candidates: List[str] = []
         if self._explicit:
@@ -931,12 +962,13 @@ class ClaudeAgent:
             return "claude_missing"
         return None
 
-    def arguments(self, executable: str, session_id: str, *, resume: bool) -> List[str]:
+    def arguments(self, executable: str, session_id: str, *, resume: bool,
+                  prompt_file: Optional[str] = None) -> List[str]:
         args = [executable, "-p", "--model", self.settings.model(), "--output-format", "stream-json", "--verbose",
                 "--setting-sources", "", "--strict-mcp-config", "--mcp-config", self.mcp_config,
                 "--tools", "", "--allowedTools", "mcp__" + MCP_SERVER, "--permission-mode", "dontAsk",
                 "--disable-slash-commands", "--max-turns", str(self.max_turns),
-                "--system-prompt-file", self.system_prompt_file]
+                "--system-prompt-file", prompt_file or self.system_prompt_file]
         return args + (["--resume", session_id] if resume else ["--session-id", session_id])
 
     @staticmethod
@@ -954,16 +986,16 @@ class ClaudeAgent:
             _kill_group(process)
 
     def run(self, message: str, session_id: str, *, resume: bool, timeout: float,
-            progress: Dict[str, Any]) -> AgentRun:
+            progress: Dict[str, Any], prompt_file: Optional[str] = None) -> AgentRun:
         """One turn. ``progress["started"]`` becomes True once the CLI has the session (its init event), even when
         the turn then fails, so the next turn resumes it. ``progress["process"]`` is the CLI (still exiting)."""
         executable = self.executable()
         if executable is None:
             raise unavailable(self.off_reason() or "claude_missing")
         try:
-            process = subprocess.Popen(self.arguments(executable, session_id, resume=resume), stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.cwd,
-                                       env=self.environment(), start_new_session=True)
+            process = subprocess.Popen(self.arguments(executable, session_id, resume=resume, prompt_file=prompt_file),
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       cwd=self.cwd, env=self.environment(), start_new_session=True)
         except OSError:
             raise unavailable("claude_failed", retryable=True) from None
         progress["process"] = process
@@ -1255,9 +1287,11 @@ class _Conversation:
     def __init__(self, conversation_id: str, device: Dict[str, Any], *, now: float, cursor: int,
                  session_id: Optional[str] = None, started: bool = False) -> None:
         self.id = conversation_id
-        self.sync_id = SYNC_PREFIX + conversation_id
         self.device_id = str(device.get("deviceId") or "")
         self.platform = str(device.get("platform") or "watchos")
+        mac = self.platform == "macos"
+        self.sync_id = (MAC_SYNC_PREFIX if mac else SYNC_PREFIX) + conversation_id
+        self.prefix = "mac" if mac else "watch"  # its timeline events' ids: "<prefix>:<turn>:user", ...
         self.session_id = session_id or str(uuid.uuid4())
         self.started = started  # the CLI has this session (resume it)
         self.created_at = now
@@ -1720,6 +1754,7 @@ class AssistantService:
                 token_file = os.path.join(self.workdir, "assistant-token")
                 _write_private(token_file, self._token + "\n")
                 _write_private(self.agent.system_prompt_file, SYSTEM_PROMPT)
+                _write_private(self.agent.mac_prompt_file, MAC_SYSTEM_PROMPT)
                 config = {"mcpServers": {MCP_SERVER: {
                     "type": "stdio", "command": sys.executable, "args": ["-I", MCP_SCRIPT],
                     "env": {"SAMRABBIT_ASSISTANT_URL": self._url(), "SAMRABBIT_ASSISTANT_TOKEN_FILE": token_file}}}}
@@ -1742,6 +1777,12 @@ class AssistantService:
             return None
         return {"deviceId": INTERNAL_DEVICE_ID, "name": "SamRabbit assistant", "platform": "assistant",
                 "internal": True}
+
+    def busy_sync_ids(self) -> List[str]:
+        """The sync-store ids of the conversations answering a turn right now (the desktop inbox shows them as
+        working)."""
+        with self._lock:
+            return [item.sync_id for item in self._conversations.values() if item.lock.locked()]
 
     def sync_conversation(self, handler: Any) -> Optional[str]:
         """The watch conversation a tool call belongs to: by the CLI's (or the realtime turn's) session id
@@ -2154,7 +2195,8 @@ class AssistantService:
             earlier = _clip(" ".join(f"Samin said: {heard} You answered: {say}"
                                      for heard, say in list(conversation.history)[-6:]), 2000)
         tools = _profile.tool_definitions(t3=t3_on, mac=mac_on, calendar=calendar_on, journal=True, visuals=visuals)
-        text = _profile.instructions(t3_items=items, t3=t3_on, mac=mac_on, visuals=visuals, earlier=earlier)
+        text = _profile.instructions(t3_items=items, t3=t3_on, mac=mac_on, visuals=visuals, earlier=earlier,
+                                     device="mac" if conversation.platform == "macos" else "watch")
         return _profile.session_config(model=self.settings.realtime_model(), voice=self.settings.realtime_voice(),
                                        instructions_text=text, tools=tools)
 
@@ -2384,7 +2426,7 @@ class AssistantService:
                 return
             sink.heard(heard)
             self._record_start(conversation, heard)
-            self._record(conversation, {"id": f"watch:{request.turn_id}:user", "type": "message.user",
+            self._record(conversation, {"id": f"{conversation.prefix}:{request.turn_id}:user", "type": "message.user",
                                         "text": heard, "origin": conversation_origin(conversation)})
             conversation.said.append(heard)
             if is_closer(heard):
@@ -2445,9 +2487,10 @@ class AssistantService:
     def _done(self, conversation: _Conversation, request: _TurnRequest, result: _TurnResult,
               run: Optional[AgentRun], *, record: bool = True) -> None:
         if result.say and record:
-            self._record(conversation, {"id": f"watch:{request.turn_id}:assistant",
-                                        "type": "message.assistant.done", "messageId": f"watch:{request.turn_id}",
-                                        "text": result.say, "origin": conversation_origin(conversation)})
+            message_id = f"{conversation.prefix}:{request.turn_id}"
+            self._record(conversation, {"id": message_id + ":assistant", "type": "message.assistant.done",
+                                        "messageId": message_id, "text": result.say,
+                                        "origin": conversation_origin(conversation)})
         conversation.turns += 1
         conversation.last_at = self._clock()
         self._save()
@@ -2619,7 +2662,7 @@ class AssistantService:
                        context=f"[T3 update] {event.say} (thread id {event.thread_id})")
 
     def _record_announcement(self, conversation: _Conversation, event: _Announcement) -> None:
-        self._record(conversation, {"id": f"watch:{conversation.id}:announce:{event.id}",
+        self._record(conversation, {"id": f"{conversation.prefix}:{conversation.id}:announce:{event.id}",
                                     "type": "host.t3_update", "text": event.say, "threadId": event.thread_id,
                                     "title": event.title, "projectTitle": event.project, "status": event.status,
                                     "kind": {"needs_you": "t3.thread.needs_approval", "done": "t3.thread.finished",
@@ -2630,7 +2673,7 @@ class AssistantService:
         zone = getattr(self.mobile, "zone", None) or timezone.utc
         zone_name = getattr(self.mobile, "zone_name", None) or "UTC"
         moment = datetime.fromtimestamp(self._clock(), zone)
-        device = {"watchos": "watch", "ios": "phone"}.get(conversation.platform, "watch")
+        device = {"watchos": "watch", "ios": "phone", "macos": "mac"}.get(conversation.platform, "watch")
         stamp = moment.strftime("%A, %B ") + str(moment.day) + moment.strftime(", %Y, ") + \
             str(int(moment.strftime("%I"))) + moment.strftime(":%M %p")
         return f"[Now: {stamp} {zone_name} · device: {device}]"
@@ -2662,6 +2705,7 @@ class AssistantService:
                                          retryable=True, cache=True)
                 try:
                     run = self.agent.run(message, conversation.session_id, resume=resume,
+                                         prompt_file=self.agent.prompt_file_for(conversation.platform),
                                          timeout=deadline - time.monotonic(), progress=progress)
                 except _SessionMissing:
                     conversation.session_id, conversation.started = str(uuid.uuid4()), False
@@ -2707,12 +2751,12 @@ class AssistantService:
             return
         conversation.recorded_start = True
         origin = conversation_origin(conversation)
-        self._record(conversation, {"id": f"watch:{conversation.id}:started:{uuid.uuid4().hex[:16]}",
+        self._record(conversation, {"id": f"{conversation.prefix}:{conversation.id}:started:{uuid.uuid4().hex[:16]}",
                                     "type": "conversation.started", "origin": origin})
         store = self._store()
         if store is None:
             return
-        label = "Watch" if origin == "watch" else "iPhone"
+        label = {"watch": "Watch", "mac": "Mac"}.get(origin, "iPhone")
         try:  # titled like the R1's ("Watch: what needs me?"), never an R1 voice session
             with store._lock:  # noqa: SLF001
                 store._db.execute(  # noqa: SLF001
@@ -2724,8 +2768,8 @@ class AssistantService:
     def _record_tools(self, conversation: _Conversation, turn_id: str, run: AgentRun) -> None:
         store = self._store()
         for number, tool in enumerate(run.tools.values()):
-            event: Dict[str, Any] = {"id": f"watch:{turn_id}:tool:{number}", "type": "tool.completed",
-                                     "tool": tool["name"], "toolCallId": f"watch:{turn_id}:{number}",
+            event: Dict[str, Any] = {"id": f"{conversation.prefix}:{turn_id}:tool:{number}", "type": "tool.completed",
+                                     "tool": tool["name"], "toolCallId": f"{conversation.prefix}:{turn_id}:{number}",
                                      "arguments": tool.get("input") or {},
                                      "result": _clip(tool.get("result"), 4000) if tool.get("result") else None,
                                      "isError": bool(tool.get("isError")), "origin": conversation_origin(conversation)}
@@ -2745,7 +2789,7 @@ class AssistantService:
             return
         conversation.ended = True
         if conversation.recorded_start:
-            self._record(conversation, {"id": f"watch:{conversation.id}:ended:{uuid.uuid4().hex[:16]}",
+            self._record(conversation, {"id": f"{conversation.prefix}:{conversation.id}:ended:{uuid.uuid4().hex[:16]}",
                                         "type": "conversation.ended", "origin": conversation_origin(conversation)})
         conversation.recorded_start = False
 
@@ -2864,7 +2908,7 @@ class AssistantService:
 
 
 def conversation_origin(conversation: _Conversation) -> str:
-    return "phone" if conversation.platform == "ios" else "watch"
+    return {"ios": "phone", "macos": "mac"}.get(conversation.platform, "watch")
 
 
 def prune_sessions(folder: str, older_than: float) -> int:

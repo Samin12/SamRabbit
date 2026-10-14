@@ -4,6 +4,9 @@
   (single use) and issues ``base64url(claims).sig`` tokens; the form is recorded in ``exchanges``.
 * ``GET /api/auth/session``, ``GET /api/orchestration/shell``, ``GET /api/orchestration/threads/<id>`` serve
   ``shell`` / ``details``; ``POST /api/orchestration/dispatch`` records each command in ``dispatched``.
+* ``GET /ws`` (a WebSocket, the bearer token on the upgrade) answers one Effect-RPC ``Request`` for
+  ``server.getConfig`` with ``server_config`` (``Exit`` ``Success``), records its tag in ``ws_requests``; with
+  ``ws_status`` set to anything but 101 the upgrade is refused with that status (an older T3).
 * ``revoke_all()`` makes every issued token answer 401 (as after a revoke or the 30-day expiry);
   ``refuse_tokens = True`` makes every bearer token answer 401, even ones issued afterwards (a broken T3).
 * ``delay``: ``{path: seconds}`` to answer slowly.
@@ -13,8 +16,10 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 import os
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +84,27 @@ def default_shell() -> Dict[str, Any]:
             "threads": threads}
 
 
+def default_server_config() -> Dict[str, Any]:
+    """The parts of ``server.getConfig`` the bridge reads: Claude ready, a Codex instance that is not installed and
+    a second Codex instance that is (as on Samin's Mac), and a provider of another kind."""
+    def model(slug: str, name: str, **extra: Any) -> Dict[str, Any]:
+        return {"slug": slug, "name": name, "isCustom": False, "capabilities": None, **extra}
+    return {"environment": {}, "cwd": "/Users/test", "providers": [
+        {"instanceId": "codex", "driver": "codex", "displayName": "ChatGPT sharing", "enabled": True,
+         "installed": False, "status": "warning", "models": [model("gpt-6", "GPT-6", isDefault=True)]},
+        {"instanceId": "codex_cli", "driver": "codex", "displayName": "Codex CLI", "enabled": True, "installed": True,
+         "status": "ready", "models": [model("gpt-6.1", "GPT-6.1"), model("gpt-6", "GPT-6", isDefault=True),
+                                       model("gpt-5", "GPT-5", isLegacy=True)]},
+        {"instanceId": "claudeAgent", "driver": "claudeAgent", "displayName": "Claude", "enabled": True,
+         "installed": True, "status": "ready",
+         "models": [model("claude-opus-5-5", "Claude Opus 5.5"), model("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                    model("claude-fable-5-1", "Claude Fable 5.1", isDefault=True),
+                    model("claude-opus-4-5", "Claude Opus 4.5", isLegacy=True)]},
+        {"instanceId": "cursor", "driver": "cursor", "displayName": "Cursor", "enabled": False, "installed": False,
+         "status": "disabled", "models": [model("auto", "Auto")]},
+    ], "settings": {"defaultModelSelection": {"instanceId": "claudeAgent", "model": "claude-opus-5-5"}}}
+
+
 def default_details() -> Dict[str, Dict[str, Any]]:
     approval = {"messages": [
         {"id": "u1", "role": "user", "text": "Fix the login redirect please", "createdAt": "2026-10-08T12:50:00.000Z"},
@@ -120,6 +146,9 @@ class FakeT3:
         self.dispatched: List[Dict[str, Any]] = []
         self.requests: List[str] = []
         self.dispatch_status = 200
+        self.server_config: Any = default_server_config()
+        self.ws_requests: List[str] = []
+        self.ws_status = 101
         self.refuse_tokens = False
         self.delay: Dict[str, float] = {}
         self.counter = 0
@@ -182,9 +211,64 @@ class FakeT3:
         with self.lock:
             return self.tokens.get(token) is True and not self.refuse_tokens
 
+    def _websocket(self, handler: BaseHTTPRequestHandler) -> None:
+        """One Effect-RPC call over a WebSocket: the upgrade, one masked client frame, one ``Exit`` answer."""
+        if not self._authorized(handler):
+            return self._send(handler, 401, {"code": "auth_invalid", "reason": "invalid_credential"})
+        if self.ws_status != 101:
+            return self._send(handler, self.ws_status, {"code": "not_found"})
+        key = handler.headers.get("Sec-WebSocket-Key", "")
+        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+        handler.send_response(101)
+        handler.send_header("Upgrade", "websocket")
+        handler.send_header("Connection", "Upgrade")
+        handler.send_header("Sec-WebSocket-Accept", accept.decode())
+        handler.end_headers()
+        handler.wfile.flush()
+        request = self._ws_read(handler)
+        with self.lock:
+            self.ws_requests.append(str(request.get("tag")))
+            config = copy.deepcopy(self.server_config)
+        self._ws_write(handler, {"_tag": "Ping"})  # Effect RPC's own ping: the client answers it and reads on
+        pong = self._ws_read(handler)
+        with self.lock:
+            self.ws_requests.append(str(pong.get("_tag")))
+        exit_value = {"_tag": "Success", "value": config} if config is not None else \
+            {"_tag": "Failure", "cause": [{"_tag": "Fail", "error": {"_tag": "ServerSettingsError"}}]}
+        self._ws_write(handler, [{"_tag": "Exit", "requestId": request.get("id"), "exit": exit_value}])
+        handler.wfile.write(bytes([0x88, 0x00]))
+        handler.close_connection = True
+
+    @staticmethod
+    def _ws_read(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
+        _first, second = handler.rfile.read(2)
+        size = second & 0x7F
+        if size == 126:
+            size = struct.unpack(">H", handler.rfile.read(2))[0]
+        elif size == 127:
+            size = struct.unpack(">Q", handler.rfile.read(8))[0]
+        mask = handler.rfile.read(4)
+        data = bytes(byte ^ mask[index % 4] for index, byte in enumerate(handler.rfile.read(size)))
+        return json.loads(data.decode())
+
+    @staticmethod
+    def _ws_write(handler: BaseHTTPRequestHandler, value: Any) -> None:
+        body = json.dumps(value).encode()
+        if len(body) < 126:
+            head = bytes([0x81, len(body)])
+        elif len(body) < 65536:
+            head = bytes([0x81, 126]) + struct.pack(">H", len(body))
+        else:
+            head = bytes([0x81, 127]) + struct.pack(">Q", len(body))
+        handler.wfile.write(head + body)
+
     def handle(self, handler: BaseHTTPRequestHandler, method: str) -> None:
         parts = urlsplit(handler.path)
         path = parts.path
+        if method == "GET" and path == "/ws":
+            with self.lock:
+                self.requests.append("GET /ws")
+            return self._websocket(handler)
         length = int(handler.headers.get("Content-Length") or 0)
         raw = handler.rfile.read(length) if length else b""
         with self.lock:
@@ -244,6 +328,8 @@ class FakeT3:
                 if status == 200 and command.get("type") == "thread.create":
                     created = _thread(command["threadId"], command["projectId"], command["title"], minutes_ago=0,
                                       latest=None)
+                    if isinstance(command.get("modelSelection"), dict):
+                        created["modelSelection"] = dict(command["modelSelection"])
                     self.shell["threads"].append(created)
             if status != 200:
                 return self._send(handler, status, {"code": "internal_error", "reason": "orchestration_dispatch_failed"})
