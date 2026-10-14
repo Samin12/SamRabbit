@@ -2196,7 +2196,7 @@ class AssistantService:
                                      for heard, say in list(conversation.history)[-6:]), 2000)
         tools = _profile.tool_definitions(t3=t3_on, mac=mac_on, calendar=calendar_on, journal=True, visuals=visuals)
         text = _profile.instructions(t3_items=items, t3=t3_on, mac=mac_on, visuals=visuals, earlier=earlier,
-                                     device="mac" if conversation.platform == "macos" else "watch")
+                                     device={"macos": "mac", "ios": "iphone"}.get(conversation.platform, "watch"))
         return _profile.session_config(model=self.settings.realtime_model(), voice=self.settings.realtime_voice(),
                                        instructions_text=text, tools=tools)
 

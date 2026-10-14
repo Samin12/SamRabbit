@@ -15,6 +15,12 @@ It serves, on 127.0.0.1 only:
 * dev controls: ``POST /dev/live`` (start a new live conversation now), ``POST /dev/end``;
 * the Mac voice's routes ``/v1/desktop/assistant/*`` with canned streamed answers, and their dev controls
   ``/dev/assistant``, ``/dev/announce`` (``fake_assistant.py``).
+* the Agent Dock's inbox (CONTRACTS-WAVE6 §A): ``GET /v1/desktop/inbox?after=&wait=`` (long poll),
+  ``GET /v1/desktop/inbox/items/<id>``, ``POST …/items/<id>/approve|answer|reply|stop|seen|open``,
+  ``GET /v1/desktop/inbox/targets``, ``POST /v1/desktop/inbox/new``, from ``samples/inbox.json`` (every source and
+  status, long titles, an approval with three options, a question); dev controls ``POST /dev/inbox/needs-you``
+  (a new approval arrives), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake`` (``{"fake": true}``: the dock's
+  smoke driver runs only against a server that answers it).
 
 The sample data is realistic: ten conversations over the last month with cards, a Mac screenshot,
 an R1 camera photo, T3 updates, tool calls, background results and generated UIs (Chart.js from
@@ -26,6 +32,7 @@ read from ``--token-file`` (default ``~/.config/samrabbit/desktop-token``). Stdl
 from __future__ import annotations
 
 import argparse
+import calendar
 import hashlib
 import json
 import os
@@ -517,6 +524,300 @@ class LiveRunner:
             self.emit(cid, "conversation.ended", origin="host")
 
 
+# --------------------------------------------------------------------------- Agent Dock inbox (CONTRACTS-WAVE6 §A)
+
+INBOX_ORDER = {"needs-approval": 0, "needs-input": 1, "error": 2, "working": 4}
+
+
+def iso(ms: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms / 1000)) + ".%03dZ" % (ms % 1000)
+
+
+def parse_iso(text: str) -> Optional[int]:
+    try:
+        main = text.rstrip("Z").split(".")[0]
+        return calendar.timegm(time.strptime(main, "%Y-%m-%dT%H:%M:%S")) * 1000
+    except (ValueError, AttributeError):
+        return None
+
+
+def public(item: Dict[str, Any]) -> Dict[str, Any]:
+    """A copy without the fixture's own bookkeeping (keys starting with _)."""
+    return {key: json.loads(json.dumps(value)) for key, value in item.items() if not key.startswith("_")}
+
+
+def shift_times(value: Any, delta_ms: int) -> Any:
+    """Moves every ISO time in the fixtures by delta, so "2 minutes ago" stays 2 minutes ago."""
+    if isinstance(value, dict):
+        return {key: shift_times(item, delta_ms) for key, item in value.items()}
+    if isinstance(value, list):
+        return [shift_times(item, delta_ms) for item in value]
+    if isinstance(value, str) and len(value) >= 20 and value[4:5] == "-" and "T" in value:
+        parsed = parse_iso(value)
+        return iso(parsed + delta_ms) if parsed is not None else value
+    return value
+
+
+class InboxError(Exception):
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status, self.code, self.message = status, code, message
+
+
+class InboxFixtures:
+    """The bridge's agent inbox as the dock sees it, from samples/inbox.json (times shifted to now).
+
+    Actions change the fixtures the way the bridge would: approve/answer → working, reply → working (a live Claude
+    session answers 409 session_live), stop → idle, seen → read, new → a T3 thread that works for a while and then
+    finishes. ``revision`` goes up on every visible change and the list is a long poll on it. ``open`` launches
+    nothing: it only says how it would have opened the item. A ticker moves working threads along every ``tick`` s."""
+
+    def __init__(self, path: str, tick: float = 6.0) -> None:
+        self.path = path
+        self.cond = threading.Condition()
+        self.created = 0
+        self.reset()
+        if tick > 0:
+            threading.Thread(target=self.ticker, args=(tick,), daemon=True).start()
+
+    def reset(self) -> None:
+        with open(self.path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        base = parse_iso(data.get("base", "")) or now_ms()
+        data = shift_times(data, now_ms() - base)
+        with self.cond:
+            self.items: Dict[str, Dict[str, Any]] = {item["id"]: item for item in data["inbox"]["items"]}
+            self.sources = data["inbox"].get("sources", {})
+            self.details: Dict[str, List[Dict[str, Any]]] = data.get("details", {})
+            self.targets = data.get("targets", {})
+            self.revision = getattr(self, "revision", 0) + 1
+            self.cond.notify_all()
+
+    # ------------------------------------------------------------ reading
+
+    def ordered(self) -> List[Dict[str, Any]]:
+        def key(item: Dict[str, Any]) -> Tuple[int, int, str]:
+            status = item.get("status")
+            rank = 3 if status == "done" and item.get("unread") else INBOX_ORDER.get(status, 5)
+            return (rank, -(parse_iso(item.get("updatedAt") or "") or 0), item["id"])
+        return sorted(self.items.values(), key=key)
+
+    def snapshot(self) -> Dict[str, Any]:
+        # Counted like the bridge (samrabbit_inbox.py): before the 60-item cap, and "working" includes a SamRabbit chat
+        # that is streaming a reply (the dock counts its agents itself).
+        with self.cond:
+            items = [public(item) for item in self.ordered()]
+            needs = sum(1 for i in items if i["status"] in ("needs-approval", "needs-input", "error")
+                        or (i["status"] == "done" and i.get("unread")))
+            working = sum(1 for i in items if i["status"] == "working")
+            return {"revision": self.revision, "updatedAt": iso(now_ms()),
+                    "counts": {"needsYou": needs, "working": working, "total": len(items)},
+                    "sources": self.sources, "items": items[:60]}
+
+    def wait(self, after: Optional[int], wait: float) -> Dict[str, Any]:
+        with self.cond:
+            if after is not None and after == self.revision and wait > 0:
+                self.cond.wait_for(lambda: self.revision != after, timeout=wait)
+        return self.snapshot()
+
+    def item(self, item_id: str) -> Dict[str, Any]:
+        with self.cond:
+            item = self.items.get(item_id)
+            if not item:
+                raise InboxError(404, "not_found", "No such inbox item.")
+            messages = self.details.get(item_id) or (
+                [{"role": "assistant", "text": item["summary"], "at": item["updatedAt"]}] if item.get("summary") else [])
+            return {"item": public(item), "messages": messages[-12:]}
+
+    # ------------------------------------------------------------ changing
+
+    def bump(self) -> None:
+        self.revision += 1
+        self.cond.notify_all()
+
+    def _get(self, item_id: str, capability: str) -> Dict[str, Any]:
+        item = self.items.get(item_id)
+        if not item:
+            raise InboxError(404, "not_found", "No such inbox item.")
+        if capability not in item.get("can", []):
+            raise InboxError(409, "not_supported", "This item can't do that right now.")
+        return item
+
+    def _touch(self, item: Dict[str, Any], status: str, label: str) -> None:
+        item.update(status=status, statusLabel=label, updatedAt=iso(now_ms()), unread=False)
+
+    def act(self, item_id: str, action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        with self.cond:
+            if action == "approve":
+                item = self._get(item_id, "approve")
+                approvals = item["pending"]["approvals"]
+                request = next((a for a in approvals if a["requestId"] == body.get("requestId")), None)
+                if not request:
+                    raise InboxError(409, "request_not_pending", "That request was already answered.")
+                decisions = [o["decision"] for o in request.get("options", [])]
+                if body.get("decision") not in decisions:
+                    raise InboxError(400, "bad_decision", "Unknown decision.")
+                approvals.remove(request)
+                refused = body["decision"] in ("decline", "cancel")
+                self._touch(item, "working", "Working · declined, continuing" if refused else "Working")
+                item["can"] = [c for c in item["can"] if c != "approve"]
+            elif action == "answer":
+                item = self._get(item_id, "answer")
+                inputs = item["pending"]["inputs"]
+                request = next((r for r in inputs if r["requestId"] == body.get("requestId")), None)
+                if not request:
+                    raise InboxError(409, "request_not_pending", "That question was already answered.")
+                answers = body.get("answers")
+                if not isinstance(answers, dict) or any(q["id"] not in answers for q in request["questions"]):
+                    raise InboxError(400, "bad_answers", "Answer every question.")
+                inputs.remove(request)
+                self._touch(item, "working", "Working")
+                item["can"] = [c for c in item["can"] if c != "answer"]
+            elif action == "reply":
+                item = self.items.get(item_id)
+                if not item:
+                    raise InboxError(404, "not_found", "No such inbox item.")
+                text = str(body.get("text") or "").strip()
+                if not text:
+                    raise InboxError(400, "empty", "Nothing to send.")
+                if item.get("live") and item["source"] in ("claude", "codex"):
+                    raise InboxError(409, "session_live", "The session is open in a terminal.")
+                self._get(item_id, "reply")
+                self.details.setdefault(item_id, []).append({"role": "user", "text": text[:4000], "at": iso(now_ms())})
+                self._touch(item, "working", "Working")
+                self.bump()
+                return 202, {"ok": True, "how": "t3" if item["source"] == "t3" else "terminal"}
+            elif action == "stop":
+                item = self._get(item_id, "stop")
+                self._touch(item, "idle", "Stopped")
+                item["progress"] = None
+            elif action == "seen":
+                item = self._get(item_id, "seen")
+                item["unread"] = False
+            elif action == "open":
+                item = self._get(item_id, "open")
+                if item["source"] == "samrabbit":
+                    return 200, {"opened": True, "how": "desktop", "conversationId": item_id.split(":", 1)[1]}
+                how = {"t3": "t3", "claude": "terminal"}.get(item["source"])
+                if item["source"] == "codex":
+                    how = "app" if "seen" in item.get("can", []) else "terminal"
+                return 200, {"opened": True, "how": how}
+            else:
+                raise InboxError(404, "not_found", "Unknown action.")
+            self.bump()
+            return 200, {"ok": True}
+
+    def new(self, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise InboxError(400, "empty", "Nothing to send.")
+        projects = {p["id"]: p for p in self.targets.get("projects", [])}
+        project_id = body.get("projectId") or self.targets.get("default", {}).get("projectId")
+        if project_id not in projects:
+            raise InboxError(404, "project_not_found", "No such T3 project.")
+        agent = body.get("agent") or self.targets.get("default", {}).get("agent") or "claude"
+        with self.cond:
+            self.created += 1
+            item_id = "t3:th_new_%d_%d" % (now_ms() // 1000, self.created)
+            title = str(body.get("title") or text.split("\n")[0])[:80]
+            self.items[item_id] = {
+                "id": item_id, "source": "t3", "agent": agent, "title": title, "project": projects[project_id]["title"],
+                "cwd": None, "status": "working", "statusLabel": "Working · starting", "summary": "",
+                "updatedAt": iso(now_ms()), "unread": False, "pending": {"approvals": [], "inputs": []},
+                "can": ["stop", "reply", "open"], "live": False, "progress": 0.05, "phase": "Starting", "_born": now_ms()}
+            self.details[item_id] = [{"role": "user", "text": text[:4000], "at": iso(now_ms())}]
+            self.bump()
+        return 202, {"itemId": item_id}
+
+    def needs_you(self) -> None:
+        """Dev: a new approval arrives (to see the orb move and the notification)."""
+        with self.cond:
+            self.created += 1
+            item_id = "t3:th_dev_%d" % self.created
+            self.items[item_id] = {
+                "id": item_id, "source": "t3", "agent": "codex", "title": "Deploy the preview build",
+                "project": "Website", "cwd": None, "status": "needs-approval", "statusLabel": "Wants to run a command",
+                "summary": "Ready to deploy the preview. Run the deploy script?", "updatedAt": iso(now_ms()),
+                "unread": True, "pending": {"approvals": [{"requestId": "req_dev_%d" % self.created, "kind": "command",
+                                                           "detail": "npm run deploy:preview",
+                                                           "options": [{"decision": "accept", "label": "Deploy"},
+                                                                       {"decision": "decline", "label": "Not now"}]}],
+                                           "inputs": []},
+                "can": ["approve", "reply", "stop", "seen", "open"], "live": False, "progress": None, "phase": None}
+            self.bump()
+
+    def ticker(self, every: float) -> None:
+        while True:
+            time.sleep(every)
+            with self.cond:
+                changed = False
+                for item in list(self.items.values()):
+                    if item["status"] != "working" or item["source"] == "samrabbit":
+                        continue
+                    if item.get("_born") and now_ms() - item["_born"] > 25_000:
+                        item.update(status="done", statusLabel="Finished", unread=True, progress=None, phase=None,
+                                    summary="Done: the change is in and the tests pass.", updatedAt=iso(now_ms()))
+                        item["can"] = ["reply", "seen", "open"]
+                        changed = True
+                    elif item.get("progress") is not None:
+                        item["progress"] = round(min(0.95, item["progress"] + 0.05), 2)
+                        item["updatedAt"] = iso(now_ms())
+                        changed = True
+                if changed:
+                    self.bump()
+
+
+def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str, List[str]]) -> None:
+    """Routes /v1/desktop/inbox* and /dev/inbox/* (auth already checked by the caller)."""
+    inbox: Optional[InboxFixtures] = getattr(handler.server, "inbox", None)
+    if inbox is None:
+        return handler.json(404, {"error": {"code": "not_found", "message": "Not found.", "retryable": False}})
+    try:
+        if method == "GET" and path == "/dev/inbox/fake":
+            # The dock's smoke driver approves and creates tasks: it runs only when the server answers this.
+            return handler.json(200, {"fake": True})
+        if method == "POST" and path == "/dev/inbox/needs-you":
+            inbox.needs_you()
+            return handler.json(202, {"ok": True})
+        if method == "POST" and path == "/dev/inbox/reset":
+            inbox.reset()
+            return handler.json(200, {"ok": True})
+        if method == "GET" and path == "/v1/desktop/inbox":
+            raw_after = (query.get("after") or [""])[0]
+            after = int(raw_after) if raw_after.lstrip("-").isdigit() else None
+            raw_wait = (query.get("wait") or ["0"])[0]
+            wait = min(25.0, max(0.0, float(raw_wait))) if raw_wait.replace(".", "", 1).isdigit() else 0.0
+            return handler.json(200, inbox.wait(after, wait))
+        if method == "GET" and path == "/v1/desktop/inbox/targets":
+            return handler.json(200, inbox.targets)
+        body: Dict[str, Any] = {}
+        if method == "POST":
+            length = int(handler.headers.get("Content-Length") or 0)
+            raw = handler.rfile.read(min(length, 65536)) if length else b""
+            try:
+                body = json.loads(raw or b"{}")
+            except ValueError:
+                raise InboxError(400, "bad_json", "The body is not JSON.") from None
+            if not isinstance(body, dict):
+                raise InboxError(400, "bad_json", "The body must be an object.")
+        if method == "POST" and path == "/v1/desktop/inbox/new":
+            status, payload = inbox.new(body)
+            return handler.json(status, payload)
+        prefix = "/v1/desktop/inbox/items/"
+        if path.startswith(prefix):
+            rest = path[len(prefix):]
+            if method == "GET" and "/" not in rest:
+                return handler.json(200, inbox.item(unquote(rest)))
+            if method == "POST" and rest.count("/") == 1:
+                item_id, action = rest.split("/")
+                status, payload = inbox.act(unquote(item_id), action, body)
+                return handler.json(status, payload)
+        raise InboxError(404, "not_found", "Not found.")
+    except InboxError as error:
+        return handler.json(error.status, {"error": {"code": error.code, "message": error.message,
+                                                     "retryable": error.status >= 500}})
+
+
 # --------------------------------------------------------------------------- HTTP
 
 
@@ -559,6 +860,8 @@ class FakeHandler(BaseHTTPRequestHandler):
             return self.json(401, {"error": {"code": "unauthorized", "message": "Desktop token required."}})
         if FakeAssistant.handles(path):
             return self.server.assistant.handle(self, method, path, split.query)
+        if path.startswith("/v1/desktop/inbox") or path.startswith("/dev/inbox/"):
+            return handle_inbox(self, method, path, query)
         if method == "POST" and path == "/dev/live":
             self.server.live.start(end_after=False)
             return self.json(202, {"ok": True})
@@ -663,6 +966,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--empty", action="store_true", help="start without sample conversations")
     parser.add_argument("--no-sync", action="store_true",
                         help="answer 404 for /v1/sync/* (a bridge that serves /app but has no sync module yet)")
+    parser.add_argument("--inbox-tick", type=float, default=6.0,
+                        help="move working inbox threads along every N seconds (0: the inbox stays still)")
+    parser.add_argument("--no-inbox", action="store_true", help="answer 404 for /v1/desktop/inbox* (a bridge without it)")
     options = parser.parse_args(argv)
     token_file = os.path.expanduser(options.token_file)
     if not os.path.isfile(token_file):
@@ -676,6 +982,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     site = samrabbit_app.AppSite(options.web_dir, token_file)
     server = FakeServer(("127.0.0.1", options.port), store, live, site)
     server.no_sync = options.no_sync
+    server.inbox = None if options.no_inbox else InboxFixtures(os.path.join(SAMPLES, "inbox.json"), tick=options.inbox_tick)
     print(f"fake-sync: http://127.0.0.1:{server.server_address[1]}/app/ ({len(store.events)} sample events)", flush=True)
 
     def schedule() -> None:

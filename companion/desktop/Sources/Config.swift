@@ -86,11 +86,11 @@ enum Config {
     }
 }
 
-/// Append-only log at ~/Library/Logs/samrabbit-desktop.log (0600). Never contains tokens or
-/// conversation content: only states, HTTP statuses and counts.
+/// Append-only log at ~/Library/Logs/samrabbit-desktop.log (0600; `$SAMRABBIT_DESKTOP_LOG` for dev runs of a
+/// second copy). Never contains tokens or conversation content: only states, HTTP statuses and counts.
 enum Log {
-    static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/samrabbit-desktop.log")
+    static let url = ProcessInfo.processInfo.environment["SAMRABBIT_DESKTOP_LOG"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/samrabbit-desktop.log")
     private static let queue = DispatchQueue(label: "com.samrabbit.desktop.log")
     private static let formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()

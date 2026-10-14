@@ -1,0 +1,232 @@
+{
+  "_about": "Agent Dock fixtures (CONTRACTS-WAVE6 InboxItem). Times are relative to 'base': the fake server and the snapshot renderer shift them to now. Every source and status, long titles, an approval with 3 options, an input question.",
+  "base": "2026-10-13T20:00:00Z",
+  "inbox": {
+    "revision": 1,
+    "updatedAt": "2026-10-13T20:00:00Z",
+    "counts": {"needsYou": 6, "working": 5, "total": 15},
+    "sources": {
+      "t3": {"connected": true},
+      "claude": {"available": true},
+      "codex": {"available": true},
+      "samrabbit": {"available": true}
+    },
+    "items": [
+      {
+        "id": "t3:th_pairing_redirect", "source": "t3", "agent": "claude",
+        "title": "Fix the login redirect loop on the iPhone pairing screen after the token refresh",
+        "project": "SamRabbit", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "needs-approval", "statusLabel": "Wants to run a command",
+        "summary": "The redirect fix is in. Run the pairing tests in companion/desktop to confirm it before I commit?",
+        "updatedAt": "2026-10-13T19:59:10Z", "unread": true,
+        "pending": {
+          "approvals": [{
+            "requestId": "req_run_tests", "kind": "command",
+            "detail": "npm run test -- --filter pairing --reporter dot",
+            "options": [
+              {"decision": "accept", "label": "Run it"},
+              {"decision": "acceptForSession", "label": "Always allow in this thread"},
+              {"decision": "decline", "label": "Don't run"}
+            ]
+          }],
+          "inputs": []
+        },
+        "can": ["approve", "reply", "stop", "seen", "open"], "live": false, "progress": null, "phase": "Waiting for approval"
+      },
+      {
+        "id": "t3:th_waitlist_db", "source": "t3", "agent": "codex",
+        "title": "Pick a database for the waitlist",
+        "project": "Website", "cwd": "/Users/sam/code/website",
+        "status": "needs-input", "statusLabel": "Asking you a question",
+        "summary": "Which database should the waitlist use? I can wire up any of these in about ten minutes.",
+        "updatedAt": "2026-10-13T19:56:00Z", "unread": true,
+        "pending": {
+          "approvals": [],
+          "inputs": [{
+            "requestId": "req_db_choice",
+            "questions": [{
+              "id": "db", "header": "Database", "question": "Which database should the waitlist use?",
+              "options": ["Postgres on Neon", "SQLite with Litestream", "Supabase"],
+              "allowCustom": true, "multiSelect": false
+            }]
+          }]
+        },
+        "can": ["answer", "reply", "stop", "seen", "open"], "live": false, "progress": null, "phase": null
+      },
+      {
+        "id": "claude:5d0c6f2e-1a47-4f7e-9a51-3c2b1e0d9f88", "source": "claude", "agent": "claude",
+        "title": "Investigate the flaky long-poll test in the bridge suite",
+        "project": "jackrabbit-src", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "needs-approval", "statusLabel": "Waiting for you in the terminal",
+        "summary": "Wants to run: python3 -I -m unittest discover -s companion/mac-bridge/tests -k longpoll",
+        "updatedAt": "2026-10-13T19:52:00Z", "unread": true,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open"], "live": true, "progress": null, "phase": null
+      },
+      {
+        "id": "codex:019a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8", "source": "codex", "agent": "codex",
+        "title": "Tidy the R1 runtime settings loader",
+        "project": "jackrabbit-src", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "needs-approval", "statusLabel": "Wants to edit 3 files",
+        "summary": "Codex is waiting for approval in the Codex app.",
+        "updatedAt": "2026-10-13T19:47:00Z", "unread": true,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open", "seen"], "live": false, "progress": null, "phase": null
+      },
+      {
+        "id": "t3:th_watch_previews", "source": "t3", "agent": "claude",
+        "title": "Build the watch complication previews",
+        "project": "SamRabbit", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "error", "statusLabel": "Failed · xcodebuild exited 65",
+        "summary": "SamRabbitWatchWidgets: 'accessoryCorner' is unavailable in this context. I stopped before changing the deployment target.",
+        "updatedAt": "2026-10-13T19:41:00Z", "unread": true,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["reply", "seen", "open"], "live": false, "progress": null, "phase": null
+      },
+      {
+        "id": "t3:th_release_notes", "source": "t3", "agent": "claude",
+        "title": "Write the release notes for 1.4",
+        "project": "SamRabbit", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "done", "statusLabel": "Finished",
+        "summary": "Release notes are in docs/releases/1.4.md: the Agent Dock, Mac voice, watch complications and 14 fixes.",
+        "updatedAt": "2026-10-13T19:31:00Z", "unread": true,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["reply", "seen", "open"], "live": false, "progress": null, "phase": null
+      },
+      {
+        "id": "t3:th_snapshot_cache", "source": "t3", "agent": "codex",
+        "title": "Refactor the bridge's T3 snapshot cache",
+        "project": "SamRabbit", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "working", "statusLabel": "Working · step 3/5",
+        "summary": "Running the bridge suite after moving the snapshot cache behind one lock.",
+        "updatedAt": "2026-10-13T19:59:40Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["stop", "reply", "open"], "live": false, "progress": 0.6, "phase": "Running tests"
+      },
+      {
+        "id": "codex:019a7788-99aa-4bbc-8cde-f00112233445", "source": "codex", "agent": "codex",
+        "title": "Migrate the R1 runtime settings to TOML and keep every old JSON key readable for one release, with a deprecation note in the settings page and the docs",
+        "project": "jackrabbit-src", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "working", "statusLabel": "Working",
+        "summary": "Converted 9 of 14 settings files; writing the compatibility shim for the old JSON keys.",
+        "updatedAt": "2026-10-13T19:58:30Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open"], "live": true, "progress": null, "phase": null
+      },
+      {
+        "id": "claude:8e1f0a2b-3c4d-4e5f-a6b7-c8d9e0f1a2b3", "source": "claude", "agent": "claude",
+        "title": "Draft the onboarding email sequence",
+        "project": "Website", "cwd": "/Users/sam/code/website",
+        "status": "working", "statusLabel": "Working",
+        "summary": "Writing email 3 of 5: the follow-up for people who paired an iPhone but never used the watch.",
+        "updatedAt": "2026-10-13T19:59:55Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open"], "live": true, "progress": null, "phase": null
+      },
+      {
+        "id": "t3:th_dark_mode", "source": "t3", "agent": "claude",
+        "title": "Add a dark mode toggle to the settings page",
+        "project": "Website", "cwd": "/Users/sam/code/website",
+        "status": "working", "statusLabel": "Working · step 1/4",
+        "summary": "Reading the settings page and the theme tokens.",
+        "updatedAt": "2026-10-13T19:59:58Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["stop", "reply", "open"], "live": false, "progress": 0.2, "phase": "Reading code"
+      },
+      {
+        "id": "chat:c_watch_calendar", "source": "samrabbit", "agent": null,
+        "title": "What's on my calendar this afternoon?",
+        "project": "Watch", "cwd": null,
+        "status": "working", "statusLabel": "Watch · live",
+        "summary": "You have the design review at 3:30 and a call with Ana at 5.",
+        "updatedAt": "2026-10-13T19:59:50Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open"], "live": true, "progress": null, "phase": null
+      },
+      {
+        "id": "chat:c_sleep_chart", "source": "samrabbit", "agent": null,
+        "title": "Sleep chart for this week",
+        "project": "R1", "cwd": null,
+        "status": "idle", "statusLabel": "R1",
+        "summary": "You averaged seven hours and twelve minutes. Thursday was your shortest night.",
+        "updatedAt": "2026-10-13T18:12:00Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open"], "live": false, "progress": null, "phase": null
+      },
+      {
+        "id": "chat:c_mac_inbox", "source": "samrabbit", "agent": null,
+        "title": "Summarize what's open on my Mac",
+        "project": "Mac", "cwd": null,
+        "status": "idle", "statusLabel": "Mac",
+        "summary": "Safari on the Brooklyn forecast and your packing list in Notes.",
+        "updatedAt": "2026-10-13T15:20:00Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open"], "live": false, "progress": null, "phase": null
+      },
+      {
+        "id": "t3:th_readme_shots", "source": "t3", "agent": "claude",
+        "title": "Update the README screenshots",
+        "project": "SamRabbit", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "done", "statusLabel": "Finished",
+        "summary": "Replaced the six screenshots and shrank them to under 300 KB each.",
+        "updatedAt": "2026-10-13T16:05:00Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["reply", "seen", "open"], "live": false, "progress": null, "phase": null
+      },
+      {
+        "id": "codex:019a1111-2222-4333-8444-555566667777", "source": "codex", "agent": "codex",
+        "title": "Explain the watch relay chunking",
+        "project": "jackrabbit-src", "cwd": "/Users/sam/jackrabbit-src",
+        "status": "idle", "statusLabel": "Idle",
+        "summary": "Chunks are 40 KB because WatchConnectivity drops larger sendMessage payloads.",
+        "updatedAt": "2026-10-12T21:40:00Z", "unread": false,
+        "pending": {"approvals": [], "inputs": []},
+        "can": ["open"], "live": false, "progress": null, "phase": null
+      }
+    ]
+  },
+  "details": {
+    "t3:th_pairing_redirect": [
+      {"role": "user", "text": "The iPhone pairing screen loops back to the QR code after the token refresh. Find out why and fix it.", "at": "2026-10-13T19:40:00Z"},
+      {"role": "assistant", "text": "Found it: the refresh handler saved the new token after it redirected, so the pairing screen saw no token and started over. I moved the save before the redirect and added a test for the order.", "at": "2026-10-13T19:58:40Z"},
+      {"role": "assistant", "text": "The redirect fix is in. Run the pairing tests in companion/desktop to confirm it before I commit?", "at": "2026-10-13T19:59:10Z"}
+    ],
+    "t3:th_waitlist_db": [
+      {"role": "user", "text": "Add a waitlist form to the landing page and store the signups.", "at": "2026-10-13T19:50:00Z"},
+      {"role": "assistant", "text": "The form and the API route are ready. Which database should the waitlist use? I can wire up any of these in about ten minutes.", "at": "2026-10-13T19:56:00Z"}
+    ],
+    "t3:th_release_notes": [
+      {"role": "user", "text": "Write the release notes for 1.4 from the merged PRs.", "at": "2026-10-13T19:20:00Z"},
+      {"role": "assistant", "text": "Release notes are in docs/releases/1.4.md: the Agent Dock, Mac voice, watch complications and 14 fixes. I kept them short and grouped the fixes by device.", "at": "2026-10-13T19:31:00Z"}
+    ],
+    "t3:th_watch_previews": [
+      {"role": "user", "text": "Render previews of every watch complication so I can check them.", "at": "2026-10-13T19:30:00Z"},
+      {"role": "assistant", "text": "SamRabbitWatchWidgets: 'accessoryCorner' is unavailable in this context. I stopped before changing the deployment target. Should I raise it to watchOS 26, or skip the corner family?", "at": "2026-10-13T19:41:00Z"}
+    ],
+    "claude:5d0c6f2e-1a47-4f7e-9a51-3c2b1e0d9f88": [
+      {"role": "user", "text": "The longpoll test fails about one run in ten. Find out why.", "at": "2026-10-13T19:44:00Z"},
+      {"role": "assistant", "text": "It races the refresher thread: the test reads the revision before the first scan finishes. I'd like to run the test 50 times with a fixed seed to confirm.", "at": "2026-10-13T19:52:00Z"}
+    ]
+  },
+  "targets": {
+    "projects": [
+      {"id": "proj_samrabbit", "title": "SamRabbit", "lastActiveAt": "2026-10-13T19:59:40Z"},
+      {"id": "proj_website", "title": "Website", "lastActiveAt": "2026-10-13T19:59:58Z"},
+      {"id": "proj_jackrabbit", "title": "jackrabbit-src", "lastActiveAt": "2026-10-13T17:02:00Z"},
+      {"id": "proj_personal", "title": "Personal", "lastActiveAt": "2026-10-11T09:15:00Z"}
+    ],
+    "agents": [
+      {"id": "claude", "label": "Claude", "models": [
+        {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+        {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+        {"id": "claude-haiku-5-5", "label": "Haiku 5.5"}
+      ]},
+      {"id": "codex", "label": "Codex", "models": [
+        {"id": "gpt-5.5-codex", "label": "GPT-5.5 Codex"},
+        {"id": "gpt-5.5", "label": "GPT-5.5"},
+        {"id": "gpt-5.5-mini", "label": "GPT-5.5 mini"}
+      ]}
+    ],
+    "default": {"projectId": "proj_samrabbit", "agent": "claude", "model": "claude-opus-5-5"}
+  }
+}
