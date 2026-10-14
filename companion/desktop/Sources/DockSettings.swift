@@ -7,6 +7,11 @@ import SwiftUI
 /// dock itself on or off, and folded to the orb. While a shortcut is being recorded none of the four is registered
 /// (DockShortcutCenter.pause), so the keys reach the recorder and ⌃⌥Space can't start a conversation meanwhile;
 /// leaving the window (or closing it) ends the recording and gives them back.
+///
+/// A combination another app holds as a hot key, or one macOS takes for itself, never reaches the recorder: it goes to
+/// them (and may bring that app forward, which takes the keys from this window). So when held modifiers are let go
+/// with no key having come, and when the window loses the keys mid-recording, the row says that this is what happens to
+/// a combination that is taken, rather than waiting or stopping without a word.
 @MainActor
 final class DockSettingsModel: ObservableObject {
     struct Note: Equatable {
@@ -17,6 +22,8 @@ final class DockSettingsModel: ObservableObject {
     @Published private(set) var recording: DockShortcutAction?
     /// The modifiers held while recording ("⌃⌥"), so Samin sees his keys land.
     @Published private(set) var held = ""
+    /// While recording: modifiers were held and let go and no key came (it went to another app or to macOS).
+    @Published private(set) var missed: String?
     /// What happened to the last recording of each action: why it was refused, or "Saved".
     @Published private(set) var notes: [DockShortcutAction: Note] = [:]
     @Published private(set) var dockOn = true
@@ -27,6 +34,9 @@ final class DockSettingsModel: ObservableObject {
     private var monitor: Any?
     private var noteTasks: [DockShortcutAction: Task<Void, Never>] = [:]
     private var folded: AnyCancellable?
+    private var switched: AnyCancellable?
+    /// The most modifiers held at once since the last key (what a combination that never arrived was pressed with).
+    private var heldMost = ""
 
     init() {
         center = DockShortcutCenter.shared
@@ -35,24 +45,30 @@ final class DockSettingsModel: ObservableObject {
         folded = DockController.shared.ui.$minimized.removeDuplicates().sink { [weak self] value in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.minimized = value } }
         }
+        // ⌃⌥D, "Hide for 1 Hour", "Turn Off the Dock" and their undoing: "Show the Agent Dock" follows.
+        switched = DockController.shared.ui.$switchedOn.removeDuplicates().sink { [weak self] value in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.dockOn = value } }
+        }
     }
 
     /// Snapshots: a fixed state, nothing recorded or changed.
-    init(fixture center: DockShortcutCenter, recording: DockShortcutAction?, held: String,
+    init(fixture center: DockShortcutCenter, recording: DockShortcutAction?, held: String, missed: String? = nil,
          notes: [DockShortcutAction: Note], dockOn: Bool, minimized: Bool) {
         self.center = center
         self.recording = recording
         self.held = held
+        self.missed = missed
         self.notes = notes
         self.dockOn = dockOn
         self.minimized = minimized
         live = false
     }
 
-    /// The window came up: read the dock's switches again (the menus may have changed them).
+    /// The window came up: read the dock's switches again (the menus may have changed them). "Show the Agent Dock" is
+    /// off while the dock is put away or hidden for a while too: no dock on screen, so the switch doesn't say on.
     func reload() {
         guard live else { return }
-        dockOn = DockController.shared.isEnabled
+        dockOn = DockController.shared.isOn
         minimized = DockController.shared.isMinimized
     }
 
@@ -79,6 +95,8 @@ final class DockSettingsModel: ObservableObject {
         if recording != nil { finish(nil) }
         recording = action
         held = ""
+        heldMost = ""
+        missed = nil
         notes[action] = nil
         center.pause()
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
@@ -93,12 +111,36 @@ final class DockSettingsModel: ObservableObject {
         if recording != nil { finish(nil) }
     }
 
+    /// The window lost the keys while recording (Samin clicked elsewhere, or the combination he pressed went to an app
+    /// that came forward): the recording ends, and the row says which of the two it may have been.
+    func recordingInterrupted() {
+        guard let action = recording else { return }
+        finish(nil)
+        show(.refused(Self.interruptedMessage), for: action)
+    }
+
+    static let interruptedMessage = "Recording stopped: the window lost the keys. If you had pressed a combination, "
+        + "another app or macOS has it (it went there): choose another."
+
+    static func missedMessage(_ glyphs: String) -> String {
+        "Nothing reached SamRabbit with \(glyphs): a combination another app or macOS uses goes to them. "
+            + "Try another, or Esc."
+    }
+
     /// true = the recorder took the key (it goes no further: ⌘Q is recorded, not quitting).
     private func recorded(_ event: NSEvent) -> Bool {
         guard recording != nil else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.type == .flagsChanged {
             held = DockShortcut.glyphs(modifierFlags: flags.rawValue)
+            if held.count > heldMost.count { heldMost = held }
+            // All let go without a key: if one was pressed, it went elsewhere.
+            if held.isEmpty && !heldMost.isEmpty {
+                missed = Self.missedMessage(heldMost)
+                heldMost = ""
+            } else if !held.isEmpty {
+                missed = nil
+            }
             return true
         }
         // A key held down repeats: the first press was the shortcut.
@@ -117,9 +159,19 @@ final class DockSettingsModel: ObservableObject {
         monitor = nil
         recording = nil
         held = ""
+        heldMost = ""
+        missed = nil
         center.resume()
         guard let shortcut else { return }
         show(center.set(action, to: shortcut), for: action)
+    }
+
+    /// The window closed: no recording, no notes.
+    func closed() {
+        cancelRecording()
+        noteTasks.values.forEach { $0.cancel() }
+        noteTasks = [:]
+        notes = [:]
     }
 
     func reset(_ action: DockShortcutAction) {
@@ -245,7 +297,9 @@ struct DockSettingsView: View {
                     model.toggleRecording(action)
                 }
             }
-            if recording {
+            if recording, let missed = model.missed {
+                line(missed, color: Palette.pale, symbol: "questionmark.circle.fill")
+            } else if recording {
                 line("Press the new keys now · Esc cancels", color: Palette.pale, symbol: "keyboard")
             } else if let note {
                 line(note.text, color: note.isError ? DockPalette.error : Palette.pale,
@@ -390,11 +444,12 @@ final class DockSettingsWindowController: NSWindowController, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    // A recording never outlives the window having the keys: the shortcuts come back.
-    func windowDidResignKey(_ notification: Notification) { model.cancelRecording() }
+    // A recording never outlives the window having the keys: the shortcuts come back (and the row says why it ended).
+    func windowDidResignKey(_ notification: Notification) { model.recordingInterrupted() }
 
     // Back to the window: the dock's switches as the menus left them.
     func windowDidBecomeKey(_ notification: Notification) { model.reload() }
 
-    func windowWillClose(_ notification: Notification) { model.cancelRecording() }
+    // Closed: what the last tries said is done with (reopened, the rows start clean).
+    func windowWillClose(_ notification: Notification) { model.closed() }
 }

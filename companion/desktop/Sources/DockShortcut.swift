@@ -40,6 +40,9 @@ struct DockShortcut: Hashable {
 
     var isFunctionKey: Bool { DockKeys.functionKeys.contains(keyCode) }
 
+    /// How many of ⌃ ⌥ ⌘ it has (⇧ only changes the character: it doesn't make a key a shortcut).
+    var commandModifierCount: Int { (hasControl ? 1 : 0) + (hasOption ? 1 : 0) + (hasCommand ? 1 : 0) }
+
     /// A recorded key: NSEvent's key code and modifier flags (raw: ⇧ 1<<17, ⌃ 1<<18, ⌥ 1<<19, ⌘ 1<<20).
     static func from(keyCode: UInt16, modifierFlags: UInt) -> DockShortcut {
         var modifiers: UInt32 = 0
@@ -165,23 +168,25 @@ enum DockShortcuts {
         return list
     }()
 
-    /// Why `shortcut` can't be `action`'s (nil = it can): a global shortcut must not take a key Samin types with, an
-    /// app's own ⌘ shortcut or a macOS one, and the four must differ.
+    /// Why `shortcut` can't be `action`'s (nil = it can): a global shortcut is registered exclusively, so it takes its
+    /// keys from every app while SamRabbit runs. It must not be a key Samin types with (⌥ makes characters, ⌃ alone is
+    /// how terminals and editors take keys: ⌃C, ⌃D, ⌃R, ⌃A), an app's own ⌘ shortcut, F1–F12 alone (apps' keys, and
+    /// the Mac keyboard's brightness and media keys) or a macOS one; and the four must differ. So a letter, digit or
+    /// other key needs two of ⌃ ⌥ ⌘ (⇧ may come on top); F13–F20 may stand alone.
     static func problem(_ shortcut: DockShortcut, for action: DockShortcutAction,
                         among bindings: [DockShortcutAction: DockShortcut]) -> String? {
         guard let name = shortcut.keyName else { return "That key can’t be a shortcut." }
         if shortcut.keyCode == DockKeys.escape { return "Esc cancels recording: choose another key." }
         if let what = reserved[shortcut] { return "\(shortcut.display) is macOS’s shortcut for \(what)." }
-        if !shortcut.isFunctionKey {
-            if shortcut.modifiers == 0 || shortcut.modifiers == DockShortcut.shift {
-                return "Add ⌃ or ⌥⌘ to \(name)."
+        if shortcut.isFunctionKey {
+            if shortcut.commandModifierCount == 0 && !DockKeys.freeFunctionKeys.contains(shortcut.keyCode) {
+                return "\(name) alone is an app’s key (and on a Mac keyboard a brightness or media key): add ⌃, ⌥ or ⌘, or use F13–F20."
             }
-            if !shortcut.hasControl && !shortcut.hasCommand {
-                return "⌥ alone types characters (⌥E is “é”): add ⌃ or ⌘."
-            }
-            if !shortcut.hasControl && !shortcut.hasOption {
-                return "⌘ alone is an app’s own shortcut: add ⌃ or ⌥."
-            }
+        } else if shortcut.commandModifierCount < 2 {
+            if shortcut.commandModifierCount == 0 { return "Add ⌃⌥ or ⌥⌘ to \(name)." }
+            if shortcut.hasOption { return "⌥ alone types characters (⌥E is “é”): add ⌃ or ⌘." }
+            if shortcut.hasCommand { return "⌘ alone is an app’s own shortcut: add ⌃ or ⌥." }
+            return "⌃ alone is a terminal’s key (⌃C stops a command, ⌃D ends input): add ⌥ or ⌘."
         }
         if let other = DockShortcutAction.allCases.first(where: { $0 != action && bindings[$0] == shortcut }) {
             return "\(shortcut.display) is already “\(other.label)”."
@@ -224,6 +229,8 @@ enum DockKeys {
     static let up: UInt32 = 126
 
     static let functionKeys: Set<UInt32> = Set(functionCodes)
+    /// F13…F20: no app or Mac keyboard uses them, so one may be a shortcut by itself.
+    static let freeFunctionKeys: Set<UInt32> = Set(functionCodes.dropFirst(12))
     /// F1…F20 in order.
     static let functionCodes: [UInt32] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
 

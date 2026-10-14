@@ -91,19 +91,40 @@ enum ShortcutTests {
             DockShortcuts.problem(DockShortcut(keyCode: code, modifiers: modifiers), for: action, among: bindings)
         }
         let s = DockShortcut.shift, c = DockShortcut.control, o = DockShortcut.option, cmd = DockShortcut.command
-        // Fine: ⌃ with anything, ⌥⌘, and the F keys alone.
+        // Fine: two of ⌃ ⌥ ⌘ (⇧ on top or not), an F key with one of them, F13–F20 alone.
         expect(problem(7, c | o) == nil, "⌃⌥X")
-        expect(problem(7, c) == nil, "⌃X")
+        expect(problem(7, c | cmd) == nil, "⌃⌘X")
         expect(problem(7, o | cmd) == nil, "⌥⌘X")
         expect(problem(7, c | s | cmd) == nil, "⌃⇧⌘X")
-        expect(problem(96, 0) == nil, "F5 alone")
+        expect(problem(7, c | o | s) == nil, "⌃⌥⇧X")
+        expect(problem(49, c | o, .talk) == nil, "⌃⌥Space (talk's own)")
+        expect(problem(96, c) == nil, "⌃F5")
+        expect(problem(96, o | s) == nil, "⌥⇧F5")
+        expect(problem(105, 0) == nil, "F13 alone")
+        expect(problem(90, 0) == nil, "F20 alone")
         // Keys he types with.
-        expectEqual(problem(7, 0), "Add ⌃ or ⌥⌘ to X.")
-        expectEqual(problem(7, s), "Add ⌃ or ⌥⌘ to X.")
+        expectEqual(problem(7, 0), "Add ⌃⌥ or ⌥⌘ to X.")
+        expectEqual(problem(7, s), "Add ⌃⌥ or ⌥⌘ to X.")
+        expectEqual(problem(49, s), "Add ⌃⌥ or ⌥⌘ to Space.")
         expectEqual(problem(14, o), "⌥ alone types characters (⌥E is “é”): add ⌃ or ⌘.")
         expectEqual(problem(14, o | s), "⌥ alone types characters (⌥E is “é”): add ⌃ or ⌘.")
         expectEqual(problem(7, cmd), "⌘ alone is an app’s own shortcut: add ⌃ or ⌥.")
         expectEqual(problem(7, cmd | s), "⌘ alone is an app’s own shortcut: add ⌃ or ⌥.")
+        // ⌃ alone is how a terminal (and Claude Code in it) takes keys: ⌃C interrupts, ⌃D ends input, ⌃R searches the
+        // history, ⌃A / ⌃E move along the line. An exclusive hot key would take them from every app.
+        let terminal = "⌃ alone is a terminal’s key (⌃C stops a command, ⌃D ends input): add ⌥ or ⌘."
+        for (code, key) in [(UInt32(8), "C"), (2, "D"), (15, "R"), (0, "A"), (14, "E"), (6, "Z"), (18, "1"), (33, "[")] {
+            expectEqual(problem(code, c), terminal, "⌃\(key)")
+            expectEqual(problem(code, c | s), terminal, "⌃⇧\(key)")
+        }
+        expectEqual(problem(17, c | s), terminal, "⌃⇧T")
+        expectEqual(problem(36, c), terminal, "⌃↩")
+        // F1–F12 alone are apps' keys (and the brightness and media keys); ⇧ doesn't change that.
+        let fKey = "F5 alone is an app’s key (and on a Mac keyboard a brightness or media key): add ⌃, ⌥ or ⌘, or use F13–F20."
+        expectEqual(problem(96, 0), fKey)
+        expectEqual(problem(96, s), fKey)
+        expect(problem(122, 0)?.hasPrefix("F1 alone") == true, "F1")
+        expect(problem(111, 0)?.hasPrefix("F12 alone") == true, "F12")
         // Esc cancels the recorder; a key the dock doesn't know can't be one.
         expectEqual(problem(53, c | o), "Esc cancels recording: choose another key.")
         expectEqual(problem(999, c | o), "That key can’t be a shortcut.")
@@ -125,9 +146,9 @@ enum ShortcutTests {
         // One recorded anew: only it is kept, as it is shown.
         var bindings = DockShortcuts.defaults
         bindings[.minimize] = DockShortcut(keyCode: 31, modifiers: controlOption)
-        bindings[.talk] = DockShortcut(keyCode: 96, modifiers: 0)
+        bindings[.talk] = DockShortcut(keyCode: 105, modifiers: 0)
         let saved = DockShortcuts.saved(bindings)
-        expectEqual(saved, ["minimize": "⌃⌥O", "talk": "F5"])
+        expectEqual(saved, ["minimize": "⌃⌥O", "talk": "F13"])
         expectEqual(DockShortcuts.load(saved), bindings, "and read back")
         // Anything unreadable is the default.
         let odd: [String: Any] = ["minimize": "⌃⌥Banana", "talk": 42, "showHide": "", "compose": "⌃⌥J", "other": "⌃⌥Q"]
