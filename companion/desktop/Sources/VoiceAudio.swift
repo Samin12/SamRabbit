@@ -27,9 +27,11 @@ protocol VoiceInput: AnyObject {
 ///     replies --> AVAudioPlayerNode (16 kHz float) --> main mixer --> voice processing output --> speakers
 ///
 /// Voice processing (`setVoiceProcessingEnabled(true)` on the input node) cancels the assistant's own voice from the
-/// microphone, so it never counts as Samin speaking; other apps' sound is ducked as little as macOS allows. Should it
-/// fail to start (an odd audio device), the engine runs without it: the conversation is half duplex anyway (the
-/// microphone is closed while a reply plays), so it still works with speakers.
+/// microphone, so it never counts as Samin speaking; other apps' sound is ducked as little as macOS allows. It is
+/// opt-in (`defaults write com.samrabbit.desktop VoiceEchoCancellation -bool true`): on Samin's Mac (a USB microphone,
+/// speakers on a DisplayPort monitor) it took about 12 s to fail (-10875) and then left the device unable to start for
+/// the next try, so "Talk" seemed to do nothing. Without it the conversation is half duplex (the microphone is closed
+/// while a reply plays), which works with speakers too. Once it fails it is not tried again until the app restarts.
 ///
 /// In fixture mode the engine renders into memory (manual rendering, paced in real time): every buffer still plays,
 /// drains and reports like the real thing, but no sound reaches any device.
@@ -104,25 +106,56 @@ final class VoiceAudio {
         let permitted = await input.allowed()
         guard token == startToken else { throw CancellationError() }
         guard permitted else { throw StartFailure.microphoneDenied }
-        do {
-            try buildAndStart(voiceProcessing: !input.isFixture)
-        } catch {
-            teardown()
-            guard !input.isFixture else { throw StartFailure.engine("fixture") }
-            // Voice processing can fail on an unusual device (an aggregate, some USB interfaces): go on without it.
-            Log.write("voice: voice processing did not start (\(Self.describe(error))); going on without it")
+        let began = Date()
+        if input.isFixture {
             do {
                 try buildAndStart(voiceProcessing: false)
             } catch {
                 teardown()
-                Log.write("voice: audio did not start (\(Self.describe(error)))")
-                throw StartFailure.engine("start")
+                throw StartFailure.engine("fixture")
             }
+        } else {
+            try await startDevice(token: token)
         }
+        Log.write(String(format: "voice: audio up in %.1f s", Date().timeIntervalSince(began)))
         running = true
         observe()
         Log.write("voice: audio started" + (input.isFixture ? " (fixture, rendered silently)"
                                             : voiceProcessing ? " (echo cancellation on)" : ""))
+    }
+
+    static let echoCancellationKey = "VoiceEchoCancellation"
+    /// Voice processing failed once: not tried again until the app restarts (its failure is slow and leaves the
+    /// device busy for a moment).
+    private static var voiceProcessingFailed = false
+
+    /// The real microphone: voice processing first when it is on, then plain, tried three times 0.3 s apart (a
+    /// microphone the "Hey Rabbit" listener just handed over, or a failed voice-processing unit, can be busy briefly).
+    private func startDevice(token: Int) async throws {
+        if UserDefaults.standard.bool(forKey: Self.echoCancellationKey), !Self.voiceProcessingFailed {
+            do {
+                try buildAndStart(voiceProcessing: true)
+                return
+            } catch {
+                teardown()
+                Self.voiceProcessingFailed = true
+                Log.write("voice: voice processing did not start (\(Self.describe(error))); going on without it")
+            }
+        }
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try await Task.sleep(for: .milliseconds(300))
+                guard token == startToken else { throw CancellationError() }
+            }
+            do {
+                try buildAndStart(voiceProcessing: false)
+                return
+            } catch {
+                teardown()
+                Log.write("voice: audio did not start (try \(attempt + 1): \(Self.describe(error)))")
+            }
+        }
+        throw StartFailure.engine("start")
     }
 
     private func buildAndStart(voiceProcessing wanted: Bool) throws {
