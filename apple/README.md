@@ -99,7 +99,7 @@ change one session; `unsure`: the Mac's process list didn't answer, so neither `
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 223 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 255 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
