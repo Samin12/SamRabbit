@@ -672,4 +672,16 @@ enum DockSmokeGuard {
         guard let host = base.host, ["127.0.0.1", "localhost", "::1", "[::1]"].contains(host) else { return "not a loopback address" }
         return nil
     }
+
+    /// The installed app's bundle id: its settings are Samin's own (where his dock is, the orb, ⌃⌥D's hide).
+    static let installedBundleId = "com.samrabbit.desktop"
+
+    /// The places smoke moves the dock, folds it and hides it, so it saves those settings as it goes (and puts them
+    /// back at the end): never in the installed app's settings, only a development copy's (build.sh --bundle-id).
+    static func placesRefusal(base: URL, isDefaultBase: Bool, bundleId: String?) -> String? {
+        if let reason = refusal(base: base, isDefaultBase: isDefaultBase) { return reason }
+        guard let bundleId, !bundleId.isEmpty else { return "no bundle id" }
+        if bundleId == installedBundleId { return "\(installedBundleId) is the installed app's: build a copy with --bundle-id" }
+        return nil
+    }
 }

@@ -306,6 +306,15 @@ enum InboxTests {
         expect(refusal("http://127.0.0.1/app/") != nil, "no port")
         expect(refusal("http://192.168.1.5:3811/app/") != nil, "not loopback")
         expectEqual(refusal("http://127.0.0.1:3811/app/"), nil, "a fake server's port")
+        // The places smoke saves the dock's spot, orb and hide as it goes: never in the installed app's settings.
+        func places(_ url: String, _ bundleId: String?, isDefault: Bool = false) -> String? {
+            DockSmokeGuard.placesRefusal(base: URL(string: url)!, isDefaultBase: isDefault, bundleId: bundleId)
+        }
+        expect(places("http://127.0.0.1:3811/app/", "com.samrabbit.desktop") != nil, "the installed app's bundle id")
+        expect(places("http://127.0.0.1:3811/app/", nil) != nil, "no bundle id")
+        expect(places("http://127.0.0.1:3780/app/", "com.samrabbit.desktop.dev") != nil, "the live bridge still refused")
+        expect(places("http://127.0.0.1:3811/app/", "com.samrabbit.desktop.dev", isDefault: true) != nil)
+        expectEqual(places("http://127.0.0.1:3811/app/", "com.samrabbit.desktop.dev"), nil, "a development copy on the fake")
     }
 
     static func formatsTimesAndText() throws {

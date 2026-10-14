@@ -214,8 +214,9 @@ enum DockSnapshots {
             save("dock-15-orb-corner.png", size,
                  onScreen(fixture, size: size, spot: corner, minimized: true, open: nil, backdrop: wallpaper))
         }
-        // 16–17. Settings: the four shortcuts (one recorded anew, one another app has), the dock's switches; and
-        //        recording one, with why the last try couldn't be used.
+        // 16–18. Settings: the four shortcuts (one recorded anew, one another app has), the dock's switches; recording
+        //        one, with why the last try couldn't be used; and recording after a combination that went to another
+        //        app (nothing came with ⌃⌥), with ⌃ alone refused, while the dock is put away (its switch off).
         do {
             var bindings = DockShortcuts.defaults
             bindings[.minimize] = DockShortcut(keyCode: 31, modifiers: DockShortcut.control | DockShortcut.option)
@@ -225,7 +226,13 @@ enum DockSnapshots {
             let recording = DockSettingsModel(fixture: center, recording: .talk, held: "⌃⌥",
                                               notes: [.compose: .init(text: "⇧⌘4 is macOS’s shortcut for screenshots.", isError: true)],
                                               dockOn: true, minimized: true)
-            for (model, name) in [(rest, "dock-16-settings.png"), (recording, "dock-17-settings-recording.png")] {
+            let missed = DockSettingsModel(fixture: center, recording: .showHide, held: "",
+                                           missed: DockSettingsModel.missedMessage("⌃⌥"),
+                                           notes: [.minimize: .init(text: "⌃ alone is a terminal’s key (⌃C stops a command, ⌃D ends input): add ⌥ or ⌘.",
+                                                                    isError: true)],
+                                           dockOn: false, minimized: false)
+            for (model, name) in [(rest, "dock-16-settings.png"), (recording, "dock-17-settings-recording.png"),
+                                  (missed, "dock-18-settings-missed.png")] {
                 let sheet = settingsSheet(model)
                 let measured = measure(sheet)
                 let canvas = CGSize(width: measured.width + 120, height: measured.height + 120)
@@ -233,7 +240,7 @@ enum DockSnapshots {
             }
         }
         for path in written { print(path) }
-        return written.count == 17 ? 0 : 1
+        return written.count == 18 ? 0 : 1
     }
 
     /// A small label under a state (dev snapshots only).
@@ -497,11 +504,14 @@ enum DockSmoke {
 
     /// `SAMRABBIT_DOCK_SMOKE_PLACES=1` (CONTRACTS-WAVE7 §B2): leaves the dock at the top left of its screen and opens its
     /// list, folds it to the orb, opens the list over the orb, unfolds it, leaves it in the bottom-right corner as the
-    /// orb with its list, hides and shows it (⌃⌥D's path) and puts it back in the middle, logging the screen, the
-    /// resting frame and what AppKit says about both windows at each step, plus what the four shortcuts registered as.
-    /// Reads only; the same guard as above (the fake server, never port 3780).
+    /// orb with its list, hides and shows it (⌃⌥D's path), hides it from the menu and shows it again, and puts it back
+    /// in the middle, logging the screen, the resting frame and what AppKit says about both windows at each step, plus
+    /// what the four shortcuts registered as. Those steps save what they change (the spot, the orb, the hide) as Samin's
+    /// own moves would; the run puts back what the copy had kept at the start. The same guard as above (the fake
+    /// server, never port 3780), and never with the installed app's bundle id.
     static func runPlaces(_ controller: DockController) {
-        if let reason = DockSmokeGuard.refusal(base: Config.baseURL, isDefaultBase: Config.isDefaultBase) {
+        if let reason = DockSmokeGuard.placesRefusal(base: Config.baseURL, isDefaultBase: Config.isDefaultBase,
+                                                     bundleId: Bundle.main.bundleIdentifier) {
             Log.write("dock places smoke refused: \(reason)")
             return
         }
@@ -520,6 +530,7 @@ enum DockSmoke {
             "\(action.rawValue) \(shortcuts.shortcut(action).display): \(shortcuts.unavailable[action] ?? "registered")"
         }
         Log.write("dock places smoke: shortcuts " + registered.joined(separator: "; "))
+        let kept = controller.devMemory
         let topLeft = DockSpot(corner: .topLeft, dx: DockMetrics.edgeGap, dy: DockMetrics.edgeGap)
         let corner = DockSpot(corner: .bottomRight, dx: DockMetrics.edgeGap, dy: DockMetrics.bottomGap)
         let steps: [(TimeInterval, String, () -> Void)] = [
@@ -545,10 +556,13 @@ enum DockSmoke {
                 controller.toggleShown()
             }),
             (11.5, "shown", { controller.toggleShown() }),
-            (12.5, "back", {
+            (12.5, "menu-hidden", { controller.putAwayFromMenu() }),
+            (13.5, "menu-shown", { controller.bringBackFromMenu() }),
+            (14.5, "back", {
                 controller.setMinimized(false)
                 controller.devPlace(nil)
             }),
+            (15.5, "restored", { controller.devRestore(kept) }),
         ]
         for (at, name, body) in steps {
             DispatchQueue.main.asyncAfter(deadline: .now() + at) {
@@ -565,7 +579,7 @@ enum DockSmoke {
                     Log.write("dock places smoke \(name): screen \(screen); rest \(frame(state.rest)); pill \(describe(controller.pill));"
                               + " list \(describe(controller.list)); minimized=\(controller.ui.minimized) listBelow=\(controller.ui.listBelow)"
                               + " shown=\(controller.ui.shown) expanded=\(controller.ui.expanded)")
-                    if name == "back" { Log.write("dock places smoke done") }
+                    if name == "restored" { Log.write("dock places smoke done (the copy's own spot, orb and hide put back)") }
                 }
             }
         }
