@@ -647,13 +647,15 @@ or mtime changed, a session that is not a terminal one never past its head; a re
 
 | Route | Answer |
 |---|---|
-| `GET /v1/desktop/inbox?after=<revision>&wait=<0..25>` | `{revision, updatedAt, counts: {needsYou, working, total}, sources: {t3: {connected, reason?}, claude: {available, reason?}, codex: {available, reason?}, samrabbit: {available}}, items}`. With `after` equal to the current revision it waits up to `wait` s for a change (long poll). `revision` grows by one whenever what the list shows changes (a hash of it); it starts from the time in ms, so a bridge started again is always past every revision it gave out before (a dock's long poll from before answers at once). A background refresher keeps it fresh: about every 2 s while a client waits, every 15 s while one asked in the last ten minutes, asleep otherwise |
+| `GET /v1/desktop/inbox?after=<revision>&wait=<0..25>[&include=dismissed]` | `{revision, updatedAt, counts: {needsYou, working, total, dismissed}, sources: {t3: {connected, reason?}, claude: {available, reason?}, codex: {available, reason?}, samrabbit: {available}}, items}`. With `after` equal to the current revision it waits up to `wait` s for a change (long poll). `revision` grows by one whenever what the list shows changes (a hash of it); it starts from the time in ms, so a bridge started again is always past every revision it gave out before (a dock's long poll from before answers at once). A background refresher keeps it fresh: about every 2 s while a client waits, every 15 s while one asked in the last ten minutes, asleep otherwise |
 | `GET /v1/desktop/inbox/items/<id>` | `{item, messages: [{role: user\|assistant, text (≤ 4000 characters), at}]}`, the last 12 (tool steps and what Codex injects left out). A T3 item is read from T3 at that moment (its open requests too) |
 | `POST /v1/desktop/inbox/items/<id>/approve {requestId, decision}` | T3: `thread.approval.respond` (`decision`: one of the request's options, or `approve` / `deny`, mapped as for the phone) |
 | `POST /v1/desktop/inbox/items/<id>/answer {requestId, answers: {questionId: answer \| [answers]}}` | T3: `thread.user-input.respond` (option labels become the values T3 expects) |
 | `POST /v1/desktop/inbox/items/<id>/reply {text}` | `202 {ok, how}`: T3 `thread.turn.start` (`how: "t3"`); a Claude or Codex CLI session nobody owns: a new Terminal window running `claude --resume <id> -- <text>` / `codex resume <id> -- <text>` in its folder (`--`: a reply that starts with `-` is the prompt, never an option), so the CLI's own permission prompts stay (`how: "terminal"`). A live session, or one resumed from here in the last 15 s (its CLI not in `ps` yet): 409 `session_live` ("open it to answer there"); when `ps` fails (a CLI may own it, nobody can tell): 503 `session_check_failed` (retryable), never a second CLI on the same session; Codex Desktop's threads and chats: 409 `unsupported_action` |
 | `POST /v1/desktop/inbox/items/<id>/stop` | T3: `thread.turn.interrupt` (with the active turn), nothing when it is not working |
 | `POST /v1/desktop/inbox/items/<id>/seen` | `{ok}`: unread clears. T3 uses the R1's seen markers (a thread is unread when it finished or started needing him after he last looked); the others the time of what he saw |
+| `POST /v1/desktop/inbox/items/<id>/dismiss` | `{ok, dismissed: true, revision}` (every item): marked seen, and out of the list and its counts until it changes (see below); the answer comes once the list shows it. Only the bridge's own state: nothing reaches T3, Claude Code or Codex. 404 `item_not_found` for something the inbox does not have |
+| `POST /v1/desktop/inbox/items/<id>/undismiss` | `{ok, dismissed: false, revision}`: the undo. Back at once, as unread as it was before (unless it was marked seen since); fine for something that is not dismissed |
 | `POST /v1/desktop/inbox/items/<id>/open` | `{opened: true, how}`: T3 → activates T3 Code (`how: "app"`; its `t3code://` scheme opens only sign-in and settings pages in 0.0.45, no thread); a live Claude / Codex CLI → the app its terminal runs in, found by walking the process's parents (Terminal, iTerm, Ghostty, T3 Code, an editor; Terminal itself when there is none, e.g. tmux); one resumed from here in the last 15 s, or any while `ps` fails → Terminal; one nobody owns → a Terminal window running `claude --resume <id>` / `codex resume <id>` (`how: "terminal"`); Codex Desktop → `codex://threads/<id>`, the ChatGPT app's own deep link (`how: "deeplink"`); a chat → `{how: "desktop", conversationId}` (the app shows it itself) |
 | `GET /v1/desktop/inbox/targets` | `{projects: [{id, title, lastActiveAt}], agents: [{id: "claude"\|"codex", label, models: [{id, label}]}], default: {projectId, agent, model}}`: T3's projects (most recently active first, no scratch project) and the Claude and Codex providers it offers, from T3's `server.getConfig` (only its WebSocket RPC answers it: one call with the bridge's token, cached 10 minutes; providers that are not set up and legacy models are left out; without it, what the threads use). The default is the most recently active thread's provider and model |
 | `POST /v1/desktop/inbox/new {text, projectId?, agent?, model?, title?}` | `202 {itemId: "t3:<threadId>", threadId, title, projectId, projectName, placement, agent?, model?}`: `thread.create` + `thread.turn.start` as from the phone (without `projectId` the phone's placement). `agent` picks the provider instance its most recent thread used (else T3's default, else the first one that is set up), `model` one it offers (400 `invalid_model`), neither: the project's last model, as from the phone |
@@ -665,22 +667,32 @@ needs-approval | needs-input | error | done | working | idle, statusLabel ("Want
 updatedAt, unread, pending: {approvals: [{requestId, kind, detail, options: [{decision, label}]}], inputs: [{requestId,
 questions: [{id, header, question, options, allowCustom, multiSelect}]}]}, can, live, progress, phase}`. `can` is what
 the item supports now: `approve` / `answer` / `stop` only for T3; `reply` for T3 and for CLI sessions known to be
-owned by nobody (not while `ps` fails); `seen` only while it is unread; a Claude or Codex prompt waiting in a
-terminal can only be opened. "Needs you" =
+owned by nobody (not while `ps` fails); `seen` only while it is unread; `dismiss` always; a Claude or Codex prompt
+waiting in a terminal can only be opened (or dismissed). "Needs you" =
 needs-approval, needs-input, error, and done-and-unread. A Claude or Codex session that failed is `error` until Samin
 marks it seen (nothing else can settle it, unlike a T3 thread); then it is `idle`, its label still "Hit an error", until
 a new error. Order: needs-approval, needs-input, error, done and unread,
 working, then the rest, newest first in each; at most 60 items (`counts` are over all of them).
 
-What Samin has seen is `~/Library/Application Support/SamRabbit/inbox/inbox-state.json` (0600; `--inbox-dir`). The
-first look at a source marks everything there as seen, so the dock starts quiet. Terminal windows open through a
+**Dismissed** items (Samin's ✕ in the dock, the window or the phone) are left out of `items` and of `needsYou`,
+`working` and `total`; `counts.dismissed` says how many are hidden. Each is kept with its change marker (its status,
+the ids of its open requests, its `updatedAt`) and comes back by itself when it changes: another status, a request it
+did not have (an approval or question; a T3 thread's requests read later than the dismissal are not news), or
+something it did since (a newer `updatedAt`: a new turn, an answer, a chat message). A working item's steps are not
+news: it comes back when it stops working (finished, failed, needs him). `?include=dismissed` returns them after the
+rest, in the list's order, each with `dismissed: true` and `undismiss` in place of `dismiss` in `can` (so does
+`/items/<id>` for a dismissed item).
+
+What Samin has seen and dismissed is `~/Library/Application Support/SamRabbit/inbox/inbox-state.json` (0600;
+`--inbox-dir`; ids and markers only, never a title). The first look at a source marks everything there as seen, so the
+dock starts quiet. Terminal windows open through a
 private `.command` script (0700 in a 0700 folder) that deletes itself first; LaunchServices (`/usr/bin/open`) only,
 no AppleScript, so no Automation prompt. A copy of the bridge that is not the installed one keeps what was seen in
 memory and opens nothing (answers say `dryRun: true`) unless started with `--inbox-launch`. Errors are the usual
 `{error: {code, message, retryable}}`: 404 `item_not_found`, 409 `session_live` / `unsupported_action` /
 `folder_missing` / `agent_unavailable`, 503 `session_check_failed`, 400 `invalid_*`, and T3's own
 (`t3_request_not_pending`, `t3_unavailable`, …).
-`/health` adds `inbox: {available, revision, items, needsYou}`.
+`/health` adds `inbox: {available, revision, items, needsYou, dismissed}`.
 
 **On the iPhone** (`/v1/mobile/inbox*`, CONTRACTS-WAVE7): the same list, revisions, long poll, items and actions for
 a paired phone's own mobile token from a LAN or Tailscale peer (the mobile API's rule; the R1's token, the desktop
@@ -690,7 +702,7 @@ what it marks seen is seen in the dock:
 | Route | Answer |
 |---|---|
 | `GET /v1/mobile/inbox?after=<revision>&wait=<0..25>` · `GET /v1/mobile/inbox/items/<id>` · `GET /v1/mobile/inbox/targets` | as `/v1/desktop/inbox*` (one revision for the dock and the phone), except that the phone's items never list `open` in `can` (a SamRabbit chat, `chat:<conversationId>`, is that conversation in the phone's own Chats) |
-| `POST /v1/mobile/inbox/items/<id>/approve \| answer \| reply \| stop \| seen` · `POST /v1/mobile/inbox/new` | as the dock's. A reply to a Claude or Codex CLI session nobody runs continues it in a new Terminal window on the Mac, as from the dock, and says so: `202 {ok, how: "terminal", message: "It continues in a new Terminal window on the Mac."}` (a dev copy: `dryRun: true` and that nothing was opened). A live one (or one resumed in the last 15 s): 409 `session_live` ("answer it there"), and nothing opens; nor when `ps` fails and nobody can tell (503 `session_check_failed`, retryable) |
+| `POST /v1/mobile/inbox/items/<id>/approve \| answer \| reply \| stop \| seen \| dismiss \| undismiss` · `POST /v1/mobile/inbox/new` | as the dock's (what the phone dismisses is dismissed in the dock and the window too, and back). A reply to a Claude or Codex CLI session nobody runs continues it in a new Terminal window on the Mac, as from the dock, and says so: `202 {ok, how: "terminal", message: "It continues in a new Terminal window on the Mac."}` (a dev copy: `dryRun: true` and that nothing was opened). A live one (or one resumed in the last 15 s): 409 `session_live` ("answer it there"), and nothing opens; nor when `ps` fails and nobody can tell (503 `session_check_failed`, retryable) |
 | `POST /v1/mobile/inbox/items/<id>/open` | 409 `unsupported_action`: opening is the Mac's (the dock or the SamRabbit window), so the phone never brings anything up on the Mac's screen |
 
 **The SamRabbit window** (CONTRACTS-WAVE7): the phone's own handlers (`samrabbit_mobile.py`) for the desktop token
@@ -831,7 +843,9 @@ the fake T3 server (with its WebSocket `server.getConfig`), a temp HOME with syn
 test), a fake process table instead of `ps` / `lsof` and a launcher that records what it would open (nothing is ever
 launched): the desktop-token auth (401, 403 from the LAN or a foreign Origin), every status of every source and what
 is left out, the order, the cap and the counts, revisions and the long poll (woken by a change, by the refresher, or
-after its wait), seen and unread (kept across restarts), each action's dispatch body, `session_live`, what `open` and
+after its wait), seen and unread (kept across restarts), dismiss and undo (out of the list and the counts until the
+item changes, back as unread as it was, kept across restarts, never a T3 call, waking a long poll), each action's
+dispatch body, `session_live`, what `open` and
 `reply` would run, targets with and without T3's provider list, new tasks with a project, agent and model, a dev
 copy's dry run, incremental reads, rollouts in the format the installed Codex Desktop writes (a ~100 KB head before the
 first typed message, `item_completed` events, a failed `task_complete`, no approval events), symlinks that must not be
@@ -843,7 +857,7 @@ earlier turn leaves the running one alone, one that names the running turn stops
 streamed realtime turn with the Mac addendum. `tests/test_mobile_inbox.py` drives the phone's
 `/v1/mobile/inbox*` against the dock's fakes: the mobile-token auth (401 for the R1's, the desktop's and a wrong
 token, 403 off the LAN and for the assistant's own token), the same list and revision as the dock without `open`, the
-long poll, items, seen shared with the dock, T3's dispatch bodies, new tasks, a reply to a live session that opens
+long poll, items, seen and dismissals shared with the dock (both ways, with the undo), T3's dispatch bodies, new tasks, a reply to a live session that opens
 nothing, one that resumes in Terminal and says so, nothing started while `ps` fails, `/open` refused, and the log.
 `tests/test_desktop_window.py`
 drives `/v1/desktop/summary`, `/calendar/agenda|block`, `/journal` and `/devices*`: the desktop-token auth, the summary

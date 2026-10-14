@@ -399,6 +399,13 @@ class AuthTest(InboxBase):
         self.assertEqual(200, status, value)
         status, value = self.call("POST", "/v1/desktop/inbox/items/t3:t-done/stop", {})
         self.assertEqual(401, status)
+        for action in ("dismiss", "undismiss"):
+            for kwargs in ({}, {"token": TOKEN}, {"token": phone}):
+                with self.subTest(action=action, kwargs=list(kwargs)):
+                    status, value = self.call("POST", f"/v1/desktop/inbox/items/t3:t-error/{action}", {}, **kwargs)
+                    self.assertEqual((401, "unauthorized"), (status, value["error"]["code"]))
+        self.assertEqual({}, json.loads((self.inbox_dir / inbox.STATE_FILE).read_text())["dismissed"],
+                         "a refused dismiss stored nothing")
         self.assertEqual([], [item for item in self.fake_t3.dispatched], "a refused request dispatched nothing")
         status, value = self.call("DELETE", "/v1/desktop/inbox", desktop=True)
         self.assertEqual(405, status)
@@ -433,12 +440,12 @@ class ListTest(InboxBase):
         self.assertEqual(("done", "Finished", SECRET_TITLE, SECRET_ANSWER, "app", CWD, "claude", False),
                          (done["status"], done["statusLabel"], done["title"], done["summary"], done["project"],
                           done["cwd"], done["agent"], done["live"]))
-        self.assertEqual(["reply", "open"], done["can"], "nobody owns it: reply resumes it in Terminal")
+        self.assertEqual(["reply", "open", "dismiss"], done["can"], "nobody owns it: reply resumes it in Terminal")
         waiting = claude["waiting"]
         self.assertEqual(("needs-approval", "Waiting for you in the terminal", "Run the build", True),
                          (waiting["status"], waiting["statusLabel"], waiting["title"], waiting["live"]),
                          "a tool call with no result, the file quiet for 4 s and a claude process in its folder")
-        self.assertEqual(["open"], waiting["can"], "only the terminal can answer its prompt")
+        self.assertEqual(["open", "dismiss"], waiting["can"], "only the terminal can answer its prompt")
         self.assertEqual([{"requestId": "toolu_1", "kind": "command",
                            "detail": "Wants to run: npm run build -- --prod", "options": []}],
                          waiting["pending"]["approvals"])
@@ -447,7 +454,7 @@ class ListTest(InboxBase):
                          "Claude Code's registry says it waits (even though the file was written 2 s ago)")
         self.assertEqual("Wants to run: rm -rf build", registered["summary"])
         busy = claude["busy"]
-        self.assertEqual(("working", True, ["open"]), (busy["status"], busy["live"], busy["can"]))
+        self.assertEqual(("working", True, ["open", "dismiss"]), (busy["status"], busy["live"], busy["can"]))
         asks = claude["asks"]
         self.assertEqual(("needs-input", "Which database should I use?"), (asks["status"], asks["summary"]))
         self.assertEqual([{"requestId": "toolu_q", "questions": [
@@ -459,11 +466,12 @@ class ListTest(InboxBase):
                          "an error from before the first look is seen like the rest: the dock starts quiet")
         # Codex
         desk = codex["desk"]
-        self.assertEqual(("done", "Draft the release notes", "Here are the release notes.", "codex", ["open"], False),
+        self.assertEqual(("done", "Draft the release notes", "Here are the release notes.", "codex",
+                          ["open", "dismiss"], False),
                          (desk["status"], desk["title"], desk["summary"], desk["agent"], desk["can"], desk["live"]),
                          "Codex Desktop: the injected environment block is not the title; the app owns it")
         wait = codex["cli_wait"]
-        self.assertEqual(("needs-approval", "Waiting for you in the terminal", ["open"]),
+        self.assertEqual(("needs-approval", "Waiting for you in the terminal", ["open", "dismiss"]),
                          (wait["status"], wait["statusLabel"], wait["can"]))
         self.assertEqual([{"requestId": "call_9", "kind": "command", "detail": "Wants to run: psql -f migrate.sql",
                            "options": []}], wait["pending"]["approvals"])
@@ -471,7 +479,7 @@ class ListTest(InboxBase):
         self.assertEqual(("idle", "Hit an error", "stream disconnected"),
                          (codex["cli_error"]["status"], codex["cli_error"]["statusLabel"],
                           codex["cli_error"]["summary"]))
-        self.assertEqual(("done", "bump the version", ["reply", "open"]),
+        self.assertEqual(("done", "bump the version", ["reply", "open", "dismiss"]),
                          (codex["cli_done"]["status"], codex["cli_done"]["title"], codex["cli_done"]["can"]),
                          "a session filed under an older day is still read")
         # T3: settled and archived threads are not there; agents from the model's provider
@@ -479,21 +487,22 @@ class ListTest(InboxBase):
         self.assertNotIn("t3:t-archived", items)
         approval = items["t3:t-approval"]
         self.assertEqual(("needs-approval", "Wants to run a command", "npm test -- --watch=false", "SamRabbit",
-                          "claude", ["approve", "reply", "stop", "open"]),
+                          "claude", ["approve", "reply", "stop", "open", "dismiss"]),
                          (approval["status"], approval["statusLabel"], approval["summary"], approval["project"],
                           approval["agent"], approval["can"]))
         self.assertEqual([{"requestId": "req-approve-1", "kind": "command", "detail": "npm test -- --watch=false",
                            "options": [dict(option) for option in t3.DEFAULT_APPROVAL_OPTIONS]}],
                          approval["pending"]["approvals"])
         question = items["t3:t-input"]
-        self.assertEqual(("needs-input", "Has a question", ["answer", "reply", "stop", "open"]),
+        self.assertEqual(("needs-input", "Has a question", ["answer", "reply", "stop", "open", "dismiss"]),
                          (question["status"], question["statusLabel"], question["can"]))
         self.assertEqual([{"requestId": "req-input-1", "questions": [
             {"id": "q1", "header": "Database", "question": "Which database should I use?",
              "options": ["SQLite", "Postgres"], "allowCustom": False, "multiSelect": False}]}],
             question["pending"]["inputs"])
         running = items["t3:t-running"]
-        self.assertEqual(("working", "Working · step 2/4", 0.25, "Running unit tests", ["reply", "stop", "open"]),
+        self.assertEqual(("working", "Working · step 2/4", 0.25, "Running unit tests",
+                          ["reply", "stop", "open", "dismiss"]),
                          (running["status"], running["statusLabel"], running["progress"], running["phase"],
                           running["can"]))
         self.assertEqual(("error", "Failed", "The provider stopped unexpectedly."),
@@ -570,7 +579,8 @@ class ListTest(InboxBase):
         self.assertEqual(6, len(chats))
         by = {item["id"]: item for item in chats}
         mac = by["chat:mac-" + "a" * 32]
-        self.assertEqual(("Mac", "idle", ["open"], None), (mac["project"], mac["status"], mac["can"], mac["agent"]))
+        self.assertEqual(("Mac", "idle", ["open", "dismiss"], None),
+                         (mac["project"], mac["status"], mac["can"], mac["agent"]))
         self.assertEqual("working", by["chat:c_chat07abcdef"]["status"], "an R1 reply still being written")
         self.assertEqual("R1", by["chat:c_chat07abcdef"]["project"])
         self.assertNotIn("chat:c_chat00abcdef", by)
@@ -786,6 +796,252 @@ class SeenTest(InboxBase):
         self.assertFalse(items["t3:t-done"]["unread"])
 
 
+# ====================================================================== dismissing
+
+
+class DismissTest(InboxBase):
+    def finish_t3(self, thread_id: str, at: str = "2026-10-08T18:30:00.000Z") -> None:
+        with self.fake_t3.lock:
+            thread = self.fake_t3.get_thread(thread_id)
+            thread["session"]["status"] = "ready"
+            thread["planProgress"] = None
+            thread["latestTurn"].update({"state": "completed", "completedAt": at})
+            thread["updatedAt"] = at
+        self.hub.invalidate()
+
+    def saved(self) -> Dict[str, Any]:
+        return json.loads((self.inbox_dir / inbox.STATE_FILE).read_text())
+
+    def test_a_dismissed_item_leaves_the_list_and_the_counts_until_it_changes(self) -> None:
+        self.build_world()
+        first = self.fresh()
+        self.assertTrue(all("dismiss" in item["can"] for item in first["items"]), "every item can be dismissed")
+        self.assertEqual(0, first["counts"]["dismissed"])
+        failed = self.by_id(first)["t3:t-error"]
+        self.assertEqual(("error", "Failed"), (failed["status"], failed["statusLabel"]))
+        status, answer = self.act("t3:t-error", "dismiss")
+        self.assertEqual((200, {"ok": True, "dismissed": True, "revision": first["revision"] + 1}), (status, answer))
+        value = self.get_inbox()
+        self.assertEqual(first["revision"] + 1, value["revision"], "the revision moves at once")
+        self.assertNotIn("t3:t-error", self.by_id(value))
+        self.assertEqual((first["counts"]["needsYou"] - 1, first["counts"]["working"], first["counts"]["total"] - 1, 1),
+                         (value["counts"]["needsYou"], value["counts"]["working"], value["counts"]["total"],
+                          value["counts"]["dismissed"]))
+        status, answer = self.act("t3:t-running", "dismiss")
+        self.assertEqual(200, status, answer)
+        value = self.get_inbox()
+        self.assertEqual((first["counts"]["working"] - 1, 2),
+                         (value["counts"]["working"], value["counts"]["dismissed"]))
+        self.assertEqual([], self.fake_t3.dispatched, "dismissing never touches T3")
+        self.assertEqual({"t3:t-error", "t3:t-running"}, set(self.saved()["dismissed"]))
+        # ?include=dismissed: after everything that shows, marked, with the undo instead of dismiss.
+        status, everything = self.call("GET", "/v1/desktop/inbox?include=dismissed", desktop=True)
+        self.assertEqual(200, status, everything)
+        self.assertEqual(value["revision"], everything["revision"])
+        shown = [item for item in everything["items"] if not item.get("dismissed")]
+        hidden = [item for item in everything["items"] if item.get("dismissed")]
+        self.assertEqual(value["items"], shown, "the rest is the list as it is")
+        self.assertEqual(everything["items"], shown + hidden, "the dismissed ones come last")
+        self.assertEqual(["t3:t-error", "t3:t-running"], [item["id"] for item in hidden],
+                         "in the list's own order (needs you first)")
+        for item in hidden:
+            self.assertIs(True, item["dismissed"])
+            self.assertIn("undismiss", item["can"])
+            self.assertNotIn("dismiss", item["can"])
+        self.assertFalse(any("dismissed" in item for item in value["items"]), "only a dismissed item says so")
+        status, detail = self.call("GET", "/v1/desktop/inbox/items/t3:t-error", desktop=True)
+        self.assertEqual((200, True), (status, detail["item"].get("dismissed")), "its own route says it too")
+        # A working thread's steps are not news ...
+        with self.fake_t3.lock:
+            thread = self.fake_t3.get_thread("t-running")
+            thread["planProgress"]["completedSteps"] = 2
+            thread["updatedAt"] = "2026-10-08T13:10:00.000Z"
+        self.hub.invalidate()
+        self.assertNotIn("t3:t-running", self.by_id(self.fresh()))
+        # ... finishing is: it comes back by itself, unread.
+        self.finish_t3("t-running")
+        value = self.fresh()
+        back = self.by_id(value)["t3:t-running"]
+        self.assertEqual(("done", True), (back["status"], back["unread"]))
+        self.assertNotIn("dismissed", back)
+        self.assertEqual(1, value["counts"]["dismissed"])
+        self.assertEqual({"t3:t-error"}, set(self.saved()["dismissed"]), "its dismissal is forgotten")
+        # The failed thread comes back when something happens in it (tried again in T3 Code: failed again).
+        with self.fake_t3.lock:
+            thread = self.fake_t3.get_thread("t-error")
+            thread["latestUserMessageAt"] = thread["updatedAt"] = "2026-10-08T18:40:00.000Z"
+            thread["latestTurn"].update({"requestedAt": "2026-10-08T18:40:00.000Z",
+                                         "startedAt": "2026-10-08T18:40:00.000Z",
+                                         "completedAt": "2026-10-08T18:41:00.000Z"})
+        self.hub.invalidate()
+        value = self.fresh()
+        self.assertIn("t3:t-error", self.by_id(value))
+        self.assertEqual((first["counts"]["needsYou"] + 1, 0),  # + t-running: done and unread
+                         (value["counts"]["needsYou"], value["counts"]["dismissed"]))
+        self.assertEqual({}, self.saved()["dismissed"])
+        self.assertEqual([], self.fake_t3.dispatched)
+
+    def test_dismiss_marks_it_seen_and_the_undo_puts_back_what_was_unread(self) -> None:
+        self.build_world()
+        self.get_inbox()  # the first look
+        self.finish_t3("t-done")
+        claude = self.project_dir / (IDS["failed"] + ".jsonl")
+        self.append(claude, [claude_user(NOW - 80, "and the errors?", session=IDS["failed"]),
+                             claude_record("assistant", NOW - 79, session=IDS["failed"], isApiErrorMessage=True,
+                                           message={"id": "e2", "role": "assistant", "model": "<synthetic>",
+                                                    "content": [{"type": "text", "text": "API Error: overloaded"}],
+                                                    "stop_reason": "stop_sequence"})], age=79)
+        before = self.fresh()
+        items = self.by_id(before)
+        failed_id = "claude:" + IDS["failed"]
+        self.assertEqual((True, "error", True), (items["t3:t-done"]["unread"], items[failed_id]["status"],
+                                                 items[failed_id]["unread"]))
+        for item_id in ("t3:t-done", failed_id):
+            status, answer = self.act(item_id, "dismiss")
+            self.assertEqual((200, True), (status, answer["dismissed"]))
+        value = self.get_inbox("?include=dismissed")
+        self.assertEqual(before["counts"]["needsYou"] - 2, value["counts"]["needsYou"])
+        hidden = {item["id"]: item for item in value["items"] if item.get("dismissed")}
+        self.assertEqual({"t3:t-done", failed_id}, set(hidden))
+        self.assertEqual((False, False, "idle"), (hidden["t3:t-done"]["unread"], hidden[failed_id]["unread"],
+                                                  hidden[failed_id]["status"]),
+                         "dismissed is seen too: the failed session settles, which is not a change")
+        self.assertEqual(2, self.fresh()["counts"]["dismissed"], "and it stays dismissed")
+        # The undo: back at once, as unread as it was, needing him again.
+        for item_id in ("t3:t-done", failed_id):
+            status, answer = self.act(item_id, "undismiss")
+            self.assertEqual((200, False), (status, answer["dismissed"]))
+        value = self.get_inbox()
+        items = self.by_id(value)
+        self.assertEqual((True, "error", True), (items["t3:t-done"]["unread"], items[failed_id]["status"],
+                                                 items[failed_id]["unread"]))
+        self.assertEqual((before["counts"]["needsYou"], 0), (value["counts"]["needsYou"], value["counts"]["dismissed"]))
+        self.assertEqual([item["id"] for item in before["items"]], [item["id"] for item in value["items"]],
+                         "the same list in the same order")
+        # Undoing twice, or something never dismissed, is fine; dismissing something not in the inbox is not.
+        self.assertEqual((200, {"ok": True, "dismissed": False, "revision": value["revision"]}),
+                         self.act("t3:t-done", "undismiss"))
+        status, answer = self.act("claude:" + IDS["sdk"], "dismiss")
+        self.assertEqual((404, "item_not_found"), (status, answer["error"]["code"]))
+        status, answer = self.act("bogus:1", "dismiss")
+        self.assertEqual((404, "item_not_found"), (status, answer["error"]["code"]))
+        # Seen after a dismissal: the undo leaves it seen.
+        self.act("t3:t-done", "dismiss")
+        self.clock.advance(1)
+        self.act("t3:t-done", "seen")
+        self.act("t3:t-done", "undismiss")
+        self.assertFalse(self.by_id(self.get_inbox())["t3:t-done"]["unread"])
+        self.assertEqual([], self.fake_t3.dispatched)
+        self.assert_log_clean(SECRET_TITLE, "API Error", CWD)
+
+    def test_claude_codex_and_chats_come_back_when_they_do_something(self) -> None:
+        self.build_world()
+        store = self.server.sync.store
+        store.insert_events([{"id": "c1", "type": "message.user", "conversationId": "c_dismiss0001",
+                              "at": int((NOW - 500) * 1000), "text": "a chat"}], "r1")
+        self.get_inbox()
+        ids = ["claude:" + IDS["done"], "codex:" + IDS["cli_wait"], "codex:" + IDS["desk"], "chat:c_dismiss0001"]
+        for item_id in ids:
+            status, answer = self.act(item_id, "dismiss")
+            self.assertEqual(200, status, answer)
+        value = self.fresh()
+        self.assertFalse(set(ids) & set(self.by_id(value)))
+        self.assertEqual(len(ids), value["counts"]["dismissed"])
+        # A Claude Code session that answers again, a Codex CLI that asks something new, a new chat message.
+        path = self.project_dir / (IDS["done"] + ".jsonl")
+        self.append(path, [claude_user(NOW - 100, "and the docs?", session=IDS["done"]),
+                           claude_text(NOW - 90, "Docs updated.", session=IDS["done"], message_id="msg_2")], age=90)
+        rollout = self.codex_root / "sessions" / "2026/10/08" / f"rollout-2026-10-08T14-00-00-{IDS['cli_wait']}.jsonl"
+        self.append(rollout,
+                    [codex_event(NOW - 40, "exec_command_end", call_id="call_9", exit_code=0),
+                     codex_event(NOW - 30, "exec_approval_request", call_id="call_10", command=["psql", "-f", "b.sql"],
+                                 cwd=CWD)], age=30)
+        store.insert_events([{"id": "c2", "type": "message.user", "conversationId": "c_dismiss0001",
+                              "at": int((NOW - 5) * 1000), "text": "again"}], "r1")
+        value = self.fresh()
+        items = self.by_id(value)
+        for item_id in ("claude:" + IDS["done"], "codex:" + IDS["cli_wait"], "chat:c_dismiss0001"):
+            with self.subTest(item=item_id):
+                self.assertIn(item_id, items)
+        self.assertEqual(("done", True), (items["claude:" + IDS["done"]]["status"],
+                                          items["claude:" + IDS["done"]]["unread"]))
+        self.assertEqual(["call_10"], [entry["requestId"] for entry in
+                                       items["codex:" + IDS["cli_wait"]]["pending"]["approvals"]])
+        self.assertNotIn("codex:" + IDS["desk"], items, "Codex Desktop's thread did nothing: still dismissed")
+        self.assertEqual(1, value["counts"]["dismissed"])
+
+    def test_dismissals_are_kept_when_the_bridge_starts_again(self) -> None:
+        self.build_world()
+        self.get_inbox()
+        self.act("t3:t-error", "dismiss")
+        self.act("claude:" + IDS["done"], "dismiss")
+        state = self.inbox_dir / inbox.STATE_FILE
+        self.assertEqual(0o600, stat.S_IMODE(state.stat().st_mode))
+        saved = self.saved()
+        self.assertEqual({"t3:t-error", "claude:" + IDS["done"]}, set(saved["dismissed"]))
+        shown = self.by_id(self.get_inbox("?include=dismissed"))["t3:t-error"]
+        self.assertEqual({"status": "error", "requests": [], "at": shown["updatedAt"]},
+                         saved["dismissed"]["t3:t-error"]["marker"])
+        self.assertNotIn(SECRET_TITLE, state.read_text(), "ids and markers only")
+        again = self.make_inbox()
+        self.addCleanup(again.close)
+        again.attach(self.server)
+        self.server.inbox = again
+        value = self.get_inbox()
+        self.assertFalse({"t3:t-error", "claude:" + IDS["done"]} & set(self.by_id(value)))
+        self.assertEqual(2, value["counts"]["dismissed"])
+        status, answer = self.act("t3:t-error", "undismiss")
+        self.assertEqual((200, False), (status, answer["dismissed"]))
+        self.assertIn("t3:t-error", self.by_id(self.get_inbox()))
+        self.assertEqual({"claude:" + IDS["done"]}, set(self.saved()["dismissed"]))
+        # A copy that is not the installed one keeps them in memory only.
+        dry = inbox.make_service(installed=False)
+        self.addCleanup(dry.close)
+        self.assertIsNone(dry.seen.path)
+
+    def test_a_long_poll_wakes_up_when_an_item_is_dismissed(self) -> None:
+        self.build_world()
+        start = self.fresh()
+        answers: List[Dict[str, Any]] = []
+        waiter = threading.Thread(target=lambda: answers.append(
+            self.get_inbox(f"?after={start['revision']}&wait=20")))
+        waiter.start()
+        time.sleep(0.3)
+        self.act("t3:t-error", "dismiss")
+        waiter.join(timeout=15)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(start["revision"] + 1, answers[0]["revision"])
+        self.assertNotIn("t3:t-error", self.by_id(answers[0]))
+
+    def test_what_counts_as_a_change(self) -> None:
+        def item(status: str = "error", at: str = "2026-10-08T12:00:00Z", requests: Tuple[str, ...] = (),
+                 source: str = "t3", unread: bool = False) -> Dict[str, Any]:
+            return {"id": source + ":x", "source": source, "status": status, "updatedAt": at, "unread": unread,
+                    "pending": {"approvals": [{"requestId": request} for request in requests], "inputs": []}}
+
+        changed = inbox._changed_since  # noqa: SLF001
+        marker = inbox._change_marker(item())  # noqa: SLF001
+        self.assertEqual({"status": "error", "requests": [], "at": "2026-10-08T12:00:00Z"}, marker)
+        self.assertFalse(changed(marker, item()))
+        self.assertFalse(changed(marker, item(at="2026-10-08T11:00:00Z")), "older is not news")
+        self.assertTrue(changed(marker, item(at="2026-10-08T12:00:01Z")), "newer activity")
+        self.assertTrue(changed(marker, item(status="working")), "another status")
+        asking = inbox._change_marker(item("needs-approval", requests=("r1",)))  # noqa: SLF001
+        self.assertFalse(changed(asking, item("needs-approval", requests=("r1",))))
+        self.assertTrue(changed(asking, item("needs-approval", requests=("r1", "r2"))), "a request it did not have")
+        unknown = inbox._change_marker(item("needs-approval"))  # noqa: SLF001
+        self.assertIsNone(unknown["requests"], "its requests are not read yet")
+        self.assertFalse(changed(unknown, item("needs-approval", requests=("r1",))), "reading them is no change")
+        working = inbox._change_marker(item("working"))  # noqa: SLF001
+        self.assertFalse(changed(working, item("working", at="2026-10-08T12:30:00Z")), "a working item's steps")
+        self.assertTrue(changed(working, item("done", at="2026-10-08T12:30:00Z")), "it finished")
+        # Seeing a failed Claude Code session settles it; the marker is taken as it reads once seen.
+        seen = inbox._change_marker(inbox._after_seen(item("error", source="claude", unread=True)))  # noqa: SLF001
+        self.assertEqual("idle", seen["status"])
+        self.assertFalse(changed(seen, item("idle", source="claude")))
+        self.assertTrue(changed(seen, item("error", source="claude", unread=True, at="2026-10-08T12:05:00Z")))
+
+
 # ====================================================================== actions on T3 threads
 
 
@@ -924,7 +1180,7 @@ class SessionActionTest(InboxBase):
         status, value = self.act(item_id, "reply", {"text": REPLY})
         self.assertEqual(202, status, value)
         item = self.by_id(self.get_inbox())[item_id]
-        self.assertEqual((True, ["open"]), (item["live"], item["can"]),
+        self.assertEqual((True, ["open", "dismiss"]), (item["live"], item["can"]),
                          "its Terminal window is starting: live before ps can see the CLI")
         status, value = self.act(item_id, "reply", {"text": REPLY})
         self.assertEqual((409, "session_live"), (status, value["error"]["code"]), "a second press")
@@ -966,7 +1222,7 @@ class SessionActionTest(InboxBase):
                                  "codex resume " + IDS["cli_error"], app="/Applications/ChatGPT.app")
         items = self.by_id(self.fresh())
         live = items["codex:" + IDS["cli_done"]]
-        self.assertEqual((True, ["open"]), (live["live"], live["can"]))
+        self.assertEqual((True, ["open", "dismiss"]), (live["live"], live["can"]))
         self.assertFalse(items["codex:" + IDS["cli_error"]]["live"], "the ChatGPT app's own codex is not a terminal")
         status, value = self.act("codex:" + IDS["cli_done"], "reply", {"text": REPLY})
         self.assertEqual((409, "session_live"), (status, value["error"]["code"]))
@@ -1311,7 +1567,8 @@ class CodexFormatTest(InboxBase):
             codex_event(t - 380, "task_complete", last_agent_message="Cropped.")], age=380)
         items = self.by_id(self.get_inbox())
         desk = items["codex:" + IDS["desk"]]
-        self.assertEqual(("Draft the release notes", "done", "Finished", "Here are the release notes.", ["open"]),
+        self.assertEqual(("Draft the release notes", "done", "Finished", "Here are the release notes.",
+                          ["open", "dismiss"]),
                          (desk["title"], desk["status"], desk["statusLabel"], desk["summary"], desk["can"]))
         self.assertEqual("Codex thread", items["codex:" + IDS["cli_open"]]["title"], "nothing typed yet")
         self.assertEqual("Make the logo bigger", items["codex:" + IDS["cli_wait"]]["title"])
@@ -1354,7 +1611,7 @@ class CodexFormatTest(InboxBase):
         self.assertEqual(("error", "Hit an error", "stream disconnected before completion", True),
                          (desk["status"], desk["statusLabel"], desk["summary"], desk["unread"]),
                          "a task_complete with an error is a failure, not Finished")
-        self.assertEqual(["open", "seen"], desk["can"])
+        self.assertEqual(["open", "seen", "dismiss"], desk["can"])
         self.assertTrue(inbox._needs_you(desk))  # noqa: SLF001
         stopped = self.by_id(value)["codex:" + IDS["cli_error"]]
         self.assertEqual(("idle", "Stopped"), (stopped["status"], stopped["statusLabel"]),
@@ -1364,7 +1621,7 @@ class CodexFormatTest(InboxBase):
         self.assertEqual((200, {"ok": True}), (status, answer))
         value = self.fresh()
         desk = self.by_id(value)["codex:" + IDS["desk"]]
-        self.assertEqual(("idle", "Hit an error", False, ["open"]),
+        self.assertEqual(("idle", "Hit an error", False, ["open", "dismiss"]),
                          (desk["status"], desk["statusLabel"], desk["unread"], desk["can"]),
                          "seen: it no longer needs him, and still says what happened")
         self.assertEqual(needs - 1, value["counts"]["needsYou"])
@@ -1422,7 +1679,7 @@ class CodexFormatTest(InboxBase):
         self.assertEqual("working", items["codex:" + IDS["cli_error"]]["status"], "not quiet long enough yet")
         cli = items["codex:" + IDS["cli_wait"]]
         self.assertEqual(("needs-approval", "May be waiting for you in the terminal", "Wants to run: psql -f x.sql",
-                          True, ["open"]),
+                          True, ["open", "dismiss"]),
                          (cli["status"], cli["statusLabel"], cli["summary"], cli["live"], cli["can"]))
         self.assertNotIn("psql", json.dumps(desk), "the code a tool runs is never shown")
 
