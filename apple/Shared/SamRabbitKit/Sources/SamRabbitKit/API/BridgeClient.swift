@@ -15,8 +15,13 @@ import Synchronization
 /// A client owns two `URLSession`s: make one per pairing and keep it (`BridgeAccount.client()` does),
 /// never one per request. Each request carries its own timeout (`BridgeRequest.timeout`, else the
 /// client's default).
+///
+/// The Mac's own app talks to the same bridge through its desktop API (`api: .desktop`): the desktop token in
+/// `X-SamRabbit-Desktop` instead of a bearer token, and the assistant under `/v1/desktop/assistant/*`.
 public final class BridgeClient: Sendable {
     public let hosts: [BridgeHost]
+    /// Which of the bridge's APIs this client speaks.
+    public let api: BridgeAPI
     private let token: String?
     private let defaultTimeout: TimeInterval
     private let session: URLSession
@@ -30,9 +35,11 @@ public final class BridgeClient: Sendable {
     ///   - token: the mobile token (`nil` only for `pair` and `health`).
     ///   - timeout: the timeout in seconds of requests that do not set their own.
     ///   - relay: another route to the bridge for when no address answers.
+    ///   - api: the mobile API (a paired device's token) or the desktop API (the Mac's own app, loopback only).
     public init(hosts: [BridgeHost], token: String?, timeout: TimeInterval = 12, relay: (any BridgeRelay)? = nil,
-                onPreferredHostChange: (@Sendable (BridgeHost) -> Void)? = nil) {
+                api: BridgeAPI = .mobile, onPreferredHostChange: (@Sendable (BridgeHost) -> Void)? = nil) {
         self.hosts = hosts
+        self.api = api
         self.token = token
         self.relay = relay
         self.onPreferredHostChange = onPreferredHostChange
@@ -581,7 +588,12 @@ public final class BridgeClient: Sendable {
         urlRequest.httpMethod = request.method
         urlRequest.setValue(request.accept, forHTTPHeaderField: "Accept")
         urlRequest.timeoutInterval = request.timeout ?? (request.accept == "text/event-stream" ? 45 : defaultTimeout)
-        if request.authorized, let token { urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if request.authorized, let token {
+            switch api {
+            case .mobile: urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            case .desktop: urlRequest.setValue(token, forHTTPHeaderField: BridgeAPI.desktopTokenHeader)
+            }
+        }
         if let body = request.body {
             urlRequest.httpBody = body
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -610,6 +622,21 @@ public final class BridgeClient: Sendable {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/")))
             ?? value
     }
+}
+
+/// The bridge's two front doors.
+public enum BridgeAPI: String, Sendable, Equatable {
+    /// `/v1/mobile/*`: a paired iPhone or Apple Watch, over the LAN, with `Authorization: Bearer <mobile token>`.
+    case mobile
+    /// `/v1/desktop/*`: the SamRabbit app on the Mac itself, loopback only, with `X-SamRabbit-Desktop: <desktop
+    /// token>` (the token in `~/.config/samrabbit/desktop-token`).
+    case desktop
+
+    public static let desktopTokenHeader = "X-SamRabbit-Desktop"
+
+    /// An assistant route: `/v1/mobile/assistant/<route>` or `/v1/desktop/assistant/<route>` (the same bodies and
+    /// the same streaming turn protocol on both).
+    public func assistantPath(_ route: String) -> String { "/v1/\(rawValue)/assistant/\(route)" }
 }
 
 /// One call to the bridge.
