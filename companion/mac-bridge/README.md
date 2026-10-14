@@ -624,9 +624,12 @@ the token, 403 from any other machine, even with it).
 - **SamRabbit chats**: the sync store's 6 most recent conversations (R1, Watch, iPhone, Mac), `working` while the
   assistant is answering one (or an R1 reply is still being written), else `idle`.
 
-`live` (a CLI owns the session right now): Claude Code's registry, else `ps` (the session id in a process's command
-line), else `lsof` (a plain `claude` / `codex` in the session's folder owns the newest session there nobody else owns);
-`ps` at most every 5 s, a process's folder read once. Scanning is incremental: a file is read again only when its size
+`live` (a CLI owns the session right now): Claude Code's registry (its pids checked with one `ps -p`, start times
+included, at most every 5 s), else `ps` (the session id in a process's command line), else `lsof` (a plain `claude` /
+`codex` in the session's folder owns the newest session there nobody else owns). The whole `ps -ax` (about 0.1 s on a
+busy Mac) is read at most every 30 s, and only while a session is not in the registry; a process's folder is read
+once; the `codex` processes Codex Desktop and T3 Code run for their own threads (`codex … app-server`, or anything
+under their apps) never count. Scanning is incremental: a file is read again only when its size
 or mtime changed, a session that is not a terminal one never past its head; a refresh takes a few milliseconds.
 
 | Route | Answer |

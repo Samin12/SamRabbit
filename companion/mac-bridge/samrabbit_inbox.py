@@ -24,8 +24,9 @@ Sources (each optional; one that fails never empties the others):
   reply is being made.
 
 Claude and Codex sessions count only when written in the last 3 days. ``live`` (an interactive CLI owns the session
-right now) comes from Claude Code's registry, else ``ps`` (the session id in the command line) and ``lsof`` (the
-working folder), read at most every 5 s. A live session cannot be continued from here (``409 session_live``: answer
+right now) comes from Claude Code's registry (its pids checked with ``ps -p`` at most every 5 s), else ``ps -ax`` (the
+session id in the command line; at most every 30 s, only while a session is not in the registry) and ``lsof`` (the
+working folder). A live session cannot be continued from here (``409 session_live``: answer
 it where it runs); one that is not live is continued in a new Terminal window running ``claude --resume <id> <text>``
 or ``codex resume <id> <text>`` in its folder, so Samin keeps the CLI's own permission prompts.
 
@@ -115,7 +116,8 @@ DETAIL_BYTES = 768 * 1024  # how far back an item's messages are looked for
 WAITING_AFTER_SECONDS = 4.0  # a tool call nobody answered for this long is a prompt waiting in the terminal
 WORKING_SECONDS = 15.0  # a session written to this recently is working
 CODEX_QUIET_SECONDS = 120.0  # an open Codex turn with nothing written for this long is not "working" any more
-LIVE_CHECK_SECONDS = 5.0
+LIVE_CHECK_SECONDS = 5.0  # Claude Code's registry and its pids, at most this often
+TABLE_SECONDS = 30.0  # the whole process table (when a session is not in the registry), at most this often
 T3_DETAILS_PER_REFRESH = 4  # thread reads (open requests, the last answer) per refresh, ...
 T3_DETAIL_BUDGET_SECONDS = 2.5  # ... within about this long
 DRAFT_FRESH_MS = 60_000  # an R1 reply still being written this recently: the chat is working
@@ -127,6 +129,7 @@ T3_BUNDLE_ID = "com.t3tools.t3code"  # T3 Code (Alpha): its t3code:// scheme ope
 TERMINAL_BUNDLE_ID = "com.apple.Terminal"
 CHATGPT_BUNDLE_ID = "com.openai.codex"  # the ChatGPT app is Codex Desktop; it opens codex://threads/<id>
 CODEX_THREAD_URL = "codex://threads/"
+_APP_OWNED = ("/ChatGPT.app", "/T3 Code (Alpha).app")  # apps that run codex for their own threads
 
 NEEDS_APPROVAL, NEEDS_INPUT, ERROR, DONE, WORKING, IDLE = "needs-approval", "needs-input", "error", "done", \
     "working", "idle"
@@ -364,17 +367,27 @@ class Launcher:
 
 
 class Process:
-    def __init__(self, pid: int, ppid: int, started: str, exe: str) -> None:
+    def __init__(self, pid: int, ppid: int, started: str, args: str) -> None:
         self.pid = pid
         self.ppid = ppid
-        self.started = started  # ps's lstart in UTC ("Wed Oct  7 14:35:55 2026"), as Claude Code's registry has it
-        self.exe = exe
-        self.args = ""
+        self.started = started  # ps's lstart in UTC ("Wed Oct 7 14:35:55 2026"), as Claude Code's registry has it
+        self.args = args  # the command line (its first word is how the program was started)
+
+    @property
+    def program(self) -> str:
+        return self.args.split(" ", 1)[0].rsplit("/", 1)[-1] if self.args else ""
+
+
+_LSTART = r"\S{3}\s+\S{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4}"
+# Terminals whose shells hang off a helper outside their app bundle.
+_TERMINAL_HELPERS = (("/iTerm2/iTermServer", "/Applications/iTerm.app"),)
 
 
 class Processes:
-    """``ps`` (every process: parent, start time, executable; the command lines too), read at most every
-    ``LIVE_CHECK_SECONDS``, and ``lsof`` for a process's working folder (cached per process)."""
+    """This Mac's processes, from ``ps`` (every ``ps -ax`` costs about 0.1 s on a busy Mac, so the whole table is
+    read at most every ``TABLE_SECONDS``, and only when a session is not already accounted for by Claude Code's own
+    registry; the registry's pids are checked with a cheap ``ps -p``), and ``lsof`` for a process's working folder
+    (once per process)."""
 
     def __init__(self, *, ps: str = "/bin/ps", lsof: str = "/usr/sbin/lsof",
                  monotonic: Callable[[], float] = time.monotonic) -> None:
@@ -392,33 +405,41 @@ class Processes:
                                   env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TZ": "UTC", "LC_ALL": "C"})
         except (OSError, subprocess.SubprocessError):
             return None
-        return done.stdout.decode("utf-8", errors="replace") if done.returncode == 0 else None
+        return done.stdout.decode("utf-8", errors="replace") if done.returncode in (0, 1) else None
 
-    def table(self) -> Optional[Dict[int, Process]]:
-        """pid -> Process, or None when ``ps`` failed (then nobody can tell what is live)."""
+    def table(self, *, fresh: bool = False) -> Optional[Dict[int, Process]]:
+        """pid -> Process for every process, or None when ``ps`` failed (then nobody can tell what is live)."""
         with self._lock:
             cached = self._table
-            if cached is not None and self._monotonic() - cached[0] < LIVE_CHECK_SECONDS:
+            if not fresh and cached is not None and self._monotonic() - cached[0] < TABLE_SECONDS:
                 return cached[1]
-        listing = self._output([self.ps, "-axww", "-o", "pid=,ppid=,lstart=,comm="])
-        commands = self._output([self.ps, "-axww", "-o", "pid=,args="])
+        listing = self._output([self.ps, "-axww", "-o", "pid=,ppid=,lstart=,args="])
         table: Optional[Dict[int, Process]] = None
         if listing is not None:
             table = {}
             for line in listing.splitlines():
-                match = re.match(r"^\s*(\d+)\s+(\d+)\s+(\S{3}\s+\S{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.*)$",
-                                 line)
+                match = re.match(r"^\s*(\d+)\s+(\d+)\s+(" + _LSTART + r")\s?(.*)$", line)
                 if match:
                     pid = int(match.group(1))
                     table[pid] = Process(pid, int(match.group(2)), " ".join(match.group(3).split()),
                                          match.group(4).strip())
-            for line in (commands or "").splitlines():
-                head, _, rest = line.strip().partition(" ")
-                if head.isdigit() and int(head) in table:
-                    table[int(head)].args = rest.strip()
         with self._lock:
             self._table = (self._monotonic(), table)
         return table
+
+    def started(self, pids: List[int]) -> Optional[Dict[int, str]]:
+        """pid -> start time for those of ``pids`` that run (one ``ps -p``), or None when ``ps`` failed."""
+        if not pids:
+            return {}
+        listing = self._output([self.ps, "-ww", "-o", "pid=,lstart=", "-p", ",".join(str(pid) for pid in pids)])
+        if listing is None:
+            return None
+        found: Dict[int, str] = {}
+        for line in listing.splitlines():
+            match = re.match(r"^\s*(\d+)\s+(" + _LSTART + r")\s*$", line)
+            if match:
+                found[int(match.group(1))] = " ".join(match.group(2).split())
+        return found
 
     def cwd(self, process: Process) -> Optional[str]:
         key = (process.pid, process.started)
@@ -437,17 +458,21 @@ class Processes:
             self._cwds[key] = found
         return found
 
-    def app_of(self, pid: int) -> Optional[str]:
+    def app_of(self, pid: int, table: Optional[Dict[int, Process]] = None) -> Optional[str]:
         """The ``.app`` bundle a process runs under (its terminal: Terminal, iTerm, Ghostty, T3 Code, an editor),
-        found by walking its parents; None when none is (tmux, ssh, a LaunchAgent)."""
-        table = self.table() or {}
+        found by walking its parents (in ``table``, else a fresh one); None when none is (tmux, ssh, a LaunchAgent)."""
+        table = table if table is not None else (self.table(fresh=True) or {})
         seen = set()
         current = table.get(pid)
         while current is not None and current.pid not in seen and current.pid > 1:
             seen.add(current.pid)
-            index = current.exe.find(".app/")
-            if index > 0 and current.pid != pid:
-                return current.exe[:index + 4]
+            if current.pid != pid:
+                index = current.args.find(".app/")
+                if index > 0 and current.args.startswith("/"):
+                    return current.args[:index + 4]
+                for marker, app in _TERMINAL_HELPERS:
+                    if marker in current.args:
+                        return app
             current = table.get(current.ppid)
         return None
 
@@ -456,24 +481,44 @@ def _normal_started(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def _command(process: Process, names: Tuple[str, ...]) -> Optional[List[str]]:
+    """The command line's words from the program on (``node .../codex.js resume x`` counts as ``codex.js``), when
+    the program is one of ``names``; else None."""
+    words = process.args.split()
+    if len(words) > 1 and words[0].rsplit("/", 1)[-1] in ("node", "bun"):
+        words = words[1:]
+    if not words:
+        return None
+    program = words[0].rsplit("/", 1)[-1]
+    return words if program in names or ("claude" in names and "/claude/versions/" in words[0]) else None
+
+
 def _is_claude_cli(process: Process) -> bool:
-    exe = process.exe.rsplit("/", 1)[-1]
-    first = process.args.split(" ", 1)[0].rsplit("/", 1)[-1] if process.args else ""
-    claude = exe == "claude" or first == "claude" or "/claude/versions/" in process.exe or \
-        "claude-code/cli.js" in process.args
-    if not claude:
+    """An interactive ``claude`` (never ``claude -p``, the Agent SDK's, or its MCP server)."""
+    words = _command(process, ("claude", "cli.js"))
+    if words is None or (words[0].endswith("cli.js") and "claude-code" not in words[0]):
         return False
-    return not any(word in ("-p", "--print", "--output-format", "--sdk-url", "mcp") for word in process.args.split())
+    return not any(word in ("-p", "--print", "--output-format", "--sdk-url", "mcp") for word in words[1:])
+
+
+_CODEX_VALUE_OPTIONS = frozenset({"-c", "--config", "-m", "--model", "-p", "--profile", "-C", "--cd", "-s",
+                                   "--sandbox", "-a", "--ask-for-approval", "-i", "--image", "--add-dir",
+                                   "--enable", "--disable", "--remote", "--remote-auth-token-env"})
+_CODEX_NOT_INTERACTIVE = frozenset({"app-server", "exec", "e", "mcp-server", "mcp", "proto", "login", "logout",
+                                    "apply", "a", "cloud", "sandbox", "debug", "completion", "responses-api-proxy",
+                                    "stdio-to-uds", "features"})
 
 
 def _is_codex_cli(process: Process) -> bool:
-    exe = process.exe.rsplit("/", 1)[-1]
-    first = process.args.split(" ", 1)[0].rsplit("/", 1)[-1] if process.args else ""
-    if exe != "codex" and first not in ("codex", "codex.js"):
+    """The interactive Codex CLI (never its app-server, which Codex Desktop and T3 run, nor ``codex exec``): the
+    first word after the options is no such subcommand."""
+    words = _command(process, ("codex", "codex.js"))
+    if words is None:
         return False
-    words = process.args.split()[1:]
-    return not any(word in ("app-server", "exec", "e", "mcp-server", "mcp", "proto", "login", "logout", "apply",
-                            "cloud", "sandbox", "debug", "completion") for word in words[:2])
+    index = 1
+    while index < len(words) and words[index].startswith("-"):
+        index += 2 if words[index] in _CODEX_VALUE_OPTIONS else 1
+    return index >= len(words) or words[index] not in _CODEX_NOT_INTERACTIVE
 
 
 # --------------------------------------------------------------------------- what Samin has seen
@@ -1179,7 +1224,7 @@ class InboxService:
         self._digest = ""
         self._t3_details: Dict[str, Tuple[str, Any, str]] = {}  # thread id -> (updatedAt, PendingRequests, answer)
         self._t3_threads: Dict[str, Dict[str, Any]] = {}  # the last snapshot's threads (for seen markers)
-        self._live: Tuple[float, Dict[str, Any]] = (-1e12, {})
+        self._live: Tuple[float, Dict[str, Dict[str, Any]]] = (-1e12, {})  # (read at, Claude Code's registry)
         self._waiters = 0
         self._last_wait = -1e12
         self._demand_at = -1e12
@@ -1443,54 +1488,56 @@ class InboxService:
         return _family(driver, str(selection.get("model") or ""))
 
     # ------------------------------------------------------------------ Claude Code and Codex
-    def _live_info(self) -> Dict[str, Any]:
-        """Which Claude and Codex sessions a CLI process owns right now: Claude Code's registry (by session id), and
-        the ``ps`` table (None when it could not be read). Read at most every ``LIVE_CHECK_SECONDS``."""
+    def _live_info(self, *, fresh: bool = False) -> Dict[str, Dict[str, Any]]:
+        """Claude Code's registry of its running sessions, by session id, each pid checked with one ``ps -p`` (its
+        start time too: a reused pid is not the session; ``kill -0`` when ``ps`` fails). Read at most every
+        ``LIVE_CHECK_SECONDS``."""
         with self._lock:
             at, value = self._live
-            if self._monotonic() - at < LIVE_CHECK_SECONDS:
+            if not fresh and self._monotonic() - at < LIVE_CHECK_SECONDS:
                 return value
-        table = self.processes.table()
+        entries = read_claude_registry(self.claude.registry_dir)
+        started = self.processes.started(sorted({int(entry.get("pid") or 0) for entry in entries.values()}))
         registry: Dict[str, Dict[str, Any]] = {}
-        for session_id, entry in read_claude_registry(self.claude.registry_dir).items():
+        for session_id, entry in entries.items():
             pid = int(entry.get("pid") or 0)
-            if table is not None:
-                process = table.get(pid)
-                if process is None:
-                    continue
-                started = _normal_started(entry.get("procStart"))
-                if started and process.started and started != process.started:
-                    continue  # the pid was reused
+            if started is not None:
+                wanted = _normal_started(entry.get("procStart"))
+                if pid not in started or (wanted and wanted != started[pid]):
+                    continue  # gone, or the pid was reused
             elif not _pid_alive(pid):
                 continue
             registry[session_id] = entry
-        value = {"table": table, "registry": registry,
-                 "claude": [process for process in (table or {}).values() if _is_claude_cli(process)],
-                 "codex": [process for process in (table or {}).values() if _is_codex_cli(process)]}
         with self._lock:
-            self._live = (self._monotonic(), value)
-        return value
+            self._live = (self._monotonic(), registry)
+        return registry
 
-    def _owners(self, records: List[Any], processes: List[Process], live: Dict[str, Any], *,
-                registry: bool) -> Tuple[Dict[str, Tuple[Optional[Dict[str, Any]], int]], bool]:
+    def _owners(self, records: List[Any], kind: str, *, fresh: bool = False) -> Tuple[
+            Dict[str, Tuple[Optional[Dict[str, Any]], int]], bool]:
         """(session id -> (its registry entry, the owning pid), whether the rest are known not to be live: False
         when ``ps`` failed). In order: Claude Code's registry, the session id in a process's command line, then a
         process in the session's folder that names no session (a plain ``claude`` / ``codex``) for the newest session
-        in that folder nobody else owns."""
+        in that folder nobody else owns. The whole process table is read only when the registry left one out."""
         owners: Dict[str, Tuple[Optional[Dict[str, Any]], int]] = {}
         ids = {str(getattr(record, "session_id", "") or getattr(record, "thread_id", "")): record for record in records}
         claimed = set()
-        if registry:
-            for session_id, entry in live["registry"].items():
+        if kind == "claude":
+            for session_id, entry in self._live_info(fresh=fresh).items():
                 if session_id in ids:
                     owners[session_id] = (entry, int(entry.get("pid") or 0))
                 claimed.add(int(entry.get("pid") or 0))
-        if live["table"] is None:
+        if not ids or all(session_id in owners for session_id in ids):
+            return owners, True
+        table = self.processes.table(fresh=fresh)
+        if table is None:
             return owners, False
+        wanted = _is_claude_cli if kind == "claude" else _is_codex_cli
         plain = []
-        for process in processes:
-            if process.pid in claimed:
+        for process in table.values():
+            if process.pid in claimed or not wanted(process):
                 continue
+            if kind == "codex" and (self.processes.app_of(process.pid, table) or "").endswith(_APP_OWNED):
+                continue  # Codex Desktop's or T3's own codex: their threads are theirs
             named = next((session_id for session_id in ids if session_id in process.args), None)
             if named is not None:
                 owners.setdefault(named, (None, process.pid))
@@ -1515,8 +1562,7 @@ class InboxService:
         if not self.seen.baselined("claude"):
             self.seen.baseline("claude", {"claude:" + record.session_id: iso_utc(_updated(record))
                                           for record in records})
-        live = self._live_info() if records else None
-        owners = self._owners(records, live["claude"], live, registry=True) if live is not None else ({}, True)
+        owners = self._owners(records, "claude")
         return [self._claude_item(record, now, owners) for record in records], status
 
     def _claude_item(self, record: _ClaudeFile, now: float,
@@ -1548,8 +1594,7 @@ class InboxService:
             self.seen.baseline("codex", {"codex:" + record.thread_id: iso_utc(_updated(record))
                                          for record in records})
         cli = [record for record in records if not record.desktop]  # Codex Desktop owns its own threads
-        live = self._live_info() if cli else None
-        owners = self._owners(cli, live["codex"], live, registry=False) if live is not None else ({}, True)
+        owners = self._owners(cli, "codex")
         return [self._codex_item(record, now, owners) for record in records], status
 
     def _codex_item(self, record: _CodexFile, now: float,
@@ -1916,15 +1961,11 @@ class InboxService:
     def _owner(self, source: str, key: str) -> Optional[int]:
         """The pid of the CLI that owns a Claude or Codex session right now (looked up again: Samin may just have
         closed it), or None."""
-        with self._lock:
-            self._live = (-1e12, {})
-        live = self._live_info()
         if source == "claude":
             records: List[Any] = self.claude.scan(self._clock())
-            owners = self._owners(records, live["claude"], live, registry=True)
         else:
             records = [record for record in self.codex.scan(self._clock()) if not record.desktop]
-            owners = self._owners(records, live["codex"], live, registry=False)
+        owners = self._owners(records, source, fresh=True)
         owner = owners[0].get(key)
         return owner[1] if owner and owner[1] else None
 

@@ -58,20 +58,23 @@ class FakeProcesses:
         self.apps: Dict[int, str] = {}
         self.broken = False
         self.lookups = 0
+        self.checks = 0
 
-    def add(self, pid: int, exe: str, args: str, *, cwd: Optional[str] = None, app: Optional[str] = None,
+    def add(self, pid: int, args: str, *, cwd: Optional[str] = None, app: Optional[str] = None,
             started: str = STARTED) -> None:
-        process = inbox.Process(pid, 1, started, exe)
-        process.args = args
-        self.procs[pid] = process
+        self.procs[pid] = inbox.Process(pid, 1, started, args)
         if cwd:
             self.cwds[pid] = cwd
         if app:
             self.apps[pid] = app
 
-    def table(self) -> Optional[Dict[int, inbox.Process]]:
+    def table(self, *, fresh: bool = False) -> Optional[Dict[int, inbox.Process]]:
         self.lookups += 1
         return None if self.broken else dict(self.procs)
+
+    def started(self, pids: List[int]) -> Optional[Dict[int, str]]:
+        self.checks += 1
+        return None if self.broken else {pid: self.procs[pid].started for pid in pids if pid in self.procs}
 
     def cwd(self, process: inbox.Process) -> Optional[str]:
         return self.cwds.get(process.pid)
@@ -231,18 +234,18 @@ class InboxBase(MobileBase):
             claude_user(t - 30, "<command-name>/clear</command-name>", session=IDS["waiting"]),
             claude_user(t - 30, "# Run the build\nthen deploy", session=IDS["waiting"]),
             claude_tool(t - 20, "Bash", {"command": "npm run build -- --prod"}, session=IDS["waiting"])], age=20)
-        self.processes.add(4100, "/Users/test/.local/share/claude/versions/2.1.295", "claude", cwd=CWD,
+        self.processes.add(4100, "claude", cwd=CWD,
                            app="/Applications/iTerm.app")
         self.claude_session("registry_wait", [
             claude_user(t - 50, "clean the build folder", session=IDS["registry_wait"]),
             claude_tool(t - 49, "Bash", {"command": "rm -rf build"}, tool_id="toolu_r", session=IDS["registry_wait"])],
             age=2)
-        self.processes.add(4200, "/Users/test/.local/bin/claude", "claude --resume " + IDS["registry_wait"])
+        self.processes.add(4200, "/Users/test/.local/bin/claude --resume " + IDS["registry_wait"])
         self.register(4200, "registry_wait", "waiting", "approve Bash: rm -rf build")
         self.claude_session("busy", [
             claude_user(t - 300, "write the migration", session=IDS["busy"]),
             claude_tool(t - 200, "Task", {"description": "research"}, session=IDS["busy"])], age=200)
-        self.processes.add(4300, "claude", "claude")
+        self.processes.add(4300, "claude")
         self.register(4300, "busy", "busy")
         self.claude_session("sdk", [claude_user(t - 100, "a T3 thread", session=IDS["sdk"], entrypoint="sdk-ts"),
                                     claude_text(t - 99, "done", session=IDS["sdk"], entrypoint="sdk-ts")])
@@ -256,7 +259,7 @@ class InboxBase(MobileBase):
                 {"question": "Which database should I use?", "header": "Database", "multiSelect": False,
                  "options": [{"label": "SQLite", "description": ""}, {"label": "Postgres", "description": ""}]}]},
                 tool_id="toolu_q", session=IDS["asks"])], age=30)
-        self.processes.add(4400, "claude", "claude --resume " + IDS["asks"])
+        self.processes.add(4400, "claude --resume " + IDS["asks"])
         self.claude_session("failed", [
             claude_user(t - 900, "summarize the logs", session=IDS["failed"]),
             claude_record("assistant", t - 899, session=IDS["failed"], isApiErrorMessage=True, error="rate_limit",
@@ -977,21 +980,26 @@ class ProcessesTest(unittest.TestCase):
     PS = "\n".join([
         "    1     0 Wed Oct  1 09:00:00 2026 /sbin/launchd",
         "  500     1 Wed Oct  8 18:00:00 2026 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
-        "  510   500 Wed Oct  8 18:00:01 2026 login",
+        "  510   500 Wed Oct  8 18:00:01 2026 login -pf test",
         "  511   510 Wed Oct  8 18:00:01 2026 -zsh",
-        "  520   511 Wed Oct  8 18:30:00 2026 /Users/test/.local/share/claude/versions/2.1.295",
+        "  520   511 Wed Oct  8 18:30:00 2026 claude",
         "  600     1 Wed Oct  8 17:00:00 2026 /Applications/T3 Code (Alpha).app/Contents/MacOS/T3 Code (Alpha)",
-        "  610   600 Wed Oct  8 17:00:01 2026 /bin/zsh",
+        "  610   600 Wed Oct  8 17:00:01 2026 /bin/zsh -il",
         "  620   610 Wed Oct  8 17:10:00 2026 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/"
-        "Contents/MacOS/codex",
-        "  700     1 Wed Oct  8 16:00:00 2026 /opt/homebrew/bin/tmux",
-        "  710   700 Wed Oct  8 16:00:01 2026 /Users/test/.local/bin/claude",
-        "  800     1 Wed Oct  8 16:00:00 2026 /Users/test/.local/bin/claude",
+        "Contents/MacOS/codex resume 11111111-2222-3333-4444-555555555555",
+        "  700     1 Wed Oct  8 16:00:00 2026 /opt/homebrew/bin/tmux new -s work",
+        "  710   700 Wed Oct  8 16:00:01 2026 claude --resume 00000000-0000-0000-0000-000000000002",
+        "  800     1 Wed Oct  8 16:00:00 2026 /Users/test/.local/bin/claude -p --model x",
         "  900     1 Wed Oct  8 16:00:00 2026 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/"
-        "Contents/MacOS/codex"]) + "\n"
-    ARGS = "\n".join(["  520 claude", "  620 codex resume 11111111-2222-3333-4444-555555555555",
-                      "  710 claude --resume 00000000-0000-0000-0000-000000000002", "  800 claude -p --model x",
-                      "  900 codex app-server --listen stdio"]) + "\n"
+        "Contents/MacOS/codex app-server --listen stdio",
+        "  950     1 Wed Oct  8 16:00:00 2026 /Users/test/Library/Application Support/iTerm2/iTermServer-3.5.0 x",
+        "  951   950 Wed Oct  8 16:00:01 2026 -zsh",
+        "  952   951 Wed Oct  8 16:00:02 2026 node /usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+        "  953   951 Wed Oct  8 16:00:03 2026 node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+        "  960   1 Wed Oct  8 16:00:00 2026 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+        "  961   960 Wed Oct  8 16:00:01 2026 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/"
+        "Contents/MacOS/codex -c features.x=true -c y=\"z\" app-server",
+        "  962   951 Wed Oct  8 16:00:04 2026 codex -m gpt-6 --full-auto fix the tests"]) + "\n"
 
     def make(self) -> inbox.Processes:
         table = self
@@ -1002,31 +1010,39 @@ class ProcessesTest(unittest.TestCase):
             @staticmethod
             def _output(argv: List[str]) -> Optional[str]:
                 Canned.calls.append(argv)
+                if argv[0].endswith("ps") and "-p" in argv:
+                    return "  520 Wed Oct  8 18:30:00 2026\n"
                 if argv[0].endswith("ps"):
-                    return table.ARGS if "pid=,args=" in argv else table.PS
+                    return table.PS
                 return "p520\nfcwd\nn/Users/test/code/app\n"
         return Canned(monotonic=time.monotonic)
 
     def test_ps_lsof_and_the_hosting_app(self) -> None:
         processes = self.make()
         table = processes.table()
-        self.assertEqual("/Applications/T3 Code (Alpha).app/Contents/MacOS/T3 Code (Alpha)", table[600].exe)
+        self.assertEqual("/Applications/T3 Code (Alpha).app/Contents/MacOS/T3 Code (Alpha)", table[600].args)
         self.assertEqual("Wed Oct 8 18:30:00 2026", table[520].started, "lstart with its double space normalized")
         self.assertEqual("claude --resume 00000000-0000-0000-0000-000000000002", table[710].args)
         self.assertEqual("/System/Applications/Utilities/Terminal.app", processes.app_of(520))
         self.assertEqual("/Applications/T3 Code (Alpha).app", processes.app_of(620),
                          "the codex binary sits inside an app itself: its parents decide")
+        self.assertEqual("/Applications/iTerm.app", processes.app_of(952), "iTerm's shells hang off iTermServer")
         self.assertIsNone(processes.app_of(710), "tmux has no app")
         self.assertEqual("/Users/test/code/app", processes.cwd(table[520]))
         processes.cwd(table[520])
         self.assertEqual(1, sum(1 for argv in type(processes).calls if "lsof" in argv[0]), "a cwd is read once")
+        self.assertEqual({520: "Wed Oct 8 18:30:00 2026"}, processes.started([520, 4242]))
+        before = sum(1 for argv in type(processes).calls if "-axww" in argv)
         processes.table()
-        self.assertEqual(2, sum(1 for argv in type(processes).calls if argv[0].endswith("ps")),
-                         "ps at most every 5 s (two calls: tree and command lines)")
-        self.assertEqual({520, 710}, {pid for pid, item in table.items() if inbox._is_claude_cli(item)},  # noqa: SLF001
+        self.assertEqual(before, sum(1 for argv in type(processes).calls if "-axww" in argv),
+                         "the whole table at most every 30 s")
+        self.assertEqual({520, 710, 953}, {pid for pid, item in table.items()
+                                           if inbox._is_claude_cli(item)},  # noqa: SLF001
                          "claude -p is not an interactive session")
-        self.assertEqual({620}, {pid for pid, item in table.items() if inbox._is_codex_cli(item)},  # noqa: SLF001
-                         "the app-server is Codex Desktop's (or T3's), not a CLI")
+        self.assertEqual({620, 952, 962}, {pid for pid, item in table.items()
+                                           if inbox._is_codex_cli(item)},  # noqa: SLF001
+                         "the app-server is Codex Desktop's (or T3's), not a CLI, wherever its options put it")
+        self.assertEqual("/Applications/ChatGPT.app", processes.app_of(961, table))
 
     def test_which_codex_sessions_are_kept(self) -> None:
         kept = inbox._codex_kept  # noqa: SLF001
@@ -1055,7 +1071,7 @@ class ParsingTest(InboxBase):
             {"type": "permission-mode", "sessionId": IDS["busy"], "permissionMode": "bypassPermissions"},
             claude_user(t - 30, "run everything", session=IDS["busy"]),
             claude_tool(t - 20, "Bash", {"command": "make all"}, session=IDS["busy"])], age=20)
-        self.processes.add(4500, "claude", "claude --resume " + IDS["busy"])
+        self.processes.add(4500, "claude --resume " + IDS["busy"])
         items = self.by_id(self.get_inbox())
         self.assertEqual(("done", "Done with the parser."), (items["claude:" + IDS["done"]]["status"],
                                                              items["claude:" + IDS["done"]]["summary"]),
