@@ -1,5 +1,6 @@
 // Home: what needs Samin and what is running (the agent inbox), the next three events, the R1 / iPhone / Watch, the
-// latest conversation, and the quick actions (New task, Talk, Block time, Journal note).
+// latest conversation, and the quick actions (New task, Talk, Voice note, Block time, Journal note). Until noon the
+// morning brief sits at the top (morning.js, CONTRACTS-WAVE8 §D2).
 
 import { openBlockTime, openJournalNote } from './actions.js';
 import { relativeStart, timeRange, upcoming } from './agenda.js';
@@ -7,9 +8,12 @@ import { h } from './dom.js';
 import { icon } from './icons.js';
 import { needsYou, recommendedOption, supports } from './inbox.js';
 import { approvalCard, itemRow, shortAgo } from './items.js';
+import { createMorning } from './morning.js';
+import { nativeState, onNative, postNative } from './native.js';
+import { normalizeNote, quickAction as noteAction } from './note.js';
 import { createOrb } from './orb.js';
 import { deviceRows, greeting, headline, summaryDevices } from './status.js';
-import { openExternal, redrawWhenFree, reportDragExclusions } from './ui.js';
+import { openExternal, redrawWhenFree, reportDragExclusions, toast } from './ui.js';
 
 export function createHome(ctx, el) {
   const { agents, summary, agenda, chats } = ctx;
@@ -17,6 +21,8 @@ export function createHome(ctx, el) {
   let devices = null;
   let devicesAt = 0;
   const heroOrb = createOrb({ size: 132, energy: 0.16, speed: 0.9, className: 'home-orb' });
+  const morning = createMorning(ctx, { onChange: () => render() });
+  let noteButton = null;
 
   const head = h('header', { class: 'view-head titlebar' });
   const body = h('div', { class: 'view-scroll' });
@@ -148,7 +154,7 @@ export function createHome(ctx, el) {
     entry.key = key;
     entry.el.replaceChildren(...[build()].filter(Boolean));
   }
-  content.append(slot('hero'), h('div', { class: 'home-grid' },
+  content.append(slot('hero'), slot('morning'), h('div', { class: 'home-grid' },
     h('div', { class: 'home-col' }, slot('needs'), slot('working')),
     h('div', { class: 'home-col' }, slot('next'), slot('devices'), slot('latest'))));
 
@@ -161,8 +167,31 @@ export function createHome(ctx, el) {
         h('div', { class: 'quick-row' },
           quickAction('New task', 'plus', () => ctx.show('tasks', { compose: true }), 'New task (N)'),
           quickAction('Talk', 'mic', () => ctx.talk.start(), 'Talk to SamRabbit (⌃⌥Space)'),
+          voiceNoteButton(),
           quickAction('Block time', 'calendar', (event) => openBlockTime(event.currentTarget, ctx.api, { onDone: () => agenda.refresh() })),
           quickAction('Journal note', 'note', () => openJournalNote(ctx.api)))));
+  }
+
+  /** Voice note: the shell records it (⌃⌥N, the dock's note button); a press here starts one, or sends the one going. */
+  function voiceNoteButton() {
+    noteButton = quickAction('Voice note', 'notePlus', () => {
+      if (!postNative({ type: 'note', action: 'toggle' })) toast('Voice notes record in the SamRabbit app (the microphone is native).');
+    });
+    noteButton.classList.add('note-quick');
+    patchNoteButton();
+    return noteButton;
+  }
+
+  /** The button says what a press does now (patched in place: a push mid-click must not swallow it). */
+  function patchNoteButton() {
+    if (!noteButton) return;
+    const note = normalizeNote(nativeState().note);
+    const action = noteAction(note);
+    const label = noteButton.querySelector('span:last-child');
+    if (label && label.textContent !== action.label) label.textContent = action.label;
+    if (noteButton.title !== action.hint) noteButton.title = action.hint;
+    noteButton.classList.toggle('recording', action.recording);
+    noteButton.disabled = action.busy;
   }
 
   function render() {
@@ -183,6 +212,7 @@ export function createHome(ctx, el) {
     const working = agents.items.filter((i) => i.status === 'working' && i.source !== 'samrabbit');
     const busy = [...agents.busy].join();
     fill('hero', JSON.stringify([counts, next && next.id, next && next.start, minute]), () => heroCard(now, counts, next));
+    fill('morning', morning.key(now), () => morning.render(now));
     fill('needs', JSON.stringify([needs, busy, agents.connection, minute]), () => needsCard(now));
     fill('working', JSON.stringify([working, minute]), () => workingCard(now));
     fill('next', JSON.stringify([agenda.loadedAt, Boolean(agenda.error), minute]), () => upNextCard(now));
@@ -214,6 +244,13 @@ export function createHome(ctx, el) {
   });
   agenda.on(() => render());
   setInterval(() => render(), 30_000);
+  onNative((_state, changed) => {
+    if (changed.includes('note')) patchNoteButton();
+  });
+  // The recording's time on the button.
+  setInterval(() => {
+    if (visible && nativeState().note && nativeState().note.state === 'recording') patchNoteButton();
+  }, 1000);
 
   return {
     el,
@@ -221,6 +258,7 @@ export function createHome(ctx, el) {
       visible = true;
       summary.fresh(20_000);
       agenda.fresh(120_000);
+      ctx.briefing.fresh(120_000);
       loadDevices();
       render();
     },

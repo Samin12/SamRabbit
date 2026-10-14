@@ -45,6 +45,17 @@ enum VoiceNoteAPI {
         }
     }
 
+    /// `POST /v1/desktop/captures/<id>/act {action}`: what the bridge suggested for a note it kept, on Samin's tap.
+    static func act(_ id: String, action: String) async -> CaptureStatus? {
+        guard VoiceNoteUpload.isCaptureId(id), var request = request("/v1/desktop/captures/\(id)/act", timeout: 30) else { return nil }
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["action": action])
+        guard let (data, response) = try? await session.data(for: request),
+              let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) else { return nil }
+        return CaptureStatus.decode(data, fallbackId: id)
+    }
+
     /// `GET /v1/desktop/capture/<id>?wait=<s>`: nil when the bridge can't say.
     static func status(_ id: String, wait: Int) async -> CaptureStatus? {
         guard VoiceNoteUpload.isCaptureId(id),

@@ -480,7 +480,8 @@ final class DockController: NSObject {
         minimize: { [weak self] in self?.setMinimized(true) },
         toggleNote: { [weak self] in self?.toggleNote() },
         sendNote: { [weak self] in self?.notes.send() },
-        cancelNote: { [weak self] in self?.notes.cancel() })
+        cancelNote: { [weak self] in self?.notes.cancel() },
+        takeNoteSuggestion: { [weak self] in self?.notes.takeSuggestion() })
 
     private func pillWindow() -> DockPanelWindow {
         if let pill { return pill }

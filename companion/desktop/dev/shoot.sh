@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Headless screenshots of the desktop web UI against the fake sync server (dev only).
 #   companion/desktop/dev/shoot.sh <out-dir> [port]
-# Needs a running fake_sync_server.py and its token file in $SR_TOKEN_FILE (never printed).
+# Needs a running fake_sync_server.py and its token file in $SR_TOKEN_FILE (never printed). W/H size the viewport,
+# SCALE=2 shoots at retina density; HASH is appended to the page's query (e.g. HASH="&morning=1": the morning brief at
+# any hour).
 # STEPS: shot:<name> open:<conversation> view:<home|tasks|chats|calendar|settings> eval:<file.js> click:<selector>
 #        key:<key> type:<search text> post:<path> viewport:<WxH> wait:<ms> top bottom scroll:<px> errors
 set -euo pipefail
@@ -14,7 +16,7 @@ mkdir -p "$OUT"
 ab() { "$AB" --session "$S" "$@" >/dev/null; }
 js() { "$AB" --session "$S" eval "$1"; }
 trap '"$AB" --session "$S" close >/dev/null 2>&1 || true' EXIT
-ab set viewport "${W:-1280}" "${H:-800}"
+ab set viewport "${W:-1280}" "${H:-800}" ${SCALE:+"$SCALE"}
 ab set media dark
 ab cookies set sr_desktop "$(cat "$TOKEN_FILE")" --url "$BASE" --httpOnly --sameSite Strict
 ab open "$BASE/app/?chrome=1${HASH:-}"

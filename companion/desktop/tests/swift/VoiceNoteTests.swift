@@ -130,6 +130,9 @@ enum VoiceNoteTests {
         expectEqual(kept.detail, "Start it as a T3 task?")
         expectEqual(VoiceNoteText.outcome(status("no_speech")).line, "Didn’t catch anything")
         expectEqual(VoiceNoteText.outcome(status("failed", nil)).line, "The bridge couldn’t finish it")
+        expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Start it as a T3 task?", action: "task")), "Start as task")
+        expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Add to your journal?", action: "journal")), "Add to journal")
+        expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Only words", action: "")), nil, "no action, no button")
         let long = VoiceNoteText.outcome(status("done", "journal", heard: String(repeating: "word ", count: 60)))
         expect(long.detail.count <= 92, "a long transcript is clipped (\(long.detail.count))")
     }

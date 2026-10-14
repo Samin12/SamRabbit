@@ -16,6 +16,7 @@ import Foundation
 ///                             it went; "Hey Rabbit" waits meanwhile and no conversation starts
 ///     voice-harness note-hold ⌃⌥N held while it is said, released: sent on the release
 ///     voice-harness note-offline  the bridge refuses it for now (503): kept in the outbox, then sent when it is back
+///     voice-harness note-suggest  the bridge keeps it as a note and suggests a task: the bar's button does it
 ///
 /// The wake phrase setting comes from the arguments (`-VoiceWakeEnabled YES|NO`, the argument domain), so nothing is
 /// written to any defaults.
@@ -141,7 +142,7 @@ struct VoiceHarness {
             let wall = Date().timeIntervalSince(started)
             print(String(format: "HARNESS_CPU %.2f%% (%.2f s of CPU in %.1f s)", cpu / wall * 100, cpu, wall))
             ok = check(voice.wakeArmed && voice.state == .idle, "still listening, nothing started")
-        case "note", "note-hold", "note-offline":
+        case "note", "note-hold", "note-offline", "note-suggest":
             ok = await note(scenario, voice: voice)
         default:
             Log.write("harness: unknown scenario \(scenario)")
@@ -167,6 +168,11 @@ struct VoiceHarness {
         voice.activate(shortcut: false)
         var ok = check(await waitUntil(within: 20) { voice.wakeArmed }, "listening for the wake phrase before")
         if scenario == "note-offline" { await post("/dev/capture", ["mode": "busy"]) }
+        if scenario == "note-suggest" {
+            await postJSON("/dev/capture", ["script": [["heard": "Call the bank about the replacement card.", "kind": "note",
+                                                        "title": "Voice note",
+                                                        "suggestion": ["label": "Start it as a T3 task?", "action": "task"]]]])
+        }
         if scenario == "note-hold" {
             notes.press()
             ok = check(await waitUntil(within: 2) { notes.isRecording }, "⌃⌥N down: recording at once") && ok
@@ -192,6 +198,15 @@ struct VoiceHarness {
             notes.retryNow()
             ok = check(await waitUntil(within: 15) { notes.outbox.items().isEmpty }, "sent once the bridge took it again") && ok
             ok = check(notes.snapshot.waiting == 0, "nothing waits") && ok
+        } else if scenario == "note-suggest" {
+            ok = check(await waitUntil(within: 25) { notes.snapshot.offer == "Start as task" },
+                       "kept as a note, the bar offers the suggestion (\(notes.snapshot.line) / \(notes.snapshot.detail))") && ok
+            notes.takeSuggestion()
+            ok = check(await waitUntil(within: 10) { notes.snapshot.line == "Started a T3 task" },
+                       "the button did it (\(notes.snapshot.line) / \(notes.snapshot.detail))") && ok
+            ok = check(notes.snapshot.offer.isEmpty, "and offers nothing more") && ok
+            let acts = (await get("/dev/capture"))?["acts"] as? [[String: Any]] ?? []
+            ok = check(acts.count == 1 && acts.first?["action"] as? String == "task", "one act, a task, went to the bridge") && ok
         } else {
             ok = check(await waitUntil(within: 25) { notes.snapshot.line == "Added to your journal" },
                        "the bar says what the bridge did (\(notes.snapshot.line) / \(notes.snapshot.detail))") && ok
@@ -212,6 +227,16 @@ struct VoiceHarness {
         }
         print("HARNESS_NOTE_PHASES " + phases.joined(separator: ","))
         return ok
+    }
+
+    /// A dev control with any JSON body.
+    static func postJSON(_ path: String, _ body: [String: Any]) async {
+        var request = URLRequest(url: Config.origin.appendingPathComponent(String(path.dropFirst())))
+        request.httpMethod = "POST"
+        request.setValue(Config.token(), forHTTPHeaderField: "X-SamRabbit-Desktop")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        _ = try? await URLSession.shared.data(for: request)
     }
 
     /// A dev read on the fake server (desktop token).

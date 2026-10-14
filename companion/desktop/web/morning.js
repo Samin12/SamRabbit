@@ -1,0 +1,241 @@
+// Home's "Morning brief" panel (CONTRACTS-WAVE8 §D2), at the top until noon: the brief's headline; Do first, each item
+// with its verbs as buttons (Hark-style: the verb is the button), Done and Dismiss; today's next events (a clash
+// flagged); the agents waiting (they open in Tasks); FYI. Actions show their result at once and roll back with a short
+// note when the bridge says no. Draft reply makes a Gmail draft on the bridge (never sent) and opens it in the browser,
+// in the item's own Google account. The rules are briefing.js's (the same as the dock's Morning section).
+
+import {
+  actResult, findItem, isHandled, isMorning, isWebLink, isoLocal, openCount, primaryActions, remindChoices, resultingState,
+  shownSections, skippedLine, stateLine, verbIcon, withAccount, withItemState,
+} from './briefing.js';
+import { h } from './dom.js';
+import { timeLabel } from './format.js';
+import { icon } from './icons.js';
+import { params } from './native.js';
+import { closePopover, openExternal, popover, spinner, toast } from './ui.js';
+
+const KIND_ICONS = { email: 'mail', conflict: 'alert', event: 'calendar', agent: 'sparkles', fyi: 'info' };
+
+export function createMorning(ctx, { onChange } = {}) {
+  const { briefing } = ctx;
+  /** Item id → the state an action gave it (until the next read says so), and → the action on its way. */
+  const overrides = new Map();
+  const busy = new Map();
+  /** Item id → the Gmail draft it opened. */
+  const drafts = new Map();
+  let refreshing = false;
+  // Dev shots at any hour (shoot.sh: ?morning=1).
+  const force = params.has('morning');
+
+  function brief() {
+    let value = briefing.value;
+    for (const [id, state] of overrides) value = withItemState(value, id, state);
+    return value;
+  }
+
+  function changed() {
+    onChange?.();
+  }
+
+  briefing.on(() => {
+    // A fresh read is the truth: what the actions changed is in it.
+    if (!briefing.loading) overrides.clear();
+    changed();
+  });
+
+  function open(link, item) {
+    const target = withAccount(link, item && item.accountEmail);
+    if (isWebLink(target)) openExternal(target);
+  }
+
+  async function act(item, type, { at = null } = {}) {
+    if (busy.has(item.id)) return;
+    closePopover();
+    if (type === 'open') {
+      if (item.inboxItemId && !item.url) {
+        ctx.show('tasks', { item: item.inboxItemId });
+        return;
+      }
+      if (item.url) {
+        open(item.url, item);
+        return;
+      }
+    }
+    const state = resultingState(type);
+    const before = overrides.has(item.id) ? overrides.get(item.id) : null;
+    if (state) overrides.set(item.id, state);
+    busy.set(item.id, type);
+    changed();
+    try {
+      const answer = actResult(await ctx.api.briefingAct(item.id, { action: type, ...(at ? { at: isoLocal(at) } : {}) }));
+      if (answer.state) overrides.set(item.id, answer.state);
+      if (type === 'draft_reply') {
+        if (answer.url) {
+          drafts.set(item.id, answer.url);
+          open(answer.url, item);
+        }
+        toast('Saved as a draft in Gmail. Nothing was sent.', { tone: 'ok' });
+      } else if (type === 'make_task') {
+        toast('Started as a T3 task', {
+          tone: 'ok', action: answer.itemId ? { label: 'Show', run: () => ctx.show('tasks', { item: answer.itemId }) } : null,
+        });
+      } else if (type === 'block_time') {
+        toast('Blocked on your calendar', { tone: 'ok' });
+      } else if (type === 'remind') {
+        toast('I’ll bring it back then', { tone: 'ok' });
+      } else if (type === 'open' && answer.url) {
+        open(answer.url, item);
+      }
+      busy.delete(item.id);
+      changed();
+      setTimeout(() => briefing.refresh(), 800);
+    } catch (failure) {
+      busy.delete(item.id);
+      if (before) overrides.set(item.id, before);
+      else overrides.delete(item.id);
+      changed();
+      toast(failure && failure.status === 0 ? 'The Mac bridge isn’t answering.'
+        : `That didn’t work${failure && failure.detail ? `: ${failure.detail}` : '.'}`, { tone: 'error' });
+    }
+  }
+
+  function remind(item, anchor) {
+    const node = popover(anchor, [
+      h('div', { class: 'popover-title' }, icon('bell', { size: 15 }), h('span', { text: 'Remind me' })),
+      h('div', { class: 'popover-sub', text: 'It comes back at the top of your brief then.' }),
+      h('div', { class: 'block-chips' }, remindChoices().map((choice) => h('button', {
+        class: 'chip-btn', type: 'button', onclick: () => act(item, 'remind', { at: choice.at }),
+      }, choice.label))),
+    ], { width: 300, align: 'start' });
+    return node;
+  }
+
+  async function refresh() {
+    if (refreshing) return;
+    refreshing = true;
+    changed();
+    try {
+      await ctx.api.briefingRefresh();
+      toast('Reading your mail again…');
+      setTimeout(() => briefing.refresh(), 4000);
+    } catch {
+      toast('The bridge couldn’t read the mail again right now.', { tone: 'error' });
+    } finally {
+      setTimeout(() => {
+        refreshing = false;
+        changed();
+      }, 4200);
+    }
+  }
+
+  // ------------------------------------------------------------------ drawing
+
+  function verbButton(item, action, primary) {
+    const working = busy.get(item.id) === action.type;
+    return h('button', {
+      class: `chip-btn brief-verb${primary ? ' primary' : ''}`, type: 'button', disabled: busy.has(item.id),
+      onclick: (event) => (action.type === 'remind' ? remind(item, event.currentTarget) : act(item, action.type)),
+    }, working ? spinner() : icon(verbIcon(action.type), { size: 13 }),
+    h('span', { text: working && action.type === 'draft_reply' ? 'Drafting…' : action.label }));
+  }
+
+  function iconButton(name, title, onclick, disabled = false) {
+    return h('button', { class: 'brief-icon', type: 'button', title, 'aria-label': title, disabled, onclick }, icon(name, { size: 14 }));
+  }
+
+  function row(item) {
+    const handled = isHandled(item);
+    const tag = item.account ? h('span', { class: 'brief-tag', text: item.account === 'personal' ? 'Personal' : 'Work' }) : null;
+    let foot;
+    if (handled) {
+      const draft = drafts.get(item.id) || (item.state === 'drafted' ? item.url : null);
+      foot = h('div', { class: 'brief-actions' },
+        h('span', { class: 'brief-state' }, icon('check', { size: 13 }), h('span', { text: stateLine(item.state) })),
+        h('span', { class: 'brief-spacer' }),
+        draft ? h('button', { class: 'chip-btn', type: 'button', onclick: () => open(draft, item) }, icon('external', { size: 13 }),
+          h('span', { text: 'Open draft' })) : null,
+        iconButton('check', 'Done', () => act(item, 'done')));
+    } else {
+      foot = h('div', { class: 'brief-actions' },
+        primaryActions(item).map((action, index) => verbButton(item, action, index === 0)),
+        h('span', { class: 'brief-spacer' }),
+        iconButton('check', 'Done', () => act(item, 'done'), busy.has(item.id)),
+        iconButton('close', 'Dismiss: not today', () => act(item, 'dismiss'), busy.has(item.id)));
+    }
+    return h('div', { class: `brief-row kind-${item.kind}${handled ? ' handled' : ''}${item.conflict ? ' conflict' : ''}` },
+      h('span', { class: 'brief-glyph' }, icon(KIND_ICONS[item.kind] || 'info', { size: 15 })),
+      h('div', { class: 'brief-main' },
+        h('div', { class: 'brief-top' }, h('span', { class: 'brief-title', text: item.title }), tag),
+        !handled && item.why ? h('div', { class: 'brief-why', text: item.why }) : null,
+        foot));
+  }
+
+  function eventRow(event, now) {
+    const started = event.startsAt && event.startsAt <= now;
+    return h('div', { class: `brief-event${started ? ' now' : ''}${event.conflict ? ' conflict' : ''}` },
+      h('span', { class: 'brief-event-time', text: event.startsAt ? timeLabel(event.startsAt) : 'All day' }),
+      h('span', { class: 'brief-event-title', text: event.title }),
+      event.conflict ? h('span', { class: 'brief-clash', text: 'Clash' }) : null,
+      event.why ? h('span', { class: 'brief-event-why', text: event.why }) : null);
+  }
+
+  function simpleRow(item) {
+    return h('div', { class: `brief-line kind-${item.kind}` },
+      h('span', { class: 'brief-glyph small' }, icon(KIND_ICONS[item.kind] || 'info', { size: 13 })),
+      h('div', { class: 'brief-main' },
+        h('div', { class: 'brief-top' }, h('span', { class: 'brief-title', text: item.title }),
+          item.account ? h('span', { class: 'brief-tag', text: item.account === 'personal' ? 'Personal' : 'Work' }) : null),
+        item.why ? h('div', { class: 'brief-why', text: item.why }) : null),
+      item.actions.some((a) => a.type === 'open') || item.url || item.inboxItemId
+        ? h('button', { class: 'chip-btn small', type: 'button', onclick: () => act(item, 'open') },
+          h('span', { text: item.kind === 'agent' ? 'Open in Tasks' : 'Open' })) : null,
+      iconButton('close', 'Dismiss', () => act(item, 'dismiss'), busy.has(item.id)));
+  }
+
+  /** The panel, or null when there is no brief to show (afternoon, not today's, not built). */
+  function render(now = Date.now()) {
+    const value = brief();
+    if (!isMorning(value, now, { force })) return null;
+    const sections = Object.fromEntries(shownSections(value, now).map((s) => [s.kind, s.items]));
+    const first = sections.doFirst || [];
+    const left = openCount(value);
+    const side = [];
+    if (sections.today) {
+      side.push(h('div', { class: 'brief-group' }, h('div', { class: 'brief-label', text: 'Today' }),
+        h('div', { class: 'brief-events' }, sections.today.map((e) => eventRow(e, now)))));
+    }
+    if (sections.agents) {
+      side.push(h('div', { class: 'brief-group' }, h('div', { class: 'brief-label', text: 'Agents' }), sections.agents.map(simpleRow)));
+    }
+    if (sections.fyi) {
+      side.push(h('div', { class: 'brief-group' }, h('div', { class: 'brief-label', text: 'FYI' }), sections.fyi.map(simpleRow)));
+    }
+    return h('section', { class: 'card morning' },
+      h('header', { class: 'card-head morning-head' },
+        h('span', { class: 'morning-sun' }, icon('sun', { size: 15 })),
+        h('h2', { class: 'card-title', text: 'Morning brief' }),
+        value.updatedAt ? h('span', { class: 'morning-time', text: timeLabel(value.updatedAt) }) : null,
+        h('span', { class: `count${left ? ' on' : ''}`, text: String(left) }),
+        h('button', {
+          class: 'card-link', type: 'button', disabled: refreshing, title: 'Read the mail again (at most every 5 minutes)',
+          onclick: () => refresh(),
+        }, refreshing ? spinner() : icon('refresh', { size: 13 }), h('span', { text: refreshing ? 'Reading…' : 'Refresh' }))),
+      value.headline ? h('p', { class: 'morning-headline', text: value.headline }) : null,
+      h('div', { class: 'morning-grid' },
+        h('div', { class: 'morning-col' },
+          h('div', { class: 'brief-label', text: 'Do first' }),
+          first.length ? h('div', { class: 'brief-rows' }, first.map(row))
+            : h('div', { class: 'card-empty' }, icon('checkCircle', { size: 18 }), h('span', { text: 'Nothing to do first. Enjoy the morning.' })),
+          skippedLine(value) ? h('div', { class: 'morning-foot' }, icon('mail', { size: 12 }), h('span', { text: skippedLine(value) })) : null),
+        side.length ? h('div', { class: 'morning-col side' }, side) : null));
+  }
+
+  /** What the panel shows, to know when to draw it again. */
+  function key(now = Date.now()) {
+    const value = briefing.value;
+    return JSON.stringify([value && value.revision, value && value.date, [...overrides], [...busy], refreshing,
+      isMorning(brief(), now, { force }), Math.floor(now / 60_000)]);
+  }
+
+  return { render, key, act, findItem: (id) => findItem(brief(), id) };
+}

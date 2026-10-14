@@ -258,7 +258,11 @@ enum DockSnapshots {
                 note(.recording(held: true), level: 0.2, seconds: 2.2),
                 note(.sending, "On its way to your Mac’s bridge…"),
                 note(.sent, "Added to your journal", "“shipped the voice notes on the Mac today.”"),
-                note(.sent, "Saved as a note", "Start it as a T3 task?"),
+                {
+                    var kept = note(.sent, "Saved as a note", "Start it as a T3 task?")
+                    kept.offer = "Start as task"
+                    return kept
+                }(),
                 note(.queued, "Saved on this Mac", "The bridge isn’t running — it goes as soon as it can."),
                 note(.discarded, "Too short", "Hold ⌃⌥N while you talk, or tap it, talk, and tap again."),
             ]

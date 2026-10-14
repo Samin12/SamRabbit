@@ -63,7 +63,7 @@ struct DockNoteBar: View {
                 }
             }
             // Recording, the level and the two buttons sit beside the words; after, the words have the room.
-            .frame(width: (note.recording ? 236 : 292) * s, alignment: .leading)
+            .frame(width: (note.recording ? 236 : note.offer.isEmpty ? 292 : 226) * s, alignment: .leading)
             .padding(.vertical, 8 * s)
             if note.recording {
                 DockLevelBars(level: note.level, scale: s)
@@ -77,6 +77,13 @@ struct DockNoteBar: View {
                         .dockControl()
                 }
                 .padding(.trailing, 11 * s)
+            } else if !note.offer.isEmpty {
+                DockCapsuleButton(title: note.offer, symbol: "arrow.turn.down.right", style: .accent, scale: s) {
+                    commands.takeNoteSuggestion()
+                }
+                .dockControl()
+                .fixedSize()
+                .padding(.trailing, 12 * s)
             } else {
                 Spacer(minLength: 0).frame(width: 4 * s)
             }

@@ -150,6 +150,8 @@ struct VoiceNoteSnapshot: Equatable {
     var shortcut = "⌃⌥N"
     /// Notes waiting in the outbox for the bridge.
     var waiting = 0
+    /// What the bridge suggests for a note it kept, as a button ("Start as task"); "" for none.
+    var offer = ""
 
     var active: Bool { phase != .idle }
 
@@ -174,7 +176,7 @@ struct VoiceNoteSnapshot: Equatable {
         case .failed: name = "failed"
         }
         return [
-            "state": name, "held": held, "line": line, "detail": detail, "shortcut": shortcut, "waiting": waiting,
+            "state": name, "held": held, "line": line, "detail": detail, "shortcut": shortcut, "waiting": waiting, "offer": offer,
             "startedAt": startedAt.map { ($0.timeIntervalSince1970 * 1000).rounded() } ?? NSNull(),
         ]
     }
@@ -289,6 +291,18 @@ enum VoiceNoteText {
             if !status.settled && outcome == nil { return ("Sent", "Working on it…") }
             if !title.isEmpty { return (clip(title, 60), clip(detail.isEmpty ? heard : detail, 110)) }
             return ("Sent", status.say.map { clip($0, 110) } ?? heard)
+        }
+    }
+
+    /// The button for what the bridge suggests: "Start as task", "Add to journal", "Put on calendar" (nil: no action
+    /// to take, the suggestion is only words).
+    static func offer(_ suggestion: CaptureSuggestion?) -> String? {
+        guard let suggestion, !suggestion.action.isEmpty else { return nil }
+        switch suggestion.action.lowercased() {
+        case "task", "t3_task", "make_task": return "Start as task"
+        case "journal": return "Add to journal"
+        case "calendar", "calendar_event", "remind", "reminder": return "Put on calendar"
+        default: return clip(suggestion.label.replacingOccurrences(of: "?", with: ""), 24)
         }
     }
 

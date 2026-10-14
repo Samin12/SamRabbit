@@ -254,15 +254,18 @@ class FakeCapture:
                         error={"code": "t3_not_connected"})
         kind = capture["acted"] or entry.get("kind") or "note"
         outcome: Dict[str, Any] = {"kind": kind, "title": entry.get("title") or "", "detail": entry.get("detail") or ""}
+        if capture["acted"] and capture["acted"] != entry.get("kind"):
+            # Done another way on Samin's tap: named by what he said.
+            outcome.update(title=heard[:80], detail="")
         if kind == "t3_task":
             outcome["threadId"] = "th_note_%s" % capture["captureId"][:8]
         elif kind == "calendar_event":
             outcome["eventId"] = "ev_note_%s" % capture["captureId"][:8]
         elif kind == "note":
             outcome["noteId"] = "note:%s" % capture["captureId"]
-        payload = dict(base, state="needs_you" if kind == "note" and entry.get("suggestion") else "done",
-                       heard=heard, outcome=outcome)
-        if kind == "note" and entry.get("suggestion"):
+        suggested = kind == "note" and entry.get("suggestion") and not capture["acted"]
+        payload = dict(base, state="needs_you" if suggested else "done", heard=heard, outcome=outcome)
+        if suggested:
             payload["suggestion"] = dict(entry["suggestion"])
         return payload
 

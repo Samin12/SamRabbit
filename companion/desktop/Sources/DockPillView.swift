@@ -119,6 +119,8 @@ struct DockCommands {
     var toggleNote: () -> Void = {}
     var sendNote: () -> Void = {}
     var cancelNote: () -> Void = {}
+    /// The note's bar offers what the bridge suggested ("Start as task").
+    var takeNoteSuggestion: () -> Void = {}
 }
 
 /// The pill's controls report their frames, so a press anywhere else on the pill can drag it.

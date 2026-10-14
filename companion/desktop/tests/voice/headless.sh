@@ -4,6 +4,7 @@
 #
 #   companion/desktop/tests/voice/headless.sh [turns] [wake] [wake-alone] [wake-pause] [wake-later] [wake-noise]
 #                                             [bargein] [talkover] [mute] [devices] [note] [note-hold] [note-offline]
+#                                             [note-suggest]
 #                                             [listen <seconds>] [listen-speech <seconds>]   (default: all but listen*)
 #
 # * The "Hey Rabbit" scenarios: `wake` (the phrase and the question in one breath, the first sound the listener
@@ -11,8 +12,9 @@
 #   3 s, the question), `wake-later` (a sentence, 2 s, "So, hey Rabbit, what's on my calendar…"), `wake-noise` (20
 #   bursts of noise a second apart, then the phrase: the listener must never stop or pause). Each must wake, and the
 #   first utterance sent must be the question without the phrase (transcribed again on device).
-# * `note`, `note-hold`, `note-offline`: a voice note (VoiceNote*.swift) from the dock's button (it ends on the pause),
-#   with ⌃⌥N held, and with the bridge refusing it for now (kept in the outbox, sent when it is back); against the fake's
+# * `note`, `note-hold`, `note-offline`, `note-suggest`: a voice note (VoiceNote*.swift) from the dock's button (it ends
+#   on the pause), with ⌃⌥N held, with the bridge refusing it for now (kept in the outbox, sent when it is back), and
+#   kept as a note with a suggestion the bar's button takes; against the fake's
 #   /v1/desktop/capture, the outbox in the temp folder. What went up is transcribed again on device.
 # * `mute`: mute is the conversation's; a muted conversation still ends by itself; muted while idle, "Hey Rabbit"
 #   waits and says why. `devices`: reads this Mac's audio inputs (CoreAudio, no microphone opened) and the wake
@@ -42,7 +44,7 @@ cleanup() {
 trap cleanup EXIT
 
 SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake wake-alone wake-pause wake-later wake-noise bargein talkover mute devices note note-hold note-offline)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake wake-alone wake-pause wake-later wake-noise bargein talkover mute devices note note-hold note-offline note-suggest)
 
 # 1. Build: SamRabbitKit (cached next to build.sh's default output) and the harness.
 KIT=${SAMRABBIT_KIT_CACHE:-$DESKTOP/build/SamRabbitKit}
@@ -200,7 +202,7 @@ run() {
     wake-later) fixture="$WORK/later.wav,$WORK/bye.wav"; wake=1 ;;
     wake-noise) fixture="$WORK/noise.wav,$WORK/bye.wav"; wake=1 ;;
     mute|devices) fixture="$WORK/quiet.wav"; idle=5 ;;
-    note|note-hold|note-offline) fixture="$WORK/note.wav" ;;
+    note|note-hold|note-offline|note-suggest) fixture="$WORK/note.wav" ;;
     listen) fixture="$WORK/bye.wav" ;;
     listen-speech) fixture="$WORK/talk.wav"; wake=1 ;;
     *) echo "unknown scenario $scenario" >&2; exit 64 ;;

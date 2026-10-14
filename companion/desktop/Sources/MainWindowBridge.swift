@@ -66,8 +66,8 @@ final class MainWindowBridge {
         case .dockSettings:
             if live { WindowDock.openSettings() }
         case .note(let action):
+            // (Also in the window snapshots: they run only with the fixture microphone, against the fake.)
             Log.write("window: voice note \(action.rawValue)")
-            guard live else { break }
             switch action {
             case .toggle: VoiceNotes.shared.toggle(source: "window")
             case .send: VoiceNotes.shared.send()

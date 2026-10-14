@@ -32,6 +32,8 @@ final class VoiceNotes: ObservableObject {
     /// The note whose outcome the bar shows.
     private var shownId: String?
     private var hideTask: Task<Void, Never>?
+    /// What the bridge suggested for the note on the bar (its button: `snapshot.offer`).
+    private var suggestion: (id: String, action: String)?
     private var retryTask: Task<Void, Never>?
     private var inFlight = Set<String>()
     private var flushing = false
@@ -122,9 +124,11 @@ final class VoiceNotes: ObservableObject {
         hideTask?.cancel()
         activity = VoiceActivity(silence: VoiceNoteRules.tapSilence, limit: VoiceNoteRules.maxSeconds)
         voice.setNoteRecording(true)
+        suggestion = nil
         var next = snapshot
         next.phase = .recording(held: held)
         next.startedAt = startedAt
+        next.offer = ""
         next.level = 0
         next.line = "Recording…"
         next.detail = ""
@@ -259,13 +263,33 @@ final class VoiceNotes: ObservableObject {
         Log.write("note: \(status.captureId.prefix(8)) \(status.state) (\(kind.isEmpty ? "-" : kind))")
         let lines = VoiceNoteText.outcome(status)
         if shown, shownId == status.captureId, snapshot.phase == .sent {
-            show(.sent, lines.line, lines.detail, for: status.captureId, hideAfter: VoiceNoteRules.outcomeSeconds)
+            // A note the bridge kept with a suggestion offers it as a button, a little longer.
+            let offer = VoiceNoteText.offer(status.suggestion)
+            suggestion = offer.flatMap { _ in status.suggestion.map { (status.captureId, $0.action) } }
+            show(.sent, lines.line, lines.detail, for: status.captureId,
+                 hideAfter: offer == nil ? VoiceNoteRules.outcomeSeconds : VoiceNoteRules.outcomeSeconds * 2, offer: offer ?? "")
         } else if !shown {
             var note = VoiceNoteSnapshot()
             note.phase = .sent
             note.line = lines.line
             note.detail = lines.detail
             onOutcome?(note)
+        }
+    }
+
+    /// The bar's suggestion button ("Start as task"): the bridge does it, and the bar says how that went.
+    func takeSuggestion() {
+        guard let taken = suggestion, shownId == taken.id, current == nil else { return }
+        suggestion = nil
+        Log.write("note: \(taken.id.prefix(8)) suggestion taken (\(taken.action))")
+        show(.sending, "On it…", "", for: taken.id, hideAfter: nil)
+        Task {
+            guard let status = await VoiceNoteAPI.act(taken.id, action: taken.action) else {
+                show(.failed, "That didn’t work", "The note is still kept on the bridge.", for: taken.id, hideAfter: VoiceNoteRules.outcomeSeconds)
+                return
+            }
+            let lines = VoiceNoteText.outcome(status)
+            show(.sent, lines.line, lines.detail, for: taken.id, hideAfter: VoiceNoteRules.outcomeSeconds)
         }
     }
 
@@ -319,14 +343,17 @@ final class VoiceNotes: ObservableObject {
 
     // MARK: - The bar
 
-    private func show(_ phase: VoiceNoteSnapshot.Phase, _ line: String, _ detail: String, for id: String?, hideAfter: TimeInterval?) {
+    private func show(_ phase: VoiceNoteSnapshot.Phase, _ line: String, _ detail: String, for id: String?, hideAfter: TimeInterval?,
+                      offer: String = "") {
         // A note started meanwhile owns the bar: an older one's news waits for nobody.
         if let id, current != nil, current?.id != id { return }
         if let id { shownId = id }
+        if offer.isEmpty, phase != .sending { suggestion = nil }
         var next = snapshot
         next.phase = phase
         next.line = line
         next.detail = detail
+        next.offer = offer
         next.level = 0
         if !(phase == .sending || phase == .sent) { next.startedAt = nil }
         snapshot = next
@@ -341,6 +368,7 @@ final class VoiceNotes: ObservableObject {
             idle.phase = .idle
             idle.line = ""
             idle.detail = ""
+            idle.offer = ""
             idle.startedAt = nil
             self.snapshot = idle
         }
