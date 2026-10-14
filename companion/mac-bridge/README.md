@@ -17,7 +17,9 @@ And it is the hub for the SamRabbit iPhone app, its widgets and the Apple Watch 
 per-device tokens, T3 Code tasks through the bridge's own T3 session). See "Mobile API" below.
 
 For the desktop app's Agent Dock it keeps one list of every agent on this Mac that waits for Samin (T3 Code threads,
-Claude Code and Codex sessions, SamRabbit chats) and acts on them, and it is the dock's voice. See "Agent Dock" below.
+Claude Code and Codex sessions, SamRabbit chats) and acts on them, and it is the dock's voice. The iPhone gets the same
+list, and the SamRabbit window the phone's summary, agenda, block time, journal note and paired devices. See "Agent
+Dock" below.
 
 ```
 R1 runtime ──HTTP (LAN, bearer token)──▶ samrabbit_bridge.py on the Mac ──▶ heptabase CLI ──▶ Heptabase app
@@ -340,7 +342,7 @@ sync routes, which keep epoch milliseconds):
 
 | Route | What |
 |---|---|
-| `GET /v1/mobile/summary` | `{generatedAt, mac: {name, online, screenLocked}, r1: {lastSeenAt, live, liveConversationId, liveTitle}, t3: {available, needsYou, working, threads: [top 5 {threadId, title, project, status, updatedAt, summary}]}, calendar: {available, next: [≤3 {title, startsAt, endsAt, allDay, location, meetingUrl}]}, latestConversation: {conversationId, title, lastAt, preview, live}, journal: {available}, transcribe: {available, reason?}}`. Served from caches (< 300 ms) that a worker refreshes while a device is active (T3 every 10 s, calendar every 120 s, journal every 5 min, screen lock every 15 s, transcription every 60 s). `transcribe` tells the phone and the watch whether `POST /v1/mobile/transcribe` works now (the same `reason`s as `/health`, e.g. `helper_missing`, `model_downloading`, `permission_denied`); a recording that just worked or failed updates it at once. The journal check is one read of today through the bridge's own read slots (at most two Heptabase CLI reads at once), and a note added from the phone counts as a check. A part that can't be read says `available: false` with a `reason` (`loading` while a cold start is still reading it). |
+| `GET /v1/mobile/summary` | `{generatedAt, mac: {name, online, screenLocked}, r1: {lastSeenAt, live, liveConversationId, liveTitle}, t3: {available, needsYou, working, threads: [top 5 {threadId, title, project, status, updatedAt, summary}]}, calendar: {available, next: [≤3 {title, startsAt, endsAt, allDay, location, meetingUrl}]}, latestConversation: {conversationId, title, lastAt, preview, live}, journal: {available}, transcribe: {available, reason?}}`. Served from caches (< 300 ms) that a worker refreshes while a device is active (T3 every 10 s, calendar every 120 s, journal every 5 min, screen lock every 15 s, transcription every 60 s). `transcribe` tells the phone and the watch whether `POST /v1/mobile/transcribe` works now (the same `reason`s as `/health`, e.g. `helper_missing`, `model_downloading`, `permission_denied`); a recording that just worked or failed updates it at once. The journal check is one read of today through the bridge's own read slots (at most two Heptabase CLI reads at once), and a note added from the phone counts as a check. A part that can't be read says `available: false` with a `reason` (`loading` while a cold start is still reading it). `r1.lastSeenAt` is the later of the R1's last conversation activity and its last request to this bridge with its own token from the network (the journal, Mac control, conversation sync, `/health`; remembered while the bridge runs). |
 | `GET /v1/mobile/conversations?limit=&before=&q=`, `GET /v1/mobile/conversations/<id>[/events?after=]`, `GET /v1/mobile/stream?after=` (SSE), `GET /v1/mobile/blobs/<sha256>` | the desktop sync API's own handlers (same JSON and SSE format), authorized by the mobile token. Phones and watches share 4 of the sync store's 8 live streams (so the desktop app always has some; 503 `too_many_streams` beyond that), at most 2 per device (a third one, e.g. a reconnect, closes that device's oldest); revoking a device ends its open streams at once |
 | `GET /v1/mobile/ui/artifacts/<id>` (+ `/image` JPEG, `/document` HTML with the generated-UI CSP) | a generated UI's status and content |
 | `POST /v1/mobile/ui/generate {prompt, data?, requestId?}` | → `202 {artifactId, status, conversationId}`; the request and the result are recorded in the day's **"Phone"** conversation (`phone-YYYYMMDD`, never live), so the desktop app shows them too. A request the generator would refuse (bad `data`, 503 `genui_busy`) records nothing. With the phone's own `requestId` (1–96 of `A-Z a-z 0-9 . _ : -`), a retry after a timeout answers the same visual and records the request once |
@@ -349,7 +351,7 @@ sync routes, which keep epoch milliseconds):
 | `POST /v1/mobile/t3/threads/<id>/message {text}` · `/respond {decision: "approve"\|"deny"}` or `{answer}` (or `{answers: {questionId: …}}`) · `/stop` | `thread.turn.start` / `thread.approval.respond` (approve → accept, deny → decline) / `thread.user-input.respond` (option values as T3 expects; as on the R1, an answer may be the label, a shortened label, a number or a position such as "the first one"; other words go as free text only when the question allows it) / `thread.turn.interrupt` |
 | `POST /v1/mobile/t3/threads {text, projectId?, title?}` | `thread.create` + `thread.turn.start` → `{threadId, title, projectId, projectName, placement}`. Without `projectId`: a project the request names, coding work to the most recently active code project, everything else to the orchestration project (`SAMRABBIT_T3_ORCHESTRATION_PROJECT` id, e.g. from `install.sh --t3-orchestration-project`, else the project titled `SAMRABBIT_T3_ORCHESTRATION_TITLE`, default T3's agent project "Hermes", else T3's agent workspace project, else the most recent one). See "Placement compared with the R1" below. |
 | `GET /v1/mobile/t3/projects` | `{projects: [{projectId, name, orchestration}], orchestrationProjectId}` |
-| `GET /v1/mobile/calendar/agenda?hours=24` | Composio `GOOGLECALENDAR_EVENTS_LIST` (single events, by start time) on the bridge's calendar (`primary`), cached 120 s: `{available, timezone, from, to, events: [{eventId, title, startsAt, endsAt, allDay, location, meetingUrl}], cached}` (no cancelled, declined or working-location entries) |
+| `GET /v1/mobile/calendar/agenda?hours=24` (or `?days=1..7`) | Composio `GOOGLECALENDAR_EVENTS_LIST` (single events, by start time) on the bridge's calendar (`primary`), cached 120 s: `{available, timezone, from, to, events: [{eventId, title, startsAt, endsAt, allDay, location, meetingUrl}], cached}` (no cancelled, declined or working-location entries) |
 | `POST /v1/mobile/calendar/block {minutes, title?}` | an event from now (rounded down to the minute) for `minutes` (5–720), in `SAMRABBIT_TIMEZONE` (default America/New_York), default title "Focus" |
 | `POST /v1/mobile/calendar/events {title, startsAt, endsAt}` | the same writer as `/v1/calendar/events` |
 | `POST /v1/mobile/journal {text}` | appends `**HH:MM** <text>` (the words escaped, nothing added) to today's Heptabase journal; explicit notes only. As on the R1 (its "redact secrets" setting is on by default), API keys, tokens, private keys, "the code is 123456" and "password is …" are written as `[redacted]`, and the answer then says `redacted: true` |
@@ -423,6 +425,7 @@ answer with ElevenLabs (the Jarvis voice). Every route takes the mobile token, f
 | `POST /v1/mobile/assistant/turn` | audio body (`audio/wav`, `audio/mp4`, `audio/x-m4a`; ≤ 2 MiB and 60 s) with `X-SamRabbit-Conversation` (an id, or empty for a new conversation), `X-SamRabbit-Turn` (a uuid; a retry gets the same answer and the agent runs once), optional `X-SamRabbit-Device-Time`, optional `?lang=`; or JSON `{text, conversationId?, turnId}` → `{conversationId, turnId, heard, say, audio: {mime: "audio/mpeg", b64} \| null, expectReply, endConversation, actions: [{kind, title, threadId?, artifactId?, eventId?, project?}], timings: {stt, agent, tts}}` |
 | `GET /v1/mobile/assistant/announcements?conversationId=&since=` | `{items: [{id, say, audio \| null, kind: needs_you \| done \| error, threadId, title}], cursor}`: T3 tasks that started needing Samin, finished or failed since the conversation began, each once per conversation; the next turn tells the agent what was announced ("approve it") |
 | `POST /v1/mobile/assistant/end {conversationId}` | optional: the watch stopped listening (`conversation.ended`) |
+| `POST /v1/mobile/assistant/cancel {conversationId, turnId?}` | `{ok, cancelled}`: stop the reply being made (tap to interrupt; a streamed one ends with `done {interrupted: true}`). With `turnId` (the turn's `X-SamRabbit-Turn` / `turnId`) only that turn is stopped: a tap on a reply that ended meanwhile never stops the turn typed or said right after it (`cancelled: false`); 400 `invalid_turn` for a malformed one. Without it, whatever is being said now (older clients) |
 
 - Nothing heard, or only "uh" / "hmm": `{heard: "", say: "", audio: null, expectReply: true}` without the agent.
   "Bye", "stop", "never mind", "thanks, that's all": a short goodbye with `endConversation: true`, without the agent.
@@ -528,7 +531,8 @@ interrupted, never answered by Claude. The summary says `assistant: {available, 
   earlier response is still active (`conversation_already_has_active_response`), the bridge cancels that stale
   response, ignores its words, audio and calls (each call gets a "cancelled" output and never runs), and sends
   `response.create` again after its `response.done` (or after 3 s). `POST /v1/mobile/assistant/cancel` sends
-  `response.cancel` and `output_audio_buffer.clear` (the stream ends with `done {interrupted: true}`). Announcements
+  `response.cancel` and `output_audio_buffer.clear` (the stream ends with `done {interrupted: true}`); one that names
+  another turn than the current one does nothing. Announcements
   are said by the session itself (`{"announce": id}` turns: a `[T3 update]` item and `response.create` with
   instructions to say the line verbatim).
 - A live check: `/usr/bin/python3 -I companion/mac-bridge/realtime/smoke_turn.py` pairs a temporary device, sends one
@@ -676,6 +680,29 @@ memory and opens nothing (answers say `dryRun: true`) unless started with `--inb
 `folder_missing` / `agent_unavailable`, 400 `invalid_*`, and T3's own (`t3_request_not_pending`, `t3_unavailable`, …).
 `/health` adds `inbox: {available, revision, items, needsYou}`.
 
+**On the iPhone** (`/v1/mobile/inbox*`, CONTRACTS-WAVE7): the same list, revisions, long poll, items and actions for
+a paired phone's own mobile token from a LAN or Tailscale peer (the mobile API's rule; the R1's token, the desktop
+token and the assistant's internal token get 401 / 403), so the phone shows Claude Code and Codex sessions too and
+what it marks seen is seen in the dock:
+
+| Route | Answer |
+|---|---|
+| `GET /v1/mobile/inbox?after=<revision>&wait=<0..25>` · `GET /v1/mobile/inbox/items/<id>` · `GET /v1/mobile/inbox/targets` | as `/v1/desktop/inbox*` (one revision for the dock and the phone), except that the phone's items never list `open` in `can` (a SamRabbit chat, `chat:<conversationId>`, is that conversation in the phone's own Chats) |
+| `POST /v1/mobile/inbox/items/<id>/approve \| answer \| reply \| stop \| seen` · `POST /v1/mobile/inbox/new` | as the dock's. A reply to a Claude or Codex CLI session nobody runs continues it in a new Terminal window on the Mac, as from the dock, and says so: `202 {ok, how: "terminal", message: "It continues in a new Terminal window on the Mac."}` (a dev copy: `dryRun: true` and that nothing was opened). A live one (or one resumed in the last 15 s): 409 `session_live` ("answer it there"), and nothing opens |
+| `POST /v1/mobile/inbox/items/<id>/open` | 409 `unsupported_action`: opening is the Mac's (the dock or the SamRabbit window), so the phone never brings anything up on the Mac's screen |
+
+**The SamRabbit window** (CONTRACTS-WAVE7): the phone's own handlers (`samrabbit_mobile.py`) for the desktop token
+from this Mac only, the same rule as the dock's routes (401 without it, 403 from any other machine or a foreign
+`Origin`):
+
+| Route | Answer |
+|---|---|
+| `GET /v1/desktop/summary` | `GET /v1/mobile/summary`'s answer, plus `r1.online` (the R1 talked to this bridge with its own token from the network in the last 15 minutes, or a conversation on it is live; the R1 sends no heartbeat and reports no battery, so an idle R1 shows its `lastSeenAt` instead) and `devices` (as below). Reading it keeps the summary's caches warm, as a phone does |
+| `GET /v1/desktop/calendar/agenda?days=1..7` | the phone's agenda for the next `days` (default 1; `hours=` works too), from now |
+| `POST /v1/desktop/calendar/block {minutes, title?}` | the phone's "Block N minutes" (5–720, default title "Focus") |
+| `POST /v1/desktop/journal {text}` | the phone's explicit note: `**HH:MM** <text>` in today's journal, the words escaped and secrets redacted, nothing added (`redacted: true` when something was); only for something Samin typed and sent himself |
+| `GET /v1/desktop/devices` · `DELETE /v1/desktop/devices/<id>` | `{devices: [{deviceId, name, platform, createdAt, lastSeenAt, parentId?}]}` / unpair (`{ok, revoked}`; a phone takes its watch with it), as `/v1/mobile/devices*` |
+
 **The dock's voice** (`/v1/desktop/assistant/turn | session | cancel | end | announcements`): the watch assistant's
 routes (above), bodies and streaming protocol unchanged, for the desktop token from this Mac only, as the one device
 "mac". Its conversations are "Mac" ones in the sync store (`mac-<conversationId>`, titled `Mac: <first words>`, origin
@@ -709,8 +736,8 @@ and the watch never share a conversation.
   are written; conversation text and image bytes never are.
   Generated UIs log only the artifact id, the outcome and timings: never the prompt, the data or the widget.
   Calendar changes log only the route, the status and an error code: never a title, a time or Composio's output.
-  The desktop inbox logs route templates (`/v1/desktop/inbox/items/{id}/reply`) and what kind of action it took:
-  never an item id, a title, a prompt, a reply, a command, a message or a folder.
+  The desktop inbox logs route templates (`/v1/desktop/inbox/items/{id}/reply`, `/v1/mobile/inbox/items/{id}/reply`)
+  and what kind of action it took: never an item id, a title, a prompt, a reply, a command, a message or a folder.
   Mobile routes are logged as templates (`/v1/mobile/t3/threads/{id}/respond`) with the status and an error code:
   never a mobile token, a pairing code, a device id, thread text, prompts, notes, events or images; T3 pairing logs
   only "t3 paired (expires <date>)" and its back-off notices ("next pairing in N min"). Transcriptions log only the
@@ -810,7 +837,15 @@ followed, a live Codex CLI, a reply that starts with `-`, a session resumed twic
 and that nothing about an item reaches the log. `tests/test_desktop_assistant.py`
 drives `/v1/desktop/assistant/*` with the watch assistant's fakes: the auth, the "Mac" conversation in the sync store
 (and that the Mac and the watch never share one), the Mac's prompt and time line, warm-up, cancel, end and
-announcements, and a streamed realtime turn with the Mac addendum.
+announcements, and a streamed realtime turn with the Mac addendum. `tests/test_mobile_inbox.py` drives the phone's
+`/v1/mobile/inbox*` against the dock's fakes: the mobile-token auth (401 for the R1's, the desktop's and a wrong
+token, 403 off the LAN and for the assistant's own token), the same list and revision as the dock without `open`, the
+long poll, items, seen shared with the dock, T3's dispatch bodies, new tasks, a reply to a live session that opens
+nothing, one that resumes in Terminal and says so, `/open` refused, and the log. `tests/test_desktop_window.py`
+drives `/v1/desktop/summary`, `/calendar/agenda|block`, `/journal` and `/devices*`: the desktop-token auth, the summary
+against the phone's (plus `r1.online` and `devices`), when the R1 counts as seen (its token from the network only),
+agendas by days, block time, the verbatim note in the fake journal, unpairing a phone with its watch. A cancel that
+names a turn other than the current one (`test_realtime.py`) never stops the next turn.
 
 ## Troubleshooting
 

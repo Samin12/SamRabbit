@@ -51,6 +51,14 @@ Routes (loopback peer + the desktop token only: the desktop sync API's rule, thr
   the Claude and Codex providers T3 offers with their models, from T3's ``server.getConfig``).
 * ``POST /v1/desktop/inbox/new {text, projectId?, agent?, model?, title?}`` -> ``202 {itemId: "t3:<id>", ...}``.
 
+The iPhone (CONTRACTS-WAVE7) gets the same list, revisions, long poll, items and actions at ``/v1/mobile/inbox*``
+(``GET /v1/mobile/inbox``, ``/items/<id>``, ``/targets``; ``POST /new``, ``/items/<id>/approve|answer|reply|stop|seen``)
+with its own mobile token from a LAN or tailnet peer (the mobile API's rule, ``samrabbit_mobile.device_denied``), so
+what it marks seen is seen on the Mac too. ``open`` stays the Mac's: the phone's items never list it in ``can`` and
+``/open`` answers 409 ``unsupported_action``, so nothing comes up on the Mac's screen because of the phone, except that
+a reply to a Claude or Codex session nobody runs starts it in a new Terminal window on the Mac, as from the dock (the
+answer says so in ``message``); a live one answers 409 ``session_live`` and opens nothing.
+
 An item: ``{id: "t3:<threadId>" | "claude:<sessionId>" | "codex:<threadId>" | "chat:<conversationId>", source, agent,
 title, project, cwd, status: needs-approval | needs-input | error | done | working | idle, statusLabel, summary (at
 most 240 characters: what it needs, else its last answer), updatedAt, unread, pending: {approvals, inputs}, can,
@@ -101,6 +109,7 @@ except Exception:  # noqa: BLE001  # pragma: no cover
 _LOG = logging.getLogger("samrabbit-bridge.inbox")
 
 PREFIX = "/v1/desktop/inbox"
+MOBILE_PREFIX = "/v1/mobile/inbox"  # the iPhone's twin (its mobile token; no ``open``)
 DEFAULT_DIR = "~/Library/Application Support/SamRabbit/inbox"
 STATE_FILE = "inbox-state.json"
 MAX_ITEMS = 60
@@ -1373,17 +1382,20 @@ class _Route:
         self.pattern = re.compile("^" + pattern + "$")
         self.label = label
         self.methods = methods
+        self.mobile = label.startswith(MOBILE_PREFIX)  # the iPhone's twin: the mobile token, its own item view
 
 
 _ID = r"(?P<id>[a-z0-9]{2,8}(?::|%3[Aa])[A-Za-z0-9._:%\-]{1,200})"
-ROUTES: Tuple[_Route, ...] = (
-    _Route(r"/v1/desktop/inbox", "/v1/desktop/inbox", {"GET": "inbox"}),
-    _Route(r"/v1/desktop/inbox/targets", "/v1/desktop/inbox/targets", {"GET": "targets"}),
-    _Route(r"/v1/desktop/inbox/new", "/v1/desktop/inbox/new", {"POST": "new"}),
-    _Route(r"/v1/desktop/inbox/items/" + _ID, "/v1/desktop/inbox/items/{id}", {"GET": "item"}),
-    _Route(r"/v1/desktop/inbox/items/" + _ID + r"/(?P<action>approve|answer|reply|stop|seen|open)",
-           "/v1/desktop/inbox/items/{id}/{action}", {"POST": "action"}),
-)
+ROUTES: Tuple[_Route, ...] = tuple(
+    route for prefix in (PREFIX, MOBILE_PREFIX) for route in (
+        _Route(prefix, prefix, {"GET": "inbox"}),
+        _Route(prefix + "/targets", prefix + "/targets", {"GET": "targets"}),
+        _Route(prefix + "/new", prefix + "/new", {"POST": "new"}),
+        _Route(prefix + "/items/" + _ID, prefix + "/items/{id}", {"GET": "item"}),
+        # ``open`` matches on the phone's routes too, to say it is the Mac's (409 unsupported_action).
+        _Route(prefix + "/items/" + _ID + r"/(?P<action>approve|answer|reply|stop|seen|open)",
+               prefix + "/items/{id}/{action}", {"POST": "action"}),
+    ))
 
 
 class InboxService:
@@ -1497,6 +1509,14 @@ class InboxService:
         if _sync is not None:
             return _sync.desktop_request_denied(handler)
         return InboxError(503, "desktop_unavailable", "The desktop token check is not installed.")
+
+    def _device_denied(self, handler: Any) -> Optional[Exception]:
+        """The phone's rule for ``/v1/mobile/inbox*``: the mobile API's own (a paired device's token from a LAN or
+        tailnet peer)."""
+        mobile = getattr(self.server, "mobile", None)
+        if mobile is not None and hasattr(mobile, "device_denied"):
+            return mobile.device_denied(handler)
+        return InboxError(503, "mobile_unavailable", "The mobile API is not running on the Mac bridge.")
 
     # ------------------------------------------------------------------ building the list
     def refresh(self, *, force: bool = False, blocking: bool = True) -> _State:
@@ -1900,7 +1920,7 @@ class InboxService:
     # ------------------------------------------------------------------ HTTP
     @staticmethod
     def handles(route: str) -> bool:
-        return route == PREFIX or route.startswith(PREFIX + "/")
+        return any(route == prefix or route.startswith(prefix + "/") for prefix in (PREFIX, MOBILE_PREFIX))
 
     @staticmethod
     def route_label(route: str) -> str:
@@ -1909,11 +1929,14 @@ class InboxService:
             if match:
                 action = match.groupdict().get("action")
                 return spec.label.replace("{action}", action) if action else spec.label
-        return "/v1/desktop/inbox/(other)"
+        return ("/v1/mobile/inbox" if _phone_route(route) else "/v1/desktop/inbox") + "/(other)"
 
     def serve(self, handler: Any, method: str, route: str) -> Tuple[int, Optional[str]]:
+        """``/v1/desktop/inbox*`` for the desktop app on this Mac, ``/v1/mobile/inbox*`` for a paired phone: the same
+        handlers (``mobile``: the phone's item view and words)."""
+        mobile = _phone_route(route)
         try:
-            denied = self._desktop_denied(handler)
+            denied = self._device_denied(handler) if mobile else self._desktop_denied(handler)
             if denied is not None:
                 raise denied
             found = None
@@ -1929,14 +1952,14 @@ class InboxService:
             if name is None:
                 raise InboxError(405, "method_not_allowed", "Use " + "/".join(sorted(spec.methods)) + ".")
             self._demand()
-            status, payload = getattr(self, "_r_" + name)(handler, params)
+            status, payload = getattr(self, "_r_" + name)(handler, params, spec.mobile)
         except Exception as error:  # noqa: BLE001 - every module's error answers with its own envelope
             status, payload = _error_answer(error)
-        _send(handler, status, payload)
+        _send(handler, status, payload, realm="samrabbit-mobile" if mobile else None)
         code = payload.get("error", {}).get("code") if isinstance(payload.get("error"), dict) else None
         return status, code
 
-    def _r_inbox(self, handler: Any, _params: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    def _r_inbox(self, handler: Any, _params: Dict[str, str], mobile: bool) -> Tuple[int, Dict[str, Any]]:
         query = _query(handler)
         after = _number(query, "after")
         wait = min(MAX_WAIT_SECONDS, _number(query, "wait") or 0)
@@ -1944,7 +1967,8 @@ class InboxService:
         if after is not None and after == state.revision and wait > 0:
             state = self._wait(after, wait)
         return 200, {"revision": state.revision, "updatedAt": state.updated_at, "counts": dict(state.counts),
-                     "sources": state.sources, "items": state.items}
+                     "sources": state.sources,
+                     "items": [_phone_view(item) for item in state.items] if mobile else state.items}
 
     def _wait(self, after: int, seconds: float) -> _State:
         """Long-poll: until the revision moves past ``after`` or ``seconds`` pass. The refresher speeds up while
@@ -1972,10 +1996,11 @@ class InboxService:
                 self._last_wait = self._monotonic()
         return self._state
 
-    def _r_item(self, _handler: Any, params: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    def _r_item(self, _handler: Any, params: Dict[str, str], mobile: bool) -> Tuple[int, Dict[str, Any]]:
         source, key = _parse_id(params["id"])
         if source == "t3":
-            return 200, self._t3_view(key)
+            value = self._t3_view(key)
+            return 200, dict(value, item=_phone_view(value["item"])) if mobile else value
         item = self._find(source + ":" + key)
         if item is None:
             raise InboxError(404, "item_not_found", "That is not in the inbox.")
@@ -1987,7 +2012,7 @@ class InboxService:
             messages = self.codex.messages(record) if record is not None else []
         else:
             messages = self._chat_messages(key)
-        return 200, {"item": item, "messages": messages}
+        return 200, {"item": _phone_view(item) if mobile else item, "messages": messages}
 
     def _t3_view(self, thread_id: str) -> Dict[str, Any]:
         """A T3 thread read now: its open requests and last messages from one thread read, and its item with them."""
@@ -2048,11 +2073,14 @@ class InboxService:
         return hub
 
     # ------------------------------------------------------------------ actions
-    def _r_action(self, handler: Any, params: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    def _r_action(self, handler: Any, params: Dict[str, str], mobile: bool) -> Tuple[int, Dict[str, Any]]:
         source, key = _parse_id(params["id"])
         action = params["action"]
         body = _optional_body(handler) if action in ("stop", "seen", "open") else _json_body(handler)
         item_id = source + ":" + key
+        if action == "open" and mobile:
+            # The phone never brings anything up on the Mac's screen: opening is the dock's and the window's.
+            raise _unsupported("Open it on the Mac (the dock or the SamRabbit window).")
         if source == "t3":
             return self._t3_action(key, action, body)
         item = self._find(item_id)
@@ -2065,10 +2093,12 @@ class InboxService:
         if action == "open":
             return 200, self._open(source, key, item)
         if action == "reply":
-            return self._reply(source, key, item, body)
+            return self._reply(source, key, item, body, mobile)
         if source == "chat":
-            raise _unsupported("This is a SamRabbit conversation: open it in the app.")
-        raise _unsupported("Only the terminal or the app that runs it can do that: open it to answer there.")
+            raise _unsupported("This is a SamRabbit conversation: answer it in Chats." if mobile else
+                               "This is a SamRabbit conversation: open it in the app.")
+        raise _unsupported("Only the terminal or the app that runs it on the Mac can do that." if mobile else
+                           "Only the terminal or the app that runs it can do that: open it to answer there.")
 
     def _t3_action(self, thread_id: str, action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         hub = self._t3_hub()
@@ -2154,24 +2184,34 @@ class InboxService:
         _LOG.info("inbox resumed a %s session in Terminal", source)
         return {"opened": True, "how": "terminal", **dry}
 
-    def _reply(self, source: str, key: str, item: Dict[str, Any], body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    def _reply(self, source: str, key: str, item: Dict[str, Any], body: Dict[str, Any],
+               mobile: bool = False) -> Tuple[int, Dict[str, Any]]:
+        """A Claude or Codex CLI session nobody runs: continued in a new Terminal window on the Mac (from the phone
+        too, and then the answer says so); a live one is answered where it runs, so nothing opens."""
         text = _reply_text(body)
         if source == "chat":
-            raise _unsupported("This is a SamRabbit conversation: open it in the app.")
+            raise _unsupported("This is a SamRabbit conversation: answer it in Chats." if mobile else
+                               "This is a SamRabbit conversation: open it in the app.")
         if source == "codex":
             record = self.codex.find(key)
             if record is not None and record.desktop:
-                raise _unsupported("Codex Desktop owns this thread: open it there to reply.")
+                raise _unsupported("Codex Desktop owns this thread: reply in the ChatGPT app on the Mac." if mobile
+                                   else "Codex Desktop owns this thread: open it there to reply.")
         if item.get("live") or self._just_launched(source + ":" + key) or self._owner(source, key) is not None:
-            raise InboxError(409, "session_live", "It's open in a terminal: open it to answer there.")
+            raise InboxError(409, "session_live", "It's open in a terminal on the Mac: answer it there." if mobile
+                             else "It's open in a terminal: open it to answer there.")
         cwd = self._folder_of(item)
         # ``--`` ends the options: a reply that starts with "-" (a list, "-p ...") is the prompt, never a flag.
         argv = [self._tool("claude"), "--resume", key, "--", text] if source == "claude" else \
             [self._tool("codex"), "resume", key, "--", text]
         self.launcher.terminal(cwd, argv)
         self._launched_now(source + ":" + key)
-        _LOG.info("inbox continued a %s session in Terminal", source)
-        return 202, {"ok": True, "how": "terminal", **({"dryRun": True} if self.launcher.dry_run else {})}
+        _LOG.info("inbox continued a %s session in Terminal%s", source, " (from the phone)" if mobile else "")
+        value: Dict[str, Any] = {"ok": True, "how": "terminal", **({"dryRun": True} if self.launcher.dry_run else {})}
+        if mobile:
+            value["message"] = ("A test copy of the Mac bridge: no Terminal window was opened." if self.launcher.dry_run
+                                else "It continues in a new Terminal window on the Mac.")
+        return 202, value
 
     def _launched_now(self, item_id: str) -> None:
         if self.launcher.dry_run:
@@ -2208,7 +2248,7 @@ class InboxService:
         return cwd
 
     # ------------------------------------------------------------------ new tasks
-    def _r_targets(self, _handler: Any, _params: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    def _r_targets(self, _handler: Any, _params: Dict[str, str], _mobile: bool) -> Tuple[int, Dict[str, Any]]:
         return 200, self.targets()
 
     def targets(self) -> Dict[str, Any]:
@@ -2318,7 +2358,7 @@ class InboxService:
             selection["options"] = recent["options"]  # the same effort / context settings as last time
         return selection
 
-    def _r_new(self, handler: Any, _params: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    def _r_new(self, handler: Any, _params: Dict[str, str], _mobile: bool) -> Tuple[int, Dict[str, Any]]:
         body = _json_body(handler)
         text = body.get("text")
         project_id = body.get("projectId")
@@ -2591,6 +2631,16 @@ def _drafting(store: Any, conversation: Dict[str, Any], now_ms: int) -> bool:
 # --------------------------------------------------------------------------- HTTP plumbing
 
 
+def _phone_route(route: str) -> bool:
+    return route == MOBILE_PREFIX or route.startswith(MOBILE_PREFIX + "/")
+
+
+def _phone_view(item: Dict[str, Any]) -> Dict[str, Any]:
+    """An item as the phone gets it: the same, but ``open`` (the Mac's alone) is not in ``can``. A copy: the list's
+    items are shared with the dock."""
+    return dict(item, can=[action for action in item.get("can") or [] if action != "open"])
+
+
 def _parse_id(raw: str) -> Tuple[str, str]:
     match = _ITEM_ID.match(unquote(raw))
     if not match:
@@ -2684,18 +2734,20 @@ def _optional_body(handler: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _send(handler: Any, status: int, payload: Dict[str, Any]) -> None:
+def _send(handler: Any, status: int, payload: Dict[str, Any], *, realm: Optional[str] = None) -> None:
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     try:
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
         handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
+        if status == 401 and realm:  # the phone's routes answer like the rest of the mobile API
+            handler.send_header("WWW-Authenticate", f'Bearer realm="{realm}"')
         handler.send_header("Connection", "close")
         handler.end_headers()
         handler.wfile.write(body)
     except OSError:
-        pass  # the desktop app went away
+        pass  # the desktop app (or the phone) went away
 
 
 def make_service(*, installed: bool, state_dir: Optional[str] = None, launch: bool = False) -> InboxService:

@@ -124,8 +124,8 @@ class DesktopTurnTest(DesktopVoiceMixin, AssistantBase):
         self.assertEqual(("claude", True), (warm["brain"], warm["ready"]))
         conversation = warm["conversationId"]
         self.script({"reply": REPLY})
-        status, value = self.desk(UTTERANCE, conversation=conversation)
-        self.assertEqual((200, conversation), (status, value["conversationId"]))
+        status, turn = self.desk(UTTERANCE, conversation=conversation)
+        self.assertEqual((200, conversation), (status, turn["conversationId"]))
         status, value = self.call("GET", f"/v1/desktop/assistant/announcements?conversationId={conversation}",
                                   desktop=True)
         self.assertEqual(200, status, value)
@@ -133,6 +133,12 @@ class DesktopTurnTest(DesktopVoiceMixin, AssistantBase):
         status, value = self.call("POST", "/v1/desktop/assistant/cancel", {"conversationId": conversation},
                                   desktop=True)
         self.assertEqual((200, {"ok": True, "cancelled": False}), (status, value), "nothing was being said")
+        status, value = self.call("POST", "/v1/desktop/assistant/cancel",
+                                  {"conversationId": conversation, "turnId": turn["turnId"]}, desktop=True)
+        self.assertEqual((200, {"ok": True, "cancelled": False}), (status, value), "a cancel may name its turn")
+        status, value = self.call("POST", "/v1/desktop/assistant/cancel",
+                                  {"conversationId": conversation, "turnId": ["x"]}, desktop=True)
+        self.assertEqual((400, "invalid_turn"), (status, value["error"]["code"]))
         status, value = self.call("POST", "/v1/desktop/assistant/end", {"conversationId": conversation}, desktop=True)
         self.assertEqual((200, {"ok": True, "ended": True}), (status, value))
         self.assertEqual("conversation.ended", self.mac_events(conversation)[-1]["type"])

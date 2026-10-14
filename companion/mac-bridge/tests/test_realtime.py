@@ -474,6 +474,50 @@ class SessionTest(RealtimeBase):
                                   token=self.watch)
         self.assertEqual({"ok": True, "cancelled": False}, value, "nothing is running now")
 
+    def test_a_cancel_names_its_turn_and_never_stops_the_next_one(self) -> None:
+        # The iPhone review: a tap on a reply that ended meanwhile stopped the turn typed right after it.
+        long = "This is a long answer that goes on and on."
+        self.rt_script({"say": ANSWER, "ms": 300}, {"say": long, "ms": 3000, "pace": 0.05})
+        first = self.done(self.say_turn("hi"))
+        conversation, first_turn = first["conversationId"], first["turnId"]
+        second_turn = str(uuid.uuid4())
+        answers: List[Dict[str, Any]] = []
+
+        def late_tap(kind: str, _payload: bytes) -> None:
+            if kind == "A" and not answers:
+                answers.append(self.call("POST", "/v1/mobile/assistant/cancel",
+                                         {"conversationId": conversation, "turnId": first_turn}, token=self.watch)[1])
+
+        status, _headers, items = self.stream({"text": "and the next one?", "turnId": second_turn,
+                                               "conversationId": conversation}, on_frame=late_tap)
+        self.assertEqual(200, status, items)
+        self.assertEqual([{"ok": True, "cancelled": False}], answers, "the first turn is over: nothing to stop")
+        done = self.events_of(items)[-1]
+        self.assertEqual(("done", second_turn, None), (done["type"], done["turnId"], done.get("interrupted")))
+        self.assertEqual(3000 * 32, len(self.audio_of(items)), "the second reply played to its end")
+        self.assertNotIn("response.cancel", [event["type"] for event in self.received()])
+        # A cancel that names the turn being said stops it, as one without a turn id does.
+        third_turn = str(uuid.uuid4())
+        answers.clear()
+
+        def tap(kind: str, _payload: bytes) -> None:
+            if kind == "A" and not answers:
+                answers.append(self.call("POST", "/v1/mobile/assistant/cancel",
+                                         {"conversationId": conversation, "turnId": third_turn}, token=self.watch)[1])
+
+        status, _headers, items = self.stream({"text": "tell me everything", "turnId": third_turn,
+                                               "conversationId": conversation}, on_frame=tap)
+        self.assertEqual([{"ok": True, "cancelled": True}], answers)
+        done = self.events_of(items)[-1]
+        self.assertEqual((third_turn, True), (done["turnId"], done.get("interrupted")))
+        self.assertLess(len(self.audio_of(items)), 3000 * 32)
+        for body, code in (({"conversationId": conversation, "turnId": 7}, "invalid_turn"),
+                           ({"conversationId": conversation, "turnId": "not a turn!"}, "invalid_turn"),
+                           ({"turnId": third_turn}, "invalid_conversation")):
+            with self.subTest(body=body):
+                status, value = self.call("POST", "/v1/mobile/assistant/cancel", body, token=self.watch)
+                self.assertEqual((400, code), (status, value["error"]["code"]))
+
     def test_the_smoke_test_script(self) -> None:
         import subprocess
 

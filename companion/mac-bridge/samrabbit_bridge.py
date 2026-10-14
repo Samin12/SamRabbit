@@ -32,6 +32,9 @@ The iPhone app, its widgets and the Apple Watch (``samrabbit_mobile.py``, T3 thr
 The desktop app's Agent Dock (``samrabbit_inbox.py``): ``/v1/desktop/inbox*`` lists the T3 Code threads, Claude Code and
 Codex sessions and SamRabbit chats that wait for Samin, and acts on them; the dock's voice is
 ``/v1/desktop/assistant/*`` (the watch assistant's routes as the device "mac"). Loopback + the desktop token only.
+The iPhone gets the same inbox at ``/v1/mobile/inbox*`` (its mobile token; ``open`` stays the Mac's), and the
+SamRabbit window the phone's summary, agenda, block time, journal note and device list at ``/v1/desktop/summary``,
+``/v1/desktop/calendar/*``, ``/v1/desktop/journal`` and ``/v1/desktop/devices*`` (``samrabbit_mobile.py``).
 
 Every route needs ``Authorization: Bearer <token>`` (the token lives in
 ``~/.config/samrabbit/bridge-token``, mode 0600). Journal text and the token are
@@ -581,6 +584,16 @@ class BridgeServer(ThreadingHTTPServer):
             self.inbox.close()
         self.genui.stop()
 
+    def r1_heard(self, address: str) -> None:
+        """A request with the bridge token (the R1's) got in from ``address``: the summaries' ``r1`` say when it was
+        last around (``samrabbit_mobile.MobileService.r1_heard``; loopback, install.sh's own check, does not count)."""
+        if self.mobile is None:
+            return
+        try:
+            self.mobile.r1_heard(str(address))
+        except Exception:  # noqa: BLE001 - never fails the R1's request
+            _LOG.warning("r1 presence not recorded")
+
     @property
     def dry_run(self) -> bool:
         """True when journal writes never reach Heptabase (``--cli dry-run`` or the default for a checkout)."""
@@ -733,21 +746,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
             desktop_app.serve(self, method)  # its own auth (loopback + desktop token) and logging
             return
         status = 500
-        if self.server.mobile is not None and self.server.mobile.handles(route):
-            # /v1/mobile/*: per-device tokens from LAN or Tailscale peers (its own auth, errors and logging).
-            status, code = self.server.mobile.serve(self, method, route)
-            _LOG.info("%s %s %s %dms%s", method, self.server.mobile.route_label(route), status,
-                      int((time.monotonic() - started) * 1000), f" {code}" if code else "")
-            return
         if self.server.inbox is not None and self.server.inbox.handles(route):
-            # /v1/desktop/inbox*: the Agent Dock (loopback + desktop token; its own errors and logging).
+            # /v1/desktop/inbox*: the Agent Dock (loopback + desktop token), and its phone twin /v1/mobile/inbox*
+            # (the mobile token); its own errors and logging. Before the mobile API, which owns the rest of /v1/mobile/.
             status, code = self.server.inbox.serve(self, method, route)
             _LOG.info("%s %s %s %dms%s", method, self.server.inbox.route_label(route), status,
+                      int((time.monotonic() - started) * 1000), f" {code}" if code else "")
+            return
+        if self.server.mobile is not None and self.server.mobile.handles(route):
+            # /v1/mobile/*: per-device tokens from LAN or Tailscale peers (its own auth, errors and logging); also the
+            # SamRabbit window's twins of its routes under /v1/desktop/* (loopback + desktop token).
+            status, code = self.server.mobile.serve(self, method, route)
+            _LOG.info("%s %s %s %dms%s", method, self.server.mobile.route_label(route), status,
                       int((time.monotonic() - started) * 1000), f" {code}" if code else "")
             return
         if self.server.sync is not None and self.server.sync.handles(route):
             # /v1/sync/*: bearer + private peer from the R1, loopback + desktop token for the app.
             status, code = self.server.sync.serve(self, method, route)
+            if method in ("POST", "PUT") and status < 400:
+                self.server.r1_heard(self.client_address[0])  # the R1's own token got in: it is around
             _LOG.info("%s %s %s %dms%s", method, self.server.sync.route_label(route), status,
                       int((time.monotonic() - started) * 1000), f" {code}" if code else "")
             return
@@ -757,7 +774,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                      route.startswith((_MAC_PREFIX, genui.ROUTE_PREFIX, _CALENDAR_PREFIX))):
                 # Mac control and calendar changes never leave the local network, even with --allow-any-client.
                 raise BridgeError(403, "forbidden", "Only devices on the local network may use this bridge.")
-            if not self._authorized() and not self.server.genui.desktop_authorized(self, method, route):
+            if self._authorized():
+                self.server.r1_heard(self.client_address[0])
+            elif not self.server.genui.desktop_authorized(self, method, route):
                 raise BridgeError(401, "unauthorized", "A valid bridge token is required.")
             status, payload = self._route(method, route)
         except BridgeError as error:
