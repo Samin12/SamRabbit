@@ -196,7 +196,7 @@ final class TasksUITests: XCTestCase {
     // MARK: - Seen
 
     /// Opening a finished or failed task is seeing it, as on the Mac: a T3 thread that finished leaves Needs you once
-    /// its screen opened (the Mac is told, the badge drops); a T3 failure is marked seen but stays until T3 settles it.
+    /// its screen opened (the Mac is told, the badge drops); so does a T3 failure (settled until it fails again).
     func testOpeningATaskIsSeeingIt() throws {
         try launch()
         openTasks()
@@ -219,7 +219,7 @@ final class TasksUITests: XCTestCase {
         scrollTo(row("t3:t_deploy24"))
         XCTAssertTrue(row("t3:t_deploy24").exists, "now under Recent")
 
-        // A T3 failure: seen, but T3 keeps it as an error until it settles (the Mac's dock says the same).
+        // A T3 failure: seen, it is settled (the Mac's dock says the same): out of Needs you, its label kept.
         app.swipeDown()
         app.swipeDown()
         let backup = card("t3:t_backup")
@@ -227,8 +227,11 @@ final class TasksUITests: XCTestCase {
         backup.buttons["Nightly backup check"].tap()
         XCTAssertTrue(waitUntil(timeout: 10) { self.seenCount("t3:t_backup") == 1 }, "marked seen")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(card("t3:t_backup").waitForExistence(timeout: 10), "still needs you")
-        XCTAssertFalse(card("t3:t_backup").buttons["inbox-seen-t3:t_backup"].exists, "with nothing left to mark")
+        XCTAssertTrue(waitUntil(timeout: 10) { !self.card("t3:t_backup").exists }, "the failure left Needs you")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.badge("5") }, "and the badge")
+        scrollTo(row("t3:t_backup"))
+        XCTAssertTrue(row("t3:t_backup").exists, "now under Recent")
+        snap("phone-tasks-t3-failure-seen")
     }
 
     // MARK: - T3 Code down, an older bridge, a new task

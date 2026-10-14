@@ -703,6 +703,8 @@ class InboxFixtures:
             elif action == "seen":
                 item = self._get(item_id, "seen")
                 item["unread"] = False
+                if item["status"] == "error":
+                    item["status"] = "idle"  # as the real bridge: a failure he has seen is settled (T3's too)
             elif action == "open":
                 item = self._get(item_id, "open")
                 if item["source"] == "samrabbit":

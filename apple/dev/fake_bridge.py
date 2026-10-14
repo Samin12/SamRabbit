@@ -1033,9 +1033,12 @@ class FakeBridge:
         unread = bool(t.get("unread")) and status != "working"
         can = {"needs-approval": ["approve", "reply", "stop", "open"], "needs-input": ["answer", "reply", "stop", "open"],
                "working": ["reply", "stop", "open"]}.get(status, ["reply", "open"]) + (["seen"] if unread else [])
+        label = self.T3_LABELS.get(status, "Finished")
+        if status == "error" and not unread:
+            status = "idle"  # a failure he has seen settles until it fails again; its label still says so
         return {"id": "t3:" + t["threadId"], "source": "t3", "agent": t.get("agent") or "claude", "title": t["title"],
                 "project": t["projectName"], "cwd": "/Users/sam/" + t["projectName"].lower(), "status": status,
-                "statusLabel": self.T3_LABELS.get(status, "Finished"), "summary": t["summary"],
+                "statusLabel": label, "summary": t["summary"],
                 "updatedAt": iso(t["updatedAt"]), "unread": unread, "pending": pending, "can": can, "live": False,
                 "progress": None, "phase": None}
 

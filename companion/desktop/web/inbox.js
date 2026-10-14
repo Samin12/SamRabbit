@@ -364,7 +364,9 @@ export function optimisticItem(item, kind, body = {}) {
     case 'stop':
       return { ...next, statusLabel: 'Stopping…' };
     case 'seen':
-      return { ...next, unread: false };
+      // As the bridge says next: a failure he has seen (a T3 thread's too) is settled, its label still says so.
+      return { ...next, unread: false, can: (next.can || []).filter((c) => c !== 'seen'),
+        status: next.status === 'error' ? 'idle' : next.status };
     default:
       return null;
   }
