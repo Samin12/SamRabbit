@@ -26,8 +26,11 @@ export function reportDragExclusions() {
   }
 }
 
-export function toast(text, { action = null, timeout = 3200, tone = '' } = {}) {
-  const node = h('div', { class: `toast${tone ? ` tone-${tone}` : ''}` }, h('span', { text }),
+/** A short line at the bottom right, with an optional action button. Returns {close} (the toast goes at once). */
+export function toast(text, { action = null, timeout = 3200, tone = '', icon: glyph = null } = {}) {
+  const node = h('div', { class: `toast${tone ? ` tone-${tone}` : ''}`, role: 'status' },
+    glyph ? icon(glyph, { size: 14 }) : null,
+    h('span', { class: 'toast-text', text }),
     action ? h('button', {
       class: 'toast-action', type: 'button',
       onclick: () => {
@@ -41,6 +44,7 @@ export function toast(text, { action = null, timeout = 3200, tone = '' } = {}) {
     node.classList.add('closing');
     setTimeout(() => node.remove(), 200);
   }, timeout);
+  return { close: () => node.remove() };
 }
 
 export function openExternal(url) {

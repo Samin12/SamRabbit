@@ -31,8 +31,11 @@ A sidebar (the orb, **Talk**, and the views) and five views (CONTRACTS-WAVE7 §B
   `web/inbox.js` mirrors `Sources/DockModels.swift`) in Needs you / Working / Recent, filtered by T3 · Claude ·
   Codex (with their needs-you counts). A row opens in the detail pane: its last messages (`/items/<id>`), every
   action it supports right now (`can`): Approve / each option, answers to questions, Reply (↩ sends, ⇧↩ new line),
-  Stop, Open (in T3, Terminal, Codex; a SamRabbit chat opens in Chats), Mark seen — at once, rolled back with a
-  short note when the bridge says no ("It's open in Terminal — Open to answer there"). **New task** (N, ⌘N): the
+  Stop, Open (in T3, Terminal, Codex; a SamRabbit chat opens in Chats), Mark seen, Dismiss — at once, rolled back with
+  a short note when the bridge says no ("It's open in Terminal — Open to answer there"). **Dismiss** (the detail pane's
+  button, the ✕ that takes a row's time under the pointer — on Home's needs-you rows too — or X) hides it at once
+  with "Dismissed · <title> · Undo" for five seconds (Undo, or ⌘Z outside a field); the bridge keeps it out of the
+  list and the counts until it changes, then it comes back by itself; a refusal puts it back with a toast saying why. **New task** (N, ⌘N): the
   prompt, the T3 project, Claude or Codex and the model (`/targets`, `/new`); the task shows under Working at once.
 - **Chats** (⌘3, `web/chats.js`): the conversation timeline as before (list, search ⌘K, live stream).
 - **Calendar** (⌘4, `web/calendar.js`): the next seven days by day (`GET /v1/desktop/calendar/agenda?days=7`), a
@@ -51,8 +54,9 @@ A sidebar (the orb, **Talk**, and the views) and five views (CONTRACTS-WAVE7 §B
   while the transcript grows. Each exchange is its own line (`heardId`), so "Yes." twice is two lines.
 - **Keys**: ⌘1–⌘5 views (also in the View menu), ⌘N new task, ⌘K search conversations, ⌘, Settings — ⌘ only (⌃N,
   ⌃K stay the text fields' next line / kill line), and nothing behind a sheet (a journal note, an unpair); in Tasks
-  J/K or ↓/↑ move, ↩ open, E approve with the recommended option (the selected item's card is on screen), R reply, N
-  new task, Esc closes the composer, then the selection; Esc ends a conversation first.
+  J/K or ↓/↑ move, ↩ open, E approve with the recommended option (the selected item's card is on screen), R reply, X
+  dismiss (the next row is selected), N new task, Esc closes the composer, then the selection; Esc ends a conversation
+  first; ⌘Z outside a field undoes a dismissal while its toast shows.
 - **Live**: the inbox long poll (25 s), the sync stream, the summary every minute (`GET /v1/desktop/summary`: the
   phone's summary plus `r1.online` and `devices`), the agenda every five minutes and when a view opens — the
   summary, the agenda and the inbox only while the window is on screen. The page lives as long as the app (it loads

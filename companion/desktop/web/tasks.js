@@ -1,15 +1,18 @@
 // Tasks: the whole agent inbox (CONTRACTS-WAVE7 §B) — Needs you, Working and Recent, filtered by source (T3 · Claude ·
 // Codex), a detail pane with the item's last messages and every action it supports right now, and the "New task"
 // composer (T3 project, Claude or Codex, model). The keys are the dock's: J/K or ↓/↑ move, ↩ opens where it lives,
-// E approves with the recommended option, R replies, N starts a new task, Esc closes the composer, then the selection.
+// E approves with the recommended option, R replies, X dismisses (⌘Z or the toast's Undo brings it back), N starts a
+// new task, Esc closes the composer, then the selection.
 
 import { h } from './dom.js';
 import { icon } from './icons.js';
 import {
-  FILTERS, agentLabel, filterCounts, isChat, keyAction, keyName, keyRow, metaLine, needsYou, openLabel,
-  replyPlaceholder, rowIds, sourceLabel, supports,
+  FILTERS, agentLabel, canDismiss, filterCounts, isChat, keyAction, keyName, keyRow, metaLine, needsYou, openLabel,
+  replyPlaceholder, rowIds, selectionAfterDismiss, sourceLabel, supports,
 } from './inbox.js';
-import { approvalCard, itemMeta, itemRow, noteLine, questionCard, shortAgo, sourceGlyph } from './items.js';
+import {
+  approvalCard, dismissWithUndo, itemMeta, itemRow, noteLine, questionCard, shortAgo, sourceGlyph,
+} from './items.js';
 import { createOrb } from './orb.js';
 import { autosize, keycap, redrawWhenFree, reportDragExclusions, segmented, spinner } from './ui.js';
 
@@ -146,6 +149,7 @@ export function createTasks(ctx, el) {
           selected: item.id === selected,
           busy: agents.busy.get(item.id) || '',
           onclick: () => select(item.id),
+          onDismiss: dismiss,
         }))));
     }
     const scroll = listScroll.scrollTop;
@@ -166,6 +170,26 @@ export function createTasks(ctx, el) {
       const row = listScroll.querySelector(`[data-id="${CSS.escape(id)}"]`);
       if (row) row.scrollIntoView({ block: 'nearest' });
     }
+  }
+
+  // ------------------------------------------------------------------ dismissing
+
+  /** Gone at once with "Dismissed · Undo"; the selection moves to the next row (X X X clears a run). */
+  function dismiss(item) {
+    if (!canDismiss(item)) return;
+    const wasSelected = selected === item.id;
+    const next = wasSelected ? selectionAfterDismiss(rowIds(sections()), item.id) : null;
+    if (wasSelected) select(next);
+    dismissWithUndo(agents, item, {
+      toast: ctx.toast,
+      onUndone: (back) => {
+        if (visible && !composing) select(back.id, { scroll: true });
+      },
+      // Refused: the row is back; it is selected again unless the selection moved on meanwhile.
+      onFailed: (back) => {
+        if (wasSelected && visible && !composing && selected === next) select(back.id, { scroll: true });
+      },
+    });
   }
 
   // ------------------------------------------------------------------ the detail pane
@@ -201,6 +225,10 @@ export function createTasks(ctx, el) {
         ? capsule('Stop', 'stop', () => agents.stopItem(item), { disabled: Boolean(busy) }) : null,
       supports(item, 'seen') && item.unread
         ? capsule('Mark seen', 'check', () => agents.markSeen(item), { tone: 'quiet', disabled: Boolean(busy) }) : null,
+      canDismiss(item)
+        ? capsule('Dismiss', 'close', () => dismiss(item), {
+          tone: 'quiet', disabled: Boolean(busy), title: 'Dismiss (X): hidden until something changes',
+        }) : null,
       busy ? h('span', { class: 'busy-line' }, spinner(), h('span', { text: busyLabel(busy) })) : null);
   }
 
@@ -343,7 +371,8 @@ export function createTasks(ctx, el) {
       h('h2', { class: 'empty-title', text: counts.needsYou ? `${counts.needsYou} need${counts.needsYou === 1 ? 's' : ''} you` : 'All caught up' }),
       h('p', { class: 'empty-text', text: 'Pick a task to see its last messages and answer it here. T3 Code threads, Claude Code and Codex sessions all land in this list.' }),
       h('div', { class: 'key-legend' },
-        [['J', 'K', 'move'], ['↩', null, 'open'], ['E', null, 'approve'], ['R', null, 'reply'], ['N', null, 'new task']]
+        [['J', 'K', 'move'], ['↩', null, 'open'], ['E', null, 'approve'], ['R', null, 'reply'], ['X', null, 'dismiss'],
+          ['N', null, 'new task']]
           .map(([a, b, label]) => h('span', { class: 'legend' }, keycap(a), b ? keycap(b) : null, h('span', { text: label })))),
       h('button', { class: 'btn', type: 'button', onclick: () => openComposer() }, icon('plus', { size: 14 }), h('span', { text: 'New task' })))];
   }
@@ -517,6 +546,12 @@ export function createTasks(ctx, el) {
         event.preventDefault();
         replyArea.focus();
         return true;
+      case 'dismiss': {
+        event.preventDefault();
+        const item = agents.item(action.id);
+        if (item) dismiss(item);
+        return true;
+      }
       case 'compose':
         event.preventDefault();
         openComposer();

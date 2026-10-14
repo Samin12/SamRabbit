@@ -15,12 +15,14 @@ It serves, on 127.0.0.1 only:
 * dev controls: ``POST /dev/live`` (start a new live conversation now), ``POST /dev/end``;
 * the Mac voice's routes ``/v1/desktop/assistant/*`` with canned streamed answers, and their dev controls
   ``/dev/assistant``, ``/dev/announce`` (``fake_assistant.py``).
-* the Agent Dock's inbox (CONTRACTS-WAVE6 §A): ``GET /v1/desktop/inbox?after=&wait=`` (long poll),
-  ``GET /v1/desktop/inbox/items/<id>``, ``POST …/items/<id>/approve|answer|reply|stop|seen|open``,
-  ``GET /v1/desktop/inbox/targets``, ``POST /v1/desktop/inbox/new``, from ``samples/inbox.json`` (every source and
-  status, long titles, an approval with three options, a question); dev controls ``POST /dev/inbox/needs-you``
-  (a new approval arrives), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake`` (``{"fake": true, "polls"}``: the
-  dock's smoke driver runs only against a server that answers it; ``polls`` counts the inbox reads since start).
+* the Agent Dock's inbox (CONTRACTS-WAVE6 §A): ``GET /v1/desktop/inbox?after=&wait=[&include=dismissed]`` (long
+  poll), ``GET /v1/desktop/inbox/items/<id>``, ``POST …/items/<id>/approve|answer|reply|stop|seen|open|dismiss|
+  undismiss``, ``GET /v1/desktop/inbox/targets``, ``POST /v1/desktop/inbox/new``, from ``samples/inbox.json`` (every
+  source and status, long titles, an approval with three options, a question); dev controls ``POST
+  /dev/inbox/needs-you`` (a new approval arrives), ``POST /dev/inbox/refuse {"actions": [...]}`` (those actions answer
+  503 until refused again with none: a rollback to look at), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake``
+  (``{"fake": true, "polls"}``: the dock's smoke driver runs only against a server that answers it; ``polls`` counts
+  the inbox reads since start).
 * the SamRabbit window's desktop twins of the mobile routes (CONTRACTS-WAVE7 §A, ``fake_desktop.py``):
   ``GET /v1/desktop/summary``, ``GET /v1/desktop/calendar/agenda?days=``, ``POST /v1/desktop/calendar/block``,
   ``POST /v1/desktop/journal`` (kept in memory), ``GET|DELETE /v1/desktop/devices[/<id>]`` and
@@ -574,9 +576,11 @@ class InboxFixtures:
     """The bridge's agent inbox as the dock sees it, from samples/inbox.json (times shifted to now).
 
     Actions change the fixtures the way the bridge would: approve/answer → working, reply → working (a live Claude
-    session answers 409 session_live), stop → idle, seen → read, new → a T3 thread that works for a while and then
-    finishes. ``revision`` goes up on every visible change and the list is a long poll on it. ``open`` launches
-    nothing: it only says how it would have opened the item. A ticker moves working threads along every ``tick`` s."""
+    session answers 409 session_live), stop → idle, seen → read, dismiss → seen and out of the list and its counts
+    until it changes (its status, its requests or a newer updatedAt; a working item's steps don't count), undismiss →
+    back, new → a T3 thread that works for a while and then finishes. ``revision`` goes up on every visible change and
+    the list is a long poll on it. ``open`` launches nothing: it only says how it would have opened the item. A ticker
+    moves working threads along every ``tick`` s."""
 
     def __init__(self, path: str, tick: float = 6.0) -> None:
         self.path = path
@@ -584,6 +588,7 @@ class InboxFixtures:
         self.created = 0
         # Inbox reads (long polls included) since start: the window's tests check that a hidden window doesn't poll.
         self.polls = 0
+        self.refused: List[str] = []  # dev: actions that answer 503 (POST /dev/inbox/refuse)
         self.reset()
         if tick > 0:
             threading.Thread(target=self.ticker, args=(tick,), daemon=True).start()
@@ -598,6 +603,8 @@ class InboxFixtures:
             self.sources = data["inbox"].get("sources", {})
             self.details: Dict[str, List[Dict[str, Any]]] = data.get("details", {})
             self.targets = data.get("targets", {})
+            self.dismissed: Dict[str, Dict[str, Any]] = {}  # item id -> its change marker when dismissed
+            self.refused = []
             self.revision = getattr(self, "revision", 0) + 1
             self.cond.notify_all()
 
@@ -610,24 +617,49 @@ class InboxFixtures:
             return (rank, -(parse_iso(item.get("updatedAt") or "") or 0), item["id"])
         return sorted(self.items.values(), key=key)
 
-    def snapshot(self) -> Dict[str, Any]:
+    @staticmethod
+    def marker(item: Dict[str, Any]) -> Dict[str, Any]:
+        pending = item.get("pending") or {}
+        requests = sorted(entry.get("requestId") for kind in ("approvals", "inputs") for entry in pending.get(kind) or [])
+        return {"status": item.get("status"), "requests": requests, "at": item.get("updatedAt")}
+
+    def is_dismissed(self, item: Dict[str, Any]) -> bool:
+        """Dismissed and not changed since (like samrabbit_inbox._changed_since); a change forgets the dismissal."""
+        marker = self.dismissed.get(item["id"])
+        if marker is None:
+            return False
+        now = self.marker(item)
+        changed = now["status"] != marker["status"] or any(r not in marker["requests"] for r in now["requests"]) or (
+            now["status"] != "working" and (parse_iso(now["at"] or "") or 0) > (parse_iso(marker["at"] or "") or 0))
+        if changed:
+            del self.dismissed[item["id"]]
+        return not changed
+
+    def snapshot(self, include_dismissed: bool = False) -> Dict[str, Any]:
         # Counted like the bridge (samrabbit_inbox.py): before the 60-item cap, and "working" includes a SamRabbit chat
-        # that is streaming a reply (the dock counts its agents itself).
+        # that is streaming a reply (the dock counts its agents itself). Dismissed items are in neither.
         with self.cond:
-            items = [public(item) for item in self.ordered()]
+            ordered = self.ordered()
+            hidden = [public(item) for item in ordered if self.is_dismissed(item)]
+            hidden_ids = {item["id"] for item in hidden}
+            items = [public(item) for item in ordered if item["id"] not in hidden_ids]
             needs = sum(1 for i in items if i["status"] in ("needs-approval", "needs-input", "error")
                         or (i["status"] == "done" and i.get("unread")))
             working = sum(1 for i in items if i["status"] == "working")
+            shown = items[:60]
+            if include_dismissed:
+                shown += [dict(item, dismissed=True, can=["undismiss" if c == "dismiss" else c for c in item["can"]])
+                          for item in hidden[:60]]
             return {"revision": self.revision, "updatedAt": iso(now_ms()),
-                    "counts": {"needsYou": needs, "working": working, "total": len(items)},
-                    "sources": self.sources, "items": items[:60]}
+                    "counts": {"needsYou": needs, "working": working, "total": len(items), "dismissed": len(hidden)},
+                    "sources": self.sources, "items": shown}
 
-    def wait(self, after: Optional[int], wait: float) -> Dict[str, Any]:
+    def wait(self, after: Optional[int], wait: float, include_dismissed: bool = False) -> Dict[str, Any]:
         with self.cond:
             self.polls += 1
             if after is not None and after == self.revision and wait > 0:
                 self.cond.wait_for(lambda: self.revision != after, timeout=wait)
-        return self.snapshot()
+        return self.snapshot(include_dismissed)
 
     def item(self, item_id: str) -> Dict[str, Any]:
         with self.cond:
@@ -657,6 +689,24 @@ class InboxFixtures:
 
     def act(self, item_id: str, action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         with self.cond:
+            if action in self.refused:
+                raise InboxError(503, "dev_refused", "The fake bridge refuses that right now (/dev/inbox/refuse).")
+            if action == "dismiss":
+                item = self._get(item_id, "dismiss")
+                known = self.dismissed.get(item_id) or {}
+                self.dismissed[item_id] = dict(self.marker(item), unread=known.get("unread", bool(item.get("unread"))))
+                item["unread"] = False  # dismissing marks it seen ...
+                self.bump()
+                return 200, {"ok": True, "dismissed": True, "revision": self.revision}
+            if action == "undismiss":
+                item = self.items.get(item_id)
+                if not item:
+                    raise InboxError(404, "not_found", "No such inbox item.")
+                marker = self.dismissed.pop(item_id, None)
+                if marker is not None:
+                    item["unread"] = marker.get("unread", item.get("unread"))  # ... and the undo puts back what it was
+                    self.bump()
+                return 200, {"ok": True, "dismissed": False, "revision": self.revision}
             if action == "approve":
                 item = self._get(item_id, "approve")
                 approvals = item["pending"]["approvals"]
@@ -733,7 +783,8 @@ class InboxFixtures:
                 "id": item_id, "source": "t3", "agent": agent, "title": title, "project": projects[project_id]["title"],
                 "cwd": None, "status": "working", "statusLabel": "Working · starting", "summary": "",
                 "updatedAt": iso(now_ms()), "unread": False, "pending": {"approvals": [], "inputs": []},
-                "can": ["stop", "reply", "open"], "live": False, "progress": 0.05, "phase": "Starting", "_born": now_ms()}
+                "can": ["stop", "reply", "open", "dismiss"], "live": False, "progress": 0.05, "phase": "Starting",
+                "_born": now_ms()}
             self.details[item_id] = [{"role": "user", "text": text[:4000], "at": iso(now_ms())}]
             self.bump()
         return 202, {"itemId": item_id}
@@ -752,7 +803,8 @@ class InboxFixtures:
                                                            "options": [{"decision": "accept", "label": "Deploy"},
                                                                        {"decision": "decline", "label": "Not now"}]}],
                                            "inputs": []},
-                "can": ["approve", "reply", "stop", "seen", "open"], "live": False, "progress": None, "phase": None}
+                "can": ["approve", "reply", "stop", "seen", "open", "dismiss"], "live": False, "progress": None,
+                "phase": None}
             self.bump()
 
     def ticker(self, every: float) -> None:
@@ -766,7 +818,7 @@ class InboxFixtures:
                     if item.get("_born") and now_ms() - item["_born"] > 25_000:
                         item.update(status="done", statusLabel="Finished", unread=True, progress=None, phase=None,
                                     summary="Done: the change is in and the tests pass.", updatedAt=iso(now_ms()))
-                        item["can"] = ["reply", "seen", "open"]
+                        item["can"] = ["reply", "seen", "open", "dismiss"]
                         changed = True
                     elif item.get("progress") is not None:
                         item["progress"] = round(min(0.95, item["progress"] + 0.05), 2)
@@ -797,7 +849,8 @@ def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str
             after = int(raw_after) if raw_after.lstrip("-").isdigit() else None
             raw_wait = (query.get("wait") or ["0"])[0]
             wait = min(25.0, max(0.0, float(raw_wait))) if raw_wait.replace(".", "", 1).isdigit() else 0.0
-            return handler.json(200, inbox.wait(after, wait))
+            include = {part for value in query.get("include") or [] for part in value.split(",")}
+            return handler.json(200, inbox.wait(after, wait, "dismissed" in include))
         if method == "GET" and path == "/v1/desktop/inbox/targets":
             return handler.json(200, inbox.targets)
         body: Dict[str, Any] = {}
@@ -810,6 +863,11 @@ def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str
                 raise InboxError(400, "bad_json", "The body is not JSON.") from None
             if not isinstance(body, dict):
                 raise InboxError(400, "bad_json", "The body must be an object.")
+        if method == "POST" and path == "/dev/inbox/refuse":
+            actions = body.get("actions")
+            with inbox.cond:
+                inbox.refused = [str(a) for a in actions] if isinstance(actions, list) else []
+            return handler.json(200, {"ok": True, "refused": inbox.refused})
         if method == "POST" and path == "/v1/desktop/inbox/new":
             status, payload = inbox.new(body)
             return handler.json(status, payload)

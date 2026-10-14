@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The window's page under a real mouse (clicks/main.swift): a WKWebView off every display loads the app from the fake
 # sync server while the voice and the inbox change underneath it as they do live, and NSEvent presses (down, 110 ms,
-# up) go to the Talk button, the voice panel's buttons and the Tasks rows. Also checks the keys (⌃N / ⌃K stay a text
+# up) go to the Talk button, the voice panel's buttons, the Tasks rows, a row's ✕, the toast's Undo and the detail
+# pane's Dismiss. Also checks the keys (⌃N / ⌃K stay a text
 # field's, nothing moves behind a sheet) and that a hidden window stops reading the bridge. Silent: no microphone, no
 # speaker, nothing on any display, no permission prompt.
 #

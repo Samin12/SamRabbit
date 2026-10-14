@@ -1,11 +1,12 @@
 // The live agent inbox of the window: the long poll, the open items' last messages, what a new task can be sent to,
-// drafts, and the actions (approve / answer / reply / stop / seen / open / new) with their optimistic results and a
-// short note when the bridge says no. Home and Tasks draw from it. No DOM; the API is injected (tests/agents.test.mjs
-// runs it against a fake).
+// drafts, and the actions (approve / answer / reply / stop / seen / open / new / dismiss and its undo) with their
+// optimistic results and a short note when the bridge says no. Home and Tasks draw from it. No DOM; the API is
+// injected (tests/agents.test.mjs runs it against a fake).
 
 import { InboxPoller } from './api.js';
 import {
-  InboxStore, actionInfo, agentLabel, buildAnswers, failureNote, normalizeDetail, optimisticItem, resolveChoice,
+  InboxStore, UNDO_MS, actionInfo, agentLabel, buildAnswers, canDismiss, dismissProblem, failureNote, normalizeDetail,
+  optimisticItem, resolveChoice,
 } from './inbox.js';
 
 export class AgentInbox {
@@ -29,6 +30,8 @@ export class AgentInbox {
     this.composeBusy = false;
     this.composeNote = null;
     this.watched = null;
+    this.dismissCalls = new Map(); // id -> promise of whether the dismissal worked (an undo waits for it)
+    this.lastDismissed = null; // {item, at}: what ⌘Z brings back for a few seconds
     this.listeners = new Set();
     this.poller = poll ? new InboxPoller({
       fetchInbox: (options) => api.inbox(options),
@@ -229,6 +232,71 @@ export class AgentInbox {
 
   open(item) {
     return this.perform(item, 'open', {}, { optimistic: null });
+  }
+
+  /**
+   * Dismiss: the row goes at once (the counts with it), then `POST …/dismiss`; the bridge keeps it out of the list
+   * until it changes. Resolves to {ok, problem}: a refusal puts the row back and `problem` says why. Nothing reaches
+   * T3, Claude Code or Codex.
+   */
+  dismiss(item) {
+    if (!canDismiss(item) || this.store.isDismissed(item.id)) return Promise.resolve({ ok: false, problem: null });
+    this.store.dismiss(item, this.now());
+    this.notes.delete(item.id);
+    this.lastDismissed = { item, at: this.now() };
+    this.emit({ inbox: true, item: item.id, dismissed: item.id });
+    const call = (async () => {
+      try {
+        const reply = await this.api.act(item.id, 'dismiss', {});
+        this.store.confirmDismiss(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
+        this.poller?.poke();
+        return { ok: true, problem: null };
+      } catch (error) {
+        const shown = this.store.failDismiss(item.id);
+        if (this.lastDismissed && this.lastDismissed.item.id === item.id) this.lastDismissed = null;
+        // Undone meanwhile: nothing to say.
+        return { ok: false, problem: shown ? dismissProblem(error) : null };
+      } finally {
+        this.dismissCalls.delete(item.id);
+        this.emit({ inbox: true, item: item.id });
+      }
+    })();
+    this.dismissCalls.set(item.id, call.then((result) => result.ok));
+    return call;
+  }
+
+  /**
+   * The undo: the row is back at once (as it was), then `POST …/undismiss`, after the dismissal's own call if it is
+   * still on its way. Resolves to {ok, problem}: a refusal hides it again and `problem` says why.
+   */
+  async undoDismiss(item) {
+    if (!item) return { ok: false, problem: null };
+    if (this.lastDismissed && this.lastDismissed.item.id === item.id) this.lastDismissed = null;
+    this.store.undo(item, this.now());
+    this.emit({ inbox: true, item: item.id, undone: item.id });
+    const pending = this.dismissCalls.get(item.id);
+    if (pending && !(await pending)) {
+      this.store.undoNotNeeded(item.id);
+      this.emit({ inbox: true, item: item.id });
+      return { ok: true, problem: null };
+    }
+    try {
+      const reply = await this.api.act(item.id, 'undismiss', {});
+      this.store.confirmUndo(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
+      this.poller?.poke();
+      return { ok: true, problem: null };
+    } catch (error) {
+      this.store.failUndo(item.id, this.now());
+      return { ok: false, problem: dismissProblem(error, { undo: true }) };
+    } finally {
+      this.emit({ inbox: true, item: item.id });
+    }
+  }
+
+  /** What ⌘Z would bring back (the last dismissal, for as long as its toast shows), or null. */
+  undoable() {
+    const last = this.lastDismissed;
+    return last && this.now() - last.at < UNDO_MS ? last.item : null;
   }
 
   /**

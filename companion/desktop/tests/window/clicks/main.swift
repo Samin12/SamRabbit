@@ -132,6 +132,47 @@ final class Runner: NSObject, WKScriptMessageHandler {
         await pause(1.5)  // the request goes, the inbox comes back
         let status = await item(working)?["status"] as? String
         check(status == "idle", "the detail pane's Stop takes the press while the thread moves (status \(status ?? "?"))")
+
+        // Dismiss: the ✕ that shows on a row under the pointer, inside the row's own button, takes the press (it
+        // dismisses, it doesn't select); the toast's Undo brings it back; the detail pane's Dismiss too. The rows move
+        // meanwhile (working threads every 0.15 s): the press must survive the redraws.
+        let failed = "t3:th_watch_previews"
+        await hover(".tasks-scroll .item-row[data-id='\(failed)']")
+        await press(".tasks-scroll .item-row[data-id='\(failed)'] .row-dismiss")
+        await pause(1.0)
+        let gone = await evaluate("!document.querySelector(\".tasks-scroll .item-row[data-id='\(failed)']\")") as? Bool
+        let hidden = await dismissedIds()
+        check(gone == true && hidden == [failed], "a row's ✕ takes the press and dismisses it (gone: \(gone ?? false), bridge: \(hidden))")
+        await hover(nil)
+        await press(".toast-action")
+        await pause(1.2)
+        let back = await evaluate("Boolean(document.querySelector(\".tasks-scroll .item-row[data-id='\(failed)']\"))") as? Bool
+        let after = await dismissedIds()
+        check(back == true && after.isEmpty, "the toast's Undo takes the press and brings it back (\(back ?? false), bridge: \(after))")
+        await evaluate("document.querySelector(\"[data-id='\(failed)']\").click()")
+        await pause(1.0)
+        await press(".detail-actions button[title^='Dismiss']")
+        await pause(1.0)
+        let viaPane = await dismissedIds()
+        check(viaPane == [failed], "the detail pane's Dismiss takes the press (bridge: \(viaPane))")
+        await press(".toast-action")
+        await pause(1.0)
+    }
+
+    /// The row as it is under the pointer. A WKWebView off every display never gets the moves :hover needs, so a style
+    /// rule shows the row's ✕ as :hover does (a rule, not a class: the row is redrawn as the threads move); the press
+    /// on it is a real one. nil takes the rule away.
+    func hover(_ selector: String?) async {
+        let css = selector.map { "\($0) .row-dismiss { display: grid; } \($0) .item-time { display: none; }" } ?? ""
+        await evaluate("(() => { let s = document.getElementById('test-hover'); if (!s) { s = document.createElement('style'); "
+            + "s.id = 'test-hover'; document.head.append(s); } s.textContent = \(json(css)); return true; })()")
+        await pause(0.1)
+    }
+
+    /// What the fake bridge keeps dismissed.
+    func dismissedIds() async -> [String] {
+        let items = (await get("/v1/desktop/inbox?include=dismissed"))?["items"] as? [[String: Any]] ?? []
+        return items.filter { $0["dismissed"] as? Bool == true }.compactMap { $0["id"] as? String }
     }
 
     /// ⌃N and ⌃K in a text field are the field's (Cocoa's next line and kill line), not New Task and Search; behind a
