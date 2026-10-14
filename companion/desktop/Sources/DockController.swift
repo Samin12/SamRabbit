@@ -373,6 +373,7 @@ final class DockController: NSObject {
         let pill = pillWindow()
         if !visible {
             visible = true
+            ui.shown = true
             chooseScreen()
             placePill()
             pill.alphaValue = 0
@@ -390,6 +391,7 @@ final class DockController: NSObject {
     private func hide() {
         guard visible else { return }
         visible = false
+        ui.shown = false
         send(.hidden)
         followTimer?.invalidate()
         pointerTimer?.invalidate()
@@ -518,6 +520,8 @@ final class DockController: NSObject {
         guard let pill, let screen else { return }
         let rest = DockPlacement.frame(for: spotHere, size: restSize, on: screen)
         restFrame = rest
+        let anchor = Self.anchor(spotHere.corner)
+        if ui.pillAnchor != anchor { ui.pillAnchor = anchor }
         let frame = DockPlacement.withSlot(rest, width: slotWidth, onLeft: ui.minimizeSlot == .leading, on: screen)
         if pill.frame != frame { pill.setFrame(frame, display: true) }
         let below = DockPlacement.panelOpensBelow(pill: rest, screen: screen)
@@ -525,6 +529,18 @@ final class DockController: NSObject {
         let maxHeight = DockPlacement.maxPanelHeight(pill: rest, screen: screen)
         if ui.maxPanelHeight != maxHeight { ui.maxPanelHeight = maxHeight }
         placeList()
+    }
+
+    /// The pill window's content sits against the dock's corner (the window follows a new size a moment later).
+    private static func anchor(_ corner: DockCorner) -> Alignment {
+        switch (corner.isTop, corner.side) {
+        case (true, .left): return .topLeading
+        case (true, .middle): return .top
+        case (true, .right): return .topTrailing
+        case (false, .left): return .bottomLeading
+        case (false, .middle): return .bottom
+        case (false, .right): return .bottomTrailing
+        }
     }
 
     /// The list on the side with room, lined up with the pill's resting frame (the "–" coming and going moves nothing).

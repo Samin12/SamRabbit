@@ -64,7 +64,7 @@ final class DockShortcutCenter: ObservableObject {
     /// For SwiftUI menus (the menu bar extra, the app menu).
     func keyboardShortcut(_ action: DockShortcutAction) -> KeyboardShortcut? {
         guard let shortcut = working(action), let key = shortcut.menuKey, let character = key.first else { return nil }
-        var modifiers: EventModifiers = []
+        var modifiers: SwiftUI.EventModifiers = []
         if shortcut.hasControl { modifiers.insert(.control) }
         if shortcut.hasOption { modifiers.insert(.option) }
         if shortcut.hasShift { modifiers.insert(.shift) }
@@ -85,9 +85,11 @@ final class DockShortcutCenter: ObservableObject {
             return .saved
         }
         // Refused: the old one again (it may be the same combination, still taken).
+        let why = unavailable[action] ?? Self.takenMessage
         bindings[action] = old
         if old != shortcut { register(action) }
-        return .refused("\(shortcut.display) isn’t available — another app uses it.")
+        Log.write("shortcut \(action.rawValue): \(shortcut.display) refused, kept \(old.display)")
+        return .refused("\(shortcut.display): \(why.prefix(1).lowercased() + why.dropFirst())")
     }
 
     func reset(_ action: DockShortcutAction) -> Outcome { set(action, to: action.defaultShortcut) }

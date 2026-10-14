@@ -162,6 +162,7 @@ enum DockShortcuts {
                         among bindings: [DockShortcutAction: DockShortcut]) -> String? {
         guard let name = shortcut.keyName else { return "That key can’t be a shortcut." }
         if shortcut.keyCode == DockKeys.escape { return "Esc cancels recording: choose another key." }
+        if let what = reserved[shortcut] { return "\(shortcut.display) is macOS’s shortcut for \(what)." }
         if !shortcut.isFunctionKey {
             if shortcut.modifiers == 0 || shortcut.modifiers == DockShortcut.shift {
                 return "Add ⌃ or ⌥⌘ to \(name)."
@@ -173,7 +174,6 @@ enum DockShortcuts {
                 return "⌘ alone is an app’s own shortcut: add ⌃ or ⌥."
             }
         }
-        if let what = reserved[shortcut] { return "\(shortcut.display) is macOS’s shortcut for \(what)." }
         if let other = DockShortcutAction.allCases.first(where: { $0 != action && bindings[$0] == shortcut }) {
             return "\(shortcut.display) is already “\(other.label)”."
         }
@@ -197,7 +197,6 @@ enum DockShortcuts {
         }
         return saved
     }
-
 }
 
 /// The keys a shortcut can use, by virtual key code (the US layout's names; the code is the key's place, so on

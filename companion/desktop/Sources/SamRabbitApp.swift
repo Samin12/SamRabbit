@@ -242,7 +242,7 @@ struct MenuContent: View {
         }
         Button("Open SamRabbit") { model.openMainWindow() }
             .keyboardShortcut("o")
-        Button("Show Agent Dock") { DockController.shared.showFromMenu() }
+        DockMenuBarItems()
         Button("Pair iPhone…") { model.openPairing() }
         Button("Connect ChatGPT…") { model.openChatGPT() }
         if !model.notificationsAllowed {
@@ -308,8 +308,7 @@ struct SamRabbitApp: App {
                 Button("Pair iPhone…") { model.openPairing() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Connect ChatGPT…") { model.openChatGPT() }
-                Button("Show Agent Dock") { DockController.shared.showFromMenu() }
-                    .keyboardShortcut("k", modifiers: [.control, .option])
+                DockAppMenuItems()
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload") { model.reload() }

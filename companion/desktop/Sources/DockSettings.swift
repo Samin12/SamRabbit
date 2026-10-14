@@ -26,8 +26,8 @@ final class DockSettingsModel: ObservableObject {
     private var monitor: Any?
     private var noteTasks: [DockShortcutAction: Task<Void, Never>] = [:]
 
-    init(center: DockShortcutCenter = .shared) {
-        self.center = center
+    init() {
+        center = DockShortcutCenter.shared
         live = true
     }
 
@@ -76,7 +76,8 @@ final class DockSettingsModel: ObservableObject {
         notes[action] = nil
         center.pause()
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
-            MainActor.assumeIsolated { self?.recorded(event) ?? event }
+            let taken = MainActor.assumeIsolated { self?.recorded(event) ?? false }
+            return taken ? nil : event
         }
         Log.write("settings: recording a shortcut (\(action.rawValue))")
     }
@@ -86,19 +87,22 @@ final class DockSettingsModel: ObservableObject {
         if recording != nil { finish(nil) }
     }
 
-    private func recorded(_ event: NSEvent) -> NSEvent? {
-        guard recording != nil else { return event }
+    /// true = the recorder took the key (it goes no further: ⌘Q is recorded, not quitting).
+    private func recorded(_ event: NSEvent) -> Bool {
+        guard recording != nil else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.type == .flagsChanged {
             held = DockShortcut.glyphs(modifierFlags: flags.rawValue)
-            return nil
+            return true
         }
-        if event.keyCode == 53 && flags.intersection([.control, .option, .shift, .command]).isEmpty {
+        // A key held down repeats: the first press was the shortcut.
+        if event.isARepeat { return true }
+        if event.keyCode == UInt16(DockKeys.escape) && flags.intersection([.control, .option, .shift, .command]).isEmpty {
             finish(nil)
-            return nil
+            return true
         }
         finish(DockShortcut.from(keyCode: event.keyCode, modifierFlags: flags.rawValue))
-        return nil
+        return true
     }
 
     private func finish(_ shortcut: DockShortcut?) {
@@ -168,7 +172,8 @@ struct DockSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 sectionTitle("Dock")
                 VStack(spacing: 0) {
-                    switchRow("Show the Agent Dock", detail: "Off: only ⌃⌥K or “Show Agent Dock” brings it back.",
+                    switchRow("Show the Agent Dock",
+                              detail: "Off until \(center.shortcut(.showHide).display) or “Show Agent Dock” brings it back.",
                               on: model.dockOn) { model.setDockOn(!model.dockOn) }
                     Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1).padding(.leading, 16)
                     switchRow("Minimized to the orb", detail: "Just the orb and a count of what needs you.",

@@ -29,6 +29,11 @@ final class DockUIState: ObservableObject {
     @Published var minimizeSlot: HorizontalEdge?
     /// The list opens below the dock (it sits high on its screen).
     @Published var listBelow = false
+    /// Where the pill window's content sits while the window catches up with a new size: against the corner the dock
+    /// is kept in, so a growing count or the voice bar never shifts it for a frame.
+    @Published var pillAnchor: Alignment = .bottom
+    /// The dock is on screen (the menu bar extra says "Hide" or "Show").
+    @Published var shown = false
 }
 
 /// The voice state as the dock draws it. Live it comes from `MacVoice` (owned by the voice workstream); snapshots and
@@ -480,7 +485,7 @@ struct DockPillRoot: View {
         .background(GeometryReader { proxy in
             Color.clear.preference(key: DockPillMeasureKey.self, value: DockPillMeasure(size: proxy.size))
         })
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: ui.pillAnchor)
         .coordinateSpace(name: "dockPill")
         .onPreferenceChange(DockPillMeasureKey.self) { measure in onMeasure(measure) }
         .onPreferenceChange(DockHitRectsKey.self) { rects in onHitRects(rects) }
