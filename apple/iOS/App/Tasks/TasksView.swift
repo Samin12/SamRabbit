@@ -50,6 +50,10 @@ struct TasksView: View {
         }
         .scrollIndicators(.hidden)
         .refreshable { await model.refresh(quiet: false) }
+        .onChange(of: Set(model.tasks.map(\.source))) { _, sources in
+            // The filtered source went away (or the bar did): show everything again, never an empty list to be stuck in.
+            if let filter, sources.count < 2 || !sources.contains(filter) { self.filter = nil }
+        }
         .samScreen()
         .navigationTitle("Tasks")
         .toolbar {

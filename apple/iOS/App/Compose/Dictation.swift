@@ -242,6 +242,7 @@ struct Composer: View {
             .buttonBorderShape(.circle)
             .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sending)
             .accessibilityLabel("Send")
+            .accessibilityIdentifier("composer-send")
         }
     }
 }

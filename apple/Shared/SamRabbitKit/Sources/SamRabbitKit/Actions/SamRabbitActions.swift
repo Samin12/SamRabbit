@@ -186,6 +186,13 @@ public struct PlannedAlert: Sendable, Equatable, Identifiable {
     public var title: String
     public var body: String
     public var threadId: String
+    /// A Claude Code or Codex item's inbox id (`claude:<id>`): the alert opens that item, not a T3 thread.
+    public var itemId: String? = nil
+
+    /// What tapping it opens: the T3 thread, or the inbox item.
+    public var link: String {
+        itemId.map { "samrabbit://inbox/\($0)" } ?? "samrabbit://thread/\(threadId)"
+    }
 }
 
 /// Decides which local notifications fresh thread states deserve (no push: the background refresh
@@ -198,6 +205,10 @@ public struct PlannedAlert: Sendable, Equatable, Identifiable {
 /// is not announced until a list shows its request. Keys are kept for a week whether or not the
 /// thread is in the list this time, so a thread that drops out of one list and shows up in another
 /// is not announced twice.
+///
+/// Claude Code and Codex sessions (the inbox's `agents`) are announced the same way when they wait for a prompt in
+/// their terminal or app (`<itemId>|<requestId>`, the tool call it waits on); only the Mac can answer those, so the
+/// alert says where.
 public enum AlertPlanner {
     public struct Plan: Sendable, Equatable {
         public var alerts: [PlannedAlert]
@@ -212,8 +223,9 @@ public enum AlertPlanner {
     ///   - threads: the freshest thread states known (a thread list, plus any looked up).
     ///   - announced: needs-you requests already notified, with when.
     ///   - tracked: tasks started from the phone.
-    public static func plan(threads: [TaskThread], announced: [String: Date], tracked: [TrackedTask],
-                            now: Date = .now) -> Plan {
+    ///   - agents: Claude Code and Codex items from the inbox (T3's come as `threads`; others are skipped).
+    public static func plan(threads: [TaskThread], agents: [InboxItem] = [], announced: [String: Date],
+                            tracked: [TrackedTask], now: Date = .now) -> Plan {
         var alerts: [PlannedAlert] = []
         var keys = announced.filter { now.timeIntervalSince($0.value) < keepAnnounced }
         var seen = Set<String>()
@@ -225,6 +237,16 @@ public enum AlertPlanner {
             let detail = thread.pending?.text.isEmpty == false ? thread.pending!.text : (thread.summary ?? what)
             alerts.append(PlannedAlert(id: "needs:\(key)", kind: .needsYou, title: thread.title,
                                        body: Formatting.clip(detail, 160), threadId: thread.threadId))
+        }
+        for item in agents where item.source == .claude || item.source == .codex {
+            guard item.status == .needsApproval || item.status == .needsInput, let key = needsYouKey(item),
+                  seen.insert(key).inserted, keys[key] == nil else { continue }
+            keys[key] = now
+            let place = item.heldOnMac?.headline(item) ?? item.statusLabel
+            let detail = InboxPending.detail(item.pending) ?? item.summary
+            let body = [place, detail].filter { !$0.isEmpty }.joined(separator: ": ")
+            alerts.append(PlannedAlert(id: "needs:\(key)", kind: .needsYou, title: item.title,
+                                       body: Formatting.clip(body, 160), threadId: item.id, itemId: item.id))
         }
         if keys.count > maxAnnounced {
             keys = Dictionary(uniqueKeysWithValues: keys.sorted { $0.value > $1.value }.prefix(maxAnnounced).map { ($0.key, $0.value) })
@@ -255,5 +277,11 @@ public enum AlertPlanner {
     static func needsYouKey(_ thread: TaskThread) -> String? {
         guard let requestId = thread.pending?.requestId, !requestId.isEmpty else { return nil }
         return "\(thread.threadId)|\(requestId)"
+    }
+
+    /// `claude:<sessionId>|<requestId>`, or nil without a request.
+    static func needsYouKey(_ item: InboxItem) -> String? {
+        guard let requestId = item.pendingRequestId, !requestId.isEmpty else { return nil }
+        return "\(item.id)|\(requestId)"
     }
 }

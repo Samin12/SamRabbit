@@ -196,6 +196,15 @@ struct WidgetItemRow: View {
     let item: InboxItem
     let now: Date
 
+    /// "In the terminal" / "In the Codex app" for a prompt only the Mac answers, else the status.
+    static func state(_ item: InboxItem, _ style: StatusStyle) -> String {
+        switch item.heldOnMac {
+        case .waitingInTerminal: "In the terminal"
+        case .waitingInApp: "In the Codex app"
+        default: style.label
+        }
+    }
+
     /// T3 threads open their own screen; Claude Code and Codex sessions theirs (`samrabbit://inbox/<id>`).
     static func link(_ item: InboxItem) -> URL {
         if let threadId = item.threadId, let url = URL(string: "samrabbit://thread/\(threadId)") { return url }
@@ -212,7 +221,7 @@ struct WidgetItemRow: View {
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(SamTheme.ink)
                     .lineLimit(1)
-                Text([item.heldOnMac == .waitingInTerminal ? "In the terminal" : style.label, item.project]
+                Text([WidgetItemRow.state(item, style), item.project]
                     .compactMap { $0 }.joined(separator: " · "))
                     .font(.system(size: 11))
                     .foregroundStyle(item.needsYou ? style.color : SamTheme.muted)

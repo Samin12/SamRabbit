@@ -93,7 +93,11 @@ public enum SpokenSummary {
                 case .error: "check"
                 default: "look at"
                 }
-                let place = item.heldOnMac == .waitingInTerminal ? " in the terminal" : ""
+                let place = switch item.heldOnMac {
+                case .waitingInTerminal: " in the terminal"
+                case .waitingInApp: " in the Codex app"
+                default: ""
+                }
                 return "\(verb) “\(Formatting.clip(item.title, 48))”\(place)"
             }
         } else {

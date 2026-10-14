@@ -48,8 +48,11 @@ final class TasksUITests: XCTestCase {
     /// seen.
     func testEveryAgentOnHomeAndInTasks() throws {
         try launch()
-        let headline = app.staticTexts["7 tasks need you"]
-        XCTAssertTrue(headline.waitForExistence(timeout: 20), "Home counts every agent's needs-you (the inbox)")
+        // The fake's R1 is live (the headline says so), so the count is in the line under it and on the tab.
+        let counted = app.staticTexts.matching(NSPredicate(format: "label CONTAINS '7 need you'")).firstMatch
+        XCTAssertTrue(counted.waitForExistence(timeout: 20), "Home counts every agent's needs-you (the inbox)")
+        XCTAssertTrue(app.tabBars.buttons["Tasks"].label.contains("7") || (app.tabBars.buttons["Tasks"].value as? String)?
+            .contains("7") == true, "and the Tasks tab's badge")
         XCTAssertTrue(card(Self.flaky).waitForExistence(timeout: 10), "a Claude Code session among Home's cards")
         XCTAssertTrue(card("t3:t_deploy24").exists, "and the T3 approval")
         snap("phone-home")
@@ -58,7 +61,8 @@ final class TasksUITests: XCTestCase {
 
         openTasks()
         XCTAssertTrue(card(Self.flaky).waitForExistence(timeout: 10))
-        XCTAssertTrue(card(Self.flaky).staticTexts["Waiting for you in the terminal"].exists,
+        let hold = card(Self.flaky).descendants(matching: .any)["inbox-hold"]
+        XCTAssertTrue(hold.exists && hold.label.contains("Waiting for you in the terminal"),
                       "a Claude Code permission prompt waits in the terminal")
         XCTAssertTrue(card("t3:t_deploy24").buttons["Approve"].exists, "T3 approvals are answered inline, as before")
         XCTAssertTrue(card(Self.pytest).exists, "a Codex run that failed")
@@ -69,6 +73,9 @@ final class TasksUITests: XCTestCase {
         snap("phone-tasks-2")
         app.swipeUp()
         snap("phone-tasks-3")
+        app.swipeUp()
+        snap("phone-tasks-working")
+        app.swipeDown()
         app.swipeDown()
         app.swipeDown()
 
@@ -83,10 +90,6 @@ final class TasksUITests: XCTestCase {
         app.buttons["tasks-filter-all"].tap()
         XCTAssertTrue(card("t3:t_deploy24").waitForExistence(timeout: 5))
 
-        // T3: Approve, exactly as before (the T3 route with the card's request id).
-        card("t3:t_deploy24").buttons["Approve"].tap()
-        XCTAssertTrue(waitUntil(timeout: 10) { !self.card("t3:t_deploy24").exists }, "approved: it leaves Needs you")
-
         // Codex: Mark seen.
         let seen = card(Self.pytest).buttons["inbox-seen-\(Self.pytest)"]
         XCTAssertTrue(seen.exists)
@@ -95,8 +98,15 @@ final class TasksUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 5) {
             (self.fakeGet("inbox")["seen"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == Self.pytest }
         }, "the Mac was told")
-        XCTAssertEqual(app.staticTexts["5 tasks need you"].exists || app.tabBars.buttons["Tasks"].value as? String == "5",
-                       true, "one fewer from each")
+        XCTAssertTrue(waitUntil(timeout: 10) {
+            let tab = self.app.tabBars.buttons["Tasks"]
+            return tab.label.contains("6") || (tab.value as? String)?.contains("6") == true
+        }, "one fewer: the badge says 6")
+
+        // T3: Approve, exactly as before (the T3 route with the card's request id). It works for a few seconds,
+        // then comes back finished and unread.
+        card("t3:t_deploy24").buttons["Approve"].tap()
+        XCTAssertTrue(waitUntil(timeout: 10) { !self.card("t3:t_deploy24").exists }, "approved: it leaves Needs you")
     }
 
     // MARK: - Claude Code
@@ -123,7 +133,7 @@ final class TasksUITests: XCTestCase {
         field.tap()
         field.typeText("Yes, open the PR")
         snap("phone-claude-typing")
-        app.buttons["Send"].tap()
+        app.buttons["composer-send"].tap()
         XCTAssertTrue(waitUntil(timeout: 10) {
             (self.fakeGet("inbox")["replies"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == Self.changelog }
         }, "the reply reached the Mac")

@@ -1,0 +1,520 @@
+import Foundation
+import Testing
+@testable import SamRabbitKit
+
+/// `GET /v1/mobile/inbox` as the real bridge sends it to a phone (CONTRACTS-WAVE6 §A, WAVE7 C): every source, every
+/// state, `can` without `open` (the phone never opens anything on the Mac's screen), plus a few things a lenient
+/// reader must survive.
+private let inboxJSON = """
+{"revision": 1791955209038, "updatedAt": "2026-10-14T05:20:09Z",
+ "counts": {"needsYou": 5, "working": 3, "total": 10},
+ "sources": {"t3": {"connected": true}, "claude": {"available": true},
+             "codex": {"available": false, "reason": "no_sessions"}, "samrabbit": {"available": true}},
+ "items": [
+  {"id": "chat:c_focus", "source": "samrabbit", "agent": null, "title": "Weekly focus review", "project": "R1",
+   "status": "working", "statusLabel": "Answering", "summary": "You logged 18.5 hours", "updatedAt": "2026-10-14T05:20:00Z",
+   "unread": false, "pending": {"approvals": [], "inputs": []}, "can": [], "live": true},
+  {"id": "codex:desk-q", "source": "codex", "agent": "codex", "title": "Sketch onboarding copy", "project": "website",
+   "cwd": "/Users/sam/website", "status": "needs-input", "statusLabel": "Has a question in Codex",
+   "summary": "Which tone?", "updatedAt": "2026-10-14T05:10:00Z", "unread": true,
+   "pending": {"approvals": [], "inputs": [{"requestId": "call_9", "questions": [
+      {"id": "0", "header": "Question", "question": "Which tone?", "options": ["Warm", "Crisp"],
+       "allowCustom": true, "multiSelect": false}]}]},
+   "can": ["seen"], "live": false},
+  {"id": "claude:flaky", "source": "claude", "agent": "claude", "title": "Investigate the flaky long-poll test",
+   "project": "jackrabbit-src", "cwd": "/Users/sam/jackrabbit-src", "status": "needs-approval",
+   "statusLabel": "Waiting for you in the terminal", "summary": "Bash: python3 -I -m unittest -k long_poll",
+   "updatedAt": "2026-10-14T05:18:00Z", "unread": true,
+   "pending": {"approvals": [{"requestId": "toolu_01", "kind": "command",
+                              "detail": "Bash: python3 -I -m unittest -k long_poll", "options": []}], "inputs": []},
+   "can": [], "live": true, "progress": null, "phase": null},
+  {"id": "t3:t_deploy", "source": "t3", "agent": "codex", "title": "Deploy release 2.4 to staging",
+   "project": "Assistant", "status": "needs-approval", "statusLabel": "Wants to run a command",
+   "summary": "Run ./deploy.sh staging", "updatedAt": "2026-10-14T05:19:00Z", "unread": true,
+   "pending": {"approvals": [{"requestId": "r1", "kind": "command", "detail": "Run ./deploy.sh staging",
+     "options": [{"decision": "accept", "label": "Approve"}, {"decision": "decline", "label": "Deny"}]}], "inputs": []},
+   "can": ["approve", "reply", "stop", "seen"], "live": false},
+  {"id": "claude:changelog", "source": "claude", "agent": "claude", "title": "Summarize this week's merged PRs",
+   "project": "website", "status": "done", "statusLabel": "Finished", "summary": "14 PRs in the draft.",
+   "updatedAt": "2026-10-14T05:00:00Z", "unread": true, "can": ["reply", "seen"], "live": false},
+  {"id": "claude:retry", "source": "claude", "agent": "claude", "title": "Add retry with backoff",
+   "project": "jackrabbit-src", "status": "working", "statusLabel": "Working", "summary": "Editing…",
+   "updatedAt": "2026-10-14T05:19:30Z", "unread": false, "can": [], "live": true},
+  {"id": "codex:cli-idle", "source": "codex", "agent": "codex", "title": "Explain the relay",
+   "project": "jackrabbit-src", "status": "idle", "statusLabel": "Idle", "summary": "",
+   "updatedAt": "2026-10-13T20:00:00Z", "unread": false, "can": ["reply"], "live": false},
+  {"id": "codex:desk-run", "source": "codex", "agent": "codex", "title": "Draft the pricing FAQ",
+   "project": "website", "status": "working", "statusLabel": "Working", "summary": "Drafting…",
+   "updatedAt": "2026-10-14T05:15:00Z", "unread": false, "can": [], "live": false},
+  {"id": "claude:open-done", "source": "claude", "agent": "claude", "title": "Rename the tokens file",
+   "project": "jackrabbit-src", "status": "done", "statusLabel": "Finished", "summary": "Renamed.",
+   "updatedAt": "2026-10-14T05:05:00Z", "unread": true, "can": ["seen"], "live": true},
+  {"title": "no id: dropped"},
+  {"id": "t3:t_odd", "source": "t3", "title": "Mystery", "status": "teleporting", "updatedAt": "2026-10-14T04:00:00Z"}
+ ]}
+"""
+
+private func snapshot(_ json: String = inboxJSON) throws -> InboxSnapshot {
+    try BridgeJSON.decode(InboxSnapshot.self, from: Data(json.utf8))
+}
+
+private func item(_ id: String, in snapshot: InboxSnapshot) throws -> InboxItem {
+    try #require(snapshot.items.first { $0.id == id })
+}
+
+@Suite("The inbox: every agent on the Mac")
+struct InboxTests {
+    @Test func decodesEverySourceInTheContractsOrder() throws {
+        let inbox = try snapshot()
+        #expect(inbox.revision == 1_791_955_209_038)
+        #expect(inbox.updatedAt == BridgeDates.date(from: "2026-10-14T05:20:09Z"))
+        // The id-less item is dropped; the rest in order: approvals (newest first), questions, errors, finished and
+        // unread, working, then the rest.
+        #expect(inbox.items.map(\.id) == [
+            "t3:t_deploy", "claude:flaky", "codex:desk-q", "claude:open-done", "claude:changelog",
+            "chat:c_focus", "claude:retry", "codex:desk-run", "t3:t_odd", "codex:cli-idle",
+        ])
+        let flaky = try item("claude:flaky", in: inbox)
+        #expect(flaky.source == .claude && flaky.agent == "claude")
+        #expect(flaky.key == "flaky")
+        #expect(flaky.live)
+        #expect(flaky.cwd == "/Users/sam/jackrabbit-src")
+        #expect(flaky.pending.approvals.first?.requestId == "toolu_01")
+        #expect(flaky.pending.approvals.first?.kindLabel == "Wants to run a command")
+        #expect(flaky.pendingRequestId == "toolu_01")
+        #expect(try item("t3:t_odd", in: inbox).status == .unknown)
+        #expect(try item("chat:c_focus", in: inbox).isChat)
+        #expect(inbox.agentItems.count == 9)
+        #expect(!inbox.agentItems.contains { $0.isChat })
+        // Sources: T3 connected, Codex not available (with why).
+        #expect(inbox.t3Connected)
+        #expect(inbox.t3Problem == nil)
+        #expect(inbox.sources["codex"] == InboxSourceState(ok: false, reason: "no_sessions"))
+        #expect(inbox.sources["claude"]?.ok == true)
+    }
+
+    /// What the phone may do with a Claude Code or Codex item, read from `can` (never `open`) and `live`.
+    @Test func whereEachAgentWaits() throws {
+        let inbox = try snapshot()
+        // A permission prompt in the CLI's terminal: only the terminal answers it.
+        let flaky = try item("claude:flaky", in: inbox)
+        #expect(flaky.heldOnMac == .waitingInTerminal)
+        #expect(InboxHold.waitingInTerminal.headline(flaky) == "Waiting for you in the terminal")
+        #expect(flaky.needsYou && flaky.supports(.reply) == false)
+        // A Codex Desktop thread asking: the app answers it; it can be marked seen.
+        let question = try item("codex:desk-q", in: inbox)
+        #expect(question.heldOnMac == .waitingInApp)
+        #expect(InboxHold.waitingInApp.headline(question) == "Waiting for you in the Codex app")
+        #expect(question.supports(.seen))
+        // Live in a terminal (working, or finished and still open there).
+        #expect(try item("claude:retry", in: inbox).heldOnMac == .openInTerminal)
+        #expect(try item("claude:open-done", in: inbox).heldOnMac == .openInTerminal)
+        // A Codex Desktop thread at work: the app's.
+        #expect(try item("codex:desk-run", in: inbox).heldOnMac == .ownedByApp)
+        // Nobody holds these: a reply continues them on the Mac.
+        #expect(try item("claude:changelog", in: inbox).heldOnMac == nil)
+        #expect(try item("codex:cli-idle", in: inbox).heldOnMac == nil)
+        // T3 acts through its own routes.
+        #expect(try item("t3:t_deploy", in: inbox).heldOnMac == nil)
+        // A prompt whose label doesn't say where gets ours.
+        var unlabeled = flaky
+        unlabeled.statusLabel = "Needs approval"
+        #expect(InboxHold.waitingInTerminal.headline(unlabeled) == "Waiting for you in the terminal")
+        var question2 = flaky
+        question2.status = .needsInput
+        question2.statusLabel = "Has a question in the terminal"
+        #expect(question2.heldOnMac == .waitingInTerminal)
+        #expect(InboxHold.waitingInTerminal.headline(question2) == "Has a question in the terminal")
+    }
+
+    /// A T3 item is the thread the T3 screens know, with the request the inbox showed (so Approve answers exactly it).
+    @Test func t3ItemsBecomeTheirThreads() throws {
+        let inbox = try snapshot()
+        let deploy = try #require(try item("t3:t_deploy", in: inbox).taskThread)
+        #expect(deploy.threadId == "t_deploy")
+        #expect(deploy.status == .needsApproval)
+        #expect(deploy.projectName == "Assistant")
+        #expect(deploy.pending?.kind == .approval)
+        #expect(deploy.pending?.requestId == "r1")
+        #expect(deploy.pending?.canRespond == true)
+        #expect(try item("claude:flaky", in: inbox).taskThread == nil)
+        #expect(try item("claude:flaky", in: inbox).threadId == nil)
+
+        // And back: an older bridge's thread list as inbox rows, T3 only.
+        let question = TaskThread(threadId: "t_q", title: "Fix login", projectName: "Website", status: .needsInput,
+                                  updatedAt: .now, summary: nil,
+                                  pending: PendingAction(kind: .question, text: "Where should people land?",
+                                                         options: [PendingOption(value: "/home")], requestId: "q1",
+                                                         questionId: "qa"))
+        let row = InboxItem(thread: question)
+        #expect(row.id == "t3:t_q" && row.source == .t3)
+        #expect(row.supports(.answer) && row.supports(.stop))
+        #expect(row.pending.inputs.first?.requestId == "q1")
+        #expect(row.pending.inputs.first?.questions.first?.id == "qa")
+        #expect(row.taskThread?.pending?.questionId == "qa")
+        let older = InboxSnapshot.fromThreads([question, TaskThread(threadId: "t_w", title: "W", status: .working)])
+        #expect(older.items.map(\.id) == ["t3:t_q", "t3:t_w"])
+        #expect(older.counts == InboxCounts(needsYou: 1, working: 1, total: 2))
+        // A summary thread (no request id) keeps what it waits on as words, and can't be answered from a card.
+        let summaryThread = TaskThread(threadId: "t_s", title: "S", status: .needsApproval,
+                                       pending: PendingAction(kind: .approval, text: "Deploy prod?"))
+        let summaryRow = InboxItem(thread: summaryThread)
+        #expect(summaryRow.pending.isEmpty)
+        #expect(summaryRow.summary == "Deploy prod?")
+    }
+
+    /// The counts Home, the badge and the widgets show: the agents' rows (a chat answering is not an agent at work),
+    /// plus what the bridge counts beyond the 60 items it sends.
+    @Test func countsComeFromTheAgentsRows() throws {
+        let inbox = try snapshot()
+        #expect(inbox.shownCounts == InboxCounts(needsYou: 5, working: 2, total: 9))
+        let overview = inbox.overview(top: 3)
+        #expect(overview.needsYou == 5 && overview.working == 2 && overview.total == 9)
+        #expect(overview.items.map(\.id) == ["t3:t_deploy", "claude:flaky", "codex:desk-q"])
+
+        // 75 items on the Mac, 60 sent: what lies past the cap still counts.
+        var items: [String] = []
+        for index in 0..<75 {
+            items.append("""
+            {"id":"claude:s\(index)","source":"claude","title":"S\(index)","status":"\(index < 20 ? "needs-approval" : "working")",
+             "updatedAt":"2026-10-14T05:\(String(format: "%02d", index % 60)):00Z","can":[],"live":true}
+            """)
+        }
+        let big = try snapshot("""
+        {"revision": 7, "counts": {"needsYou": 20, "working": 55, "total": 75}, "items": [\(items.joined(separator: ","))]}
+        """)
+        #expect(big.items.count == InboxSnapshot.itemCap)
+        #expect(big.shownCounts == InboxCounts(needsYou: 20, working: 55, total: 75))
+
+        // No counts at all: counted from the items.
+        let bare = try snapshot("""
+        {"revision": 3, "items": [{"id":"codex:x","title":"X","status":"error","unread":true},
+                                  {"id":"chat:y","title":"Y","status":"working"}]}
+        """)
+        #expect(bare.counts == InboxCounts(needsYou: 1, working: 0, total: 2))
+        #expect(bare.items.first?.source == .codex)
+        #expect(bare.items.last?.source == .samrabbit) // `chat:` ids are SamRabbit's
+    }
+
+    /// T3 Code not answering: the others stay, the T3 part says why.
+    @Test func t3DownIsAProblemOnlyForT3() throws {
+        let inbox = try snapshot("""
+        {"revision": 9, "sources": {"t3": {"connected": false, "reason": "t3_unavailable"}, "claude": {"available": true}},
+         "items": [{"id":"claude:a","source":"claude","title":"A","status":"done","unread":true,"can":["reply","seen"]}]}
+        """)
+        #expect(!inbox.t3Connected)
+        let problem = try #require(inbox.t3Problem)
+        #expect(problem.code == "t3_unavailable")
+        #expect(problem.isRetryable)
+        #expect(inbox.agentItems.count == 1)
+    }
+
+    /// The iPhone puts the inbox's counts into the summary for Home, the orb, Siri and the widgets; a hiccup keeps
+    /// the last ones, an older bridge (404) leaves T3's.
+    @Test func theSummaryCarriesTheInbox() throws {
+        let inbox = try snapshot()
+        var plain = MobileSummary.sample()
+        plain.inbox = nil
+        plain.t3.needsYou = 0
+        plain.t3.working = 0
+        #expect(plain.needsYouCount == 0)
+        #expect(OrbMood.from(plain) == .idle || plain.r1.live)
+        plain.r1.live = false
+
+        let merged = plain.with(inbox: inbox)
+        #expect(merged.needsYouCount == 5)
+        #expect(merged.workingCount == 2)
+        #expect(merged.inbox?.items.count == 5)
+        #expect(OrbMood.from(merged) == .attention)
+
+        let kept = try #require(merged.inbox)
+        let hiccup = plain.with(inbox: .failure(.unreachable("timed out")), kept: kept)
+        #expect(hiccup.inbox == kept)
+        let older = plain.with(inbox: .failure(.server(status: 404, code: "not_found", message: "", retryable: false)),
+                               kept: kept)
+        #expect(older.inbox == nil)
+        #expect(older.needsYouCount == plain.t3.needsYou)
+        #expect(plain.with(inbox: .failure(.unreachable("x")), kept: nil).inbox == nil)
+        // A bridge that sends its own `inbox` in the summary keeps it.
+        #expect(merged.with(inbox: .failure(.unreachable("x")), kept: nil).inbox == kept)
+        #expect(plain.with(inbox: Result<InboxSnapshot, BridgeError>.success(inbox), kept: nil).inbox == kept)
+
+        let decoded = try BridgeJSON.decode(MobileSummary.self, from: Data("""
+        {"t3": {"needsYou": 1, "working": 0}, "inbox": {"counts": {"needsYou": 4, "working": 2, "total": 7}, "items": []}}
+        """.utf8))
+        #expect(decoded.needsYouCount == 4 && decoded.workingCount == 2)
+        #expect(decoded.inbox?.total == 7)
+    }
+
+    /// The App Group cache (the widgets read it) keeps every inbox field.
+    @Test func theInboxSurvivesTheWidgetsCache() throws {
+        let base = try BridgeJSON.decode(MobileSummary.self, from: Data(DecodingTests.summaryJSON.utf8))
+        let summary = base.with(inbox: try snapshot())
+        let cache = SummaryCache(container: .temporary())
+        cache.save(summary, at: Date(timeIntervalSince1970: 1_800_000_000))
+        let entry = try #require(cache.load())
+        #expect(entry.summary == summary)
+        #expect(entry.summary.inbox?.items.first { $0.id == "claude:flaky" }?.heldOnMac == .waitingInTerminal)
+        #expect(entry.summary.inbox?.items.first { $0.id == "codex:desk-q" }?.pending.inputs.first?.questions.first?
+            .options == ["Warm", "Crisp"])
+        // The sample the widget gallery and previews use covers every source.
+        let sources = Set(MobileSummary.sample().inbox?.items.map(\.source) ?? [])
+        #expect(sources == [.t3, .claude, .codex])
+    }
+
+    /// "What needs me" (Siri, the intents) counts every agent and says where a terminal waits.
+    @Test func whatNeedsMeNamesEveryAgent() throws {
+        let now = BridgeDates.date(from: "2026-10-14T05:20:30Z")!
+        var summary = MobileSummary(generatedAt: now).with(inbox: try snapshot())
+        summary.calendar.next = []
+        #expect(SpokenSummary.whatNeedsMe(summary, now: now) ==
+            "Five tasks need you: approve “Deploy release 2.4 to staging”, approve “Investigate the flaky long-poll test” "
+            + "in the terminal and answer “Sketch onboarding copy” in the Codex app. Two are working.")
+        summary.inbox = InboxOverview()
+        #expect(SpokenSummary.whatNeedsMe(summary, now: now) == "Nothing needs you right now.")
+    }
+
+    @Test func itemDetailsHaveStableIds() throws {
+        let detail = try BridgeJSON.decode(InboxItemDetail.self, from: Data("""
+        {"item": {"id": "claude:changelog", "source": "claude", "title": "Changelog", "status": "done", "can": ["reply"]},
+         "messages": [{"role": "user", "text": "Summarize the PRs", "at": "2026-10-14T05:00:00Z"},
+                      {"role": "assistant", "text": "", "at": "2026-10-14T05:00:10Z"},
+                      {"role": "assistant", "text": "Done. **14 PRs**", "at": "2026-10-14T05:01:00Z"},
+                      {"role": "assistant", "text": "Want a PR?", "at": "2026-10-14T05:01:00Z"}]}
+        """.utf8))
+        #expect(detail.item.id == "claude:changelog")
+        #expect(detail.messages.count == 3) // the empty one is dropped
+        #expect(Set(detail.messages.map(\.id)).count == 3)
+        let again = try BridgeJSON.decode(InboxItemDetail.self, from: try BridgeJSON.encoder().encode(detail))
+        #expect(again.messages.map(\.id) == detail.messages.map(\.id))
+        #expect(throws: (any Error).self) {
+            _ = try BridgeJSON.decode(InboxItemDetail.self, from: Data(#"{"messages": []}"#.utf8))
+        }
+    }
+
+    @Test func targetsRepliesAndNewTasks() throws {
+        let targets = try BridgeJSON.decode(InboxTargets.self, from: Data("""
+        {"projects": [{"id": "p_site", "title": "Website", "lastActiveAt": "2026-10-14T05:00:00Z"}, {"id": "", "title": "x"}],
+         "agents": [{"id": "claude", "label": "Claude", "models": [{"id": "claude-opus-5-5", "label": "Claude Opus 5.5"}]},
+                    {"id": "codex", "models": [{"id": "gpt-5.5-codex", "label": "GPT-5.5 Codex"}, {"label": "no id"}]}],
+         "default": {"projectId": "p_site", "agent": "codex", "model": "gpt-5.5-codex"}}
+        """.utf8))
+        #expect(targets.projects.map(\.title) == ["Website"])
+        #expect(targets.agents.map(\.id) == ["claude", "codex"])
+        #expect(targets.agent("codex")?.label == "Codex")
+        #expect(targets.agent("codex")?.models.map(\.id) == ["gpt-5.5-codex"])
+        #expect(targets.defaultChoice == InboxTargets.Choice(projectId: "p_site", agent: "codex", model: "gpt-5.5-codex"))
+        #expect(try BridgeJSON.decode(InboxTargets.self, from: try BridgeJSON.encoder().encode(targets)) == targets)
+
+        let terminal = try BridgeJSON.decode(InboxReplyResult.self, from: Data(
+            #"{"ok": true, "how": "terminal", "message": "It continues in a new Terminal window on the Mac."}"#.utf8))
+        #expect(terminal.resumedInTerminal && !terminal.dryRun)
+        #expect(terminal.message == "It continues in a new Terminal window on the Mac.")
+        let dry = try BridgeJSON.decode(InboxReplyResult.self, from: Data(#"{"ok":true,"how":"terminal","dryRun":true}"#.utf8))
+        #expect(dry.dryRun && dry.message == nil)
+        #expect(!(try BridgeJSON.decode(InboxReplyResult.self, from: Data(#"{"ok":true,"how":"t3"}"#.utf8))).resumedInTerminal)
+
+        let created = try BridgeJSON.decode(CreatedInboxTask.self, from: Data(
+            #"{"itemId": "t3:t_new", "title": "Dark mode", "projectName": "Website"}"#.utf8))
+        #expect(created.threadId == "t_new" && created.projectName == "Website")
+        let fromThread = try BridgeJSON.decode(CreatedInboxTask.self, from: Data(#"{"threadId": "t_x"}"#.utf8))
+        #expect(fromThread.itemId == "t3:t_x")
+    }
+
+    @Test func errorsLinksAndPaths() {
+        #expect(BridgeError.server(status: 404, code: "not_found", message: "", retryable: false).isRouteMissing)
+        #expect(!BridgeError.server(status: 404, code: "item_not_found", message: "", retryable: false).isRouteMissing)
+        #expect(!BridgeError.unreachable("x").isRouteMissing)
+        #expect(BridgeError.server(status: 409, code: "session_live", message: "", retryable: false).isSessionLive)
+        #expect(!BridgeError.server(status: 409, code: "unsupported_action", message: "", retryable: false).isSessionLive)
+
+        #expect(AppLink(url: URL(string: "samrabbit://inbox/claude:5d0c6f2e-1a47")!) == .inbox("claude:5d0c6f2e-1a47"))
+        #expect(AppLink(url: URL(string: "samrabbit://inbox")!) == .inbox(nil))
+
+        #expect(BridgeClient.inboxPath("claude:5d0c") == "/v1/mobile/inbox/items/claude:5d0c")
+        #expect(BridgeClient.inboxPath("codex:a/b c", "reply") == "/v1/mobile/inbox/items/codex:a%2Fb%20c/reply")
+    }
+
+    /// Claude Code and Codex prompts are announced once per request, open the item, and say where to answer; finished
+    /// sessions, T3 items given as agents and items without a request are not.
+    @Test func agentPromptsAreAnnouncedOnce() throws {
+        let inbox = try snapshot()
+        let agents = inbox.agentItems
+        let first = AlertPlanner.plan(threads: [], agents: agents, announced: [:], tracked: [])
+        #expect(first.alerts.map(\.id) == ["needs:claude:flaky|toolu_01", "needs:codex:desk-q|call_9"])
+        let flaky = try #require(first.alerts.first)
+        #expect(flaky.title == "Investigate the flaky long-poll test")
+        #expect(flaky.body == "Waiting for you in the terminal: Bash: python3 -I -m unittest -k long_poll")
+        #expect(flaky.link == "samrabbit://inbox/claude:flaky")
+        #expect(first.alerts.last?.body == "Waiting for you in the Codex app: Which tone?")
+        // Once.
+        #expect(AlertPlanner.plan(threads: [], agents: agents, announced: first.announced, tracked: []).alerts.isEmpty)
+        // A new prompt on the same session: again.
+        var next = try item("claude:flaky", in: inbox)
+        next.pending = InboxPending(approvals: [InboxApproval(requestId: "toolu_02", kind: "file_change")])
+        let second = AlertPlanner.plan(threads: [], agents: [next], announced: first.announced, tracked: [])
+        #expect(second.alerts.map(\.body) == ["Waiting for you in the terminal: Wants to change files"])
+        // No request id: nothing to key it on.
+        next.pending = InboxPending()
+        #expect(AlertPlanner.plan(threads: [], agents: [next], announced: [:], tracked: []).alerts.isEmpty)
+        // T3 threads keep their own links.
+        let t3 = AlertPlanner.plan(threads: [try #require(try item("t3:t_deploy", in: inbox).taskThread)],
+                                   agents: agents, announced: first.announced, tracked: [])
+        #expect(t3.alerts.map(\.link) == ["samrabbit://thread/t_deploy"])
+    }
+
+    /// The revision starts from the time in milliseconds: 64-bit on the watch's 32-bit hardware too.
+    @Test func noIntOverflowsOn32BitWatches() throws {
+        let inbox = try snapshot()
+        #expect(Int32Range.violations(in: inbox).isEmpty)
+        #expect(Int32Range.violations(in: MobileSummary.sample().with(inbox: inbox)).isEmpty)
+    }
+}
+
+#if os(macOS)
+/// The client's inbox routes against `apple/dev/fake_bridge.py` (the same rules as the real bridge's phone routes).
+@Suite("The inbox against the fake bridge", .serialized)
+struct InboxBridgeTests {
+    static let flaky = "claude:5d0c6f2e-1a47-4f7e-9a51-3c2b1e0d9f88"
+    static let changelog = "claude:8b1e2c3d-4f5a-4b6c-8d7e-9f0a1b2c3d4e"
+    static let pytest = "codex:019a1f2e-3d4c-7b5a-9687-a5b4c3d2e1f0"
+    static let onboarding = "codex:019a6c7d-8e9f-7a01-b2c3-d4e5f6a7b8c9"
+
+    @Test func listsEverySourceWithoutOpen() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, _) = try await bridge.pairedClient()
+        let inbox = try await client.inbox()
+        #expect(Set(inbox.items.map(\.source)) == [.t3, .claude, .codex, .samrabbit])
+        #expect(!inbox.items.contains { $0.supports(.open) })
+        #expect(inbox.t3Connected)
+        #expect(inbox.items.first?.status == .needsApproval)
+        let flaky = try #require(inbox.items.first { $0.id == Self.flaky })
+        #expect(flaky.heldOnMac == .waitingInTerminal)
+        #expect(flaky.live)
+        #expect(try #require(inbox.items.first { $0.id == Self.onboarding }).heldOnMac == .ownedByApp)
+        #expect(try #require(inbox.items.first { $0.id == Self.changelog }).supports(.reply))
+        #expect(inbox.shownCounts.needsYou == 7)
+        #expect(inbox.shownCounts.needsYou == inbox.counts.needsYou)
+        // Opening is the Mac's own.
+        let opened = try await client.raw(.post(BridgeClient.inboxPath(Self.flaky, "open"), body: [:]))
+        #expect(opened.status == 409)
+        #expect(try JSONDecoder().decode(JSONValue.self, from: opened.body)["error"]["code"].string == "unsupported_action")
+    }
+
+    /// `?after=<revision>&wait=` answers at once when the list moved, after `wait` with the same list otherwise, and
+    /// wakes up when something changes meanwhile.
+    @Test func theLongPollWakesUpOnAChange() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, _) = try await bridge.pairedClient()
+        let first = try await client.inbox()
+        let started = Date.now
+        let same = try await client.inbox(after: first.revision, wait: 1)
+        #expect(same.revision == first.revision)
+        #expect(Date.now.timeIntervalSince(started) >= 0.9)
+        #expect(try await client.inbox(after: first.revision - 1, wait: 5).revision == first.revision)
+
+        async let woken = client.inbox(after: first.revision, wait: 20)
+        try await Task.sleep(for: .milliseconds(400))
+        try await client.inboxSeen(Self.pytest)
+        let changed = try await woken
+        #expect(changed.revision > first.revision)
+        let pytest = try #require(changed.items.first { $0.id == Self.pytest })
+        #expect(!pytest.unread && !pytest.needsYou)
+        #expect(pytest.status == .idle) // a failure he has seen settles
+        #expect(changed.shownCounts.needsYou == first.shownCounts.needsYou - 1)
+    }
+
+    /// A Claude Code session nobody runs: the reply continues it in a Terminal window on the Mac (said so), then it
+    /// is live there and a second reply is refused (`session_live`); the CLI's own prompt can't be answered here.
+    @Test func replyingToClaudeCode() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, _) = try await bridge.pairedClient()
+        let detail = try await client.inboxItem(Self.changelog)
+        #expect(detail.item.title == "Summarize this week's merged PRs for the changelog")
+        #expect(detail.messages.map(\.role) == [.user, .assistant])
+        #expect(detail.messages.last?.text.contains("14 PRs") == true)
+
+        let sent = try await client.inboxReply(Self.changelog, text: "Yes, open the PR")
+        #expect(sent.resumedInTerminal)
+        #expect(sent.message == "It continues in a new Terminal window on the Mac.")
+        let now = try await client.inboxItem(Self.changelog)
+        #expect(now.item.live && now.item.status == .working)
+        #expect(now.item.heldOnMac == .openInTerminal)
+        #expect(now.messages.last?.text == "Yes, open the PR")
+        await #expect { _ = try await client.inboxReply(Self.changelog, text: "again") }
+            throws: { ($0 as? BridgeError)?.isSessionLive == true }
+        await #expect { _ = try await client.inboxReply(Self.flaky, text: "go") }
+            throws: { ($0 as? BridgeError)?.isSessionLive == true }
+        await #expect { _ = try await client.inboxReply(Self.onboarding, text: "go") }
+            throws: { ($0 as? BridgeError)?.code == "unsupported_action" }
+        let log = try await bridge.control("inbox", [:])
+        #expect(log["replies"].array?.compactMap { $0["id"].string } == [Self.changelog])
+        // It finishes in its terminal a few seconds later.
+        try await bridge.control("settle")
+        let finished = try await client.inboxItem(Self.changelog)
+        #expect(finished.item.status == .done && finished.item.unread)
+        #expect(finished.messages.last?.text.contains("I followed your note") == true)
+    }
+
+    /// T3 items act through the inbox routes too (approve with T3's own decisions, answer, reply), and a new task
+    /// goes with the agent and model picked.
+    @Test func t3ThroughTheInboxAndNewTasks() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, _) = try await bridge.pairedClient()
+        let inbox = try await client.inbox()
+        let deploy = try #require(inbox.items.first { $0.id == "t3:t_deploy24" })
+        let approval = try #require(deploy.pending.approvals.first)
+        #expect(approval.options.map(\.value) == ["accept", "acceptForSession", "decline"])
+        try await client.inboxApprove(deploy.id, requestId: approval.requestId, decision: "accept")
+        #expect(try await client.thread("t_deploy24").thread.status == .working)
+        let login = try #require(inbox.items.first { $0.id == "t3:t_loginfix" })
+        let input = try #require(login.pending.inputs.first)
+        try await client.inboxAnswer(login.id, requestId: input.requestId,
+                                     answers: [try #require(input.questions.first?.id): "/pricing"])
+        #expect(try await client.thread("t_loginfix").thread.status == .working)
+
+        let targets = try await client.inboxTargets()
+        #expect(targets.agents.map(\.id) == ["claude", "codex"])
+        #expect(targets.defaultChoice.agent == "claude")
+        let created = try await client.inboxNew(text: "Add a dark mode to the pricing page",
+                                                choice: .init(projectId: "p_website", agent: "codex",
+                                                              model: "gpt-5.5-codex"))
+        #expect(created.itemId.hasPrefix("t3:"))
+        #expect(created.projectName == "Website")
+        let new = try #require(try await client.inbox().items.first { $0.id == created.itemId })
+        #expect(new.status == .working && new.agent == "codex")
+        await #expect { _ = try await client.inboxNew(text: "x", choice: .init(agent: "codex", model: "claude-opus-5-5")) }
+            throws: { ($0 as? BridgeError)?.code == "invalid_model" }
+    }
+
+    /// T3 Code down: the inbox still answers with the others; an older bridge has no inbox at all (404).
+    @Test func t3DownAndAnOlderBridge() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, account) = try await bridge.pairedClient()
+        try await bridge.control("t3", ["available": false])
+        let down = try await client.inbox()
+        #expect(!down.t3Connected)
+        #expect(down.t3Problem?.code == "t3_unavailable")
+        #expect(!down.items.contains { $0.source == .t3 })
+        #expect(down.items.contains { $0.id == Self.flaky })
+        try await bridge.control("t3", ["available": true])
+
+        try await bridge.control("inbox", ["missing": true])
+        await #expect { _ = try await client.inbox() } throws: { ($0 as? BridgeError)?.isRouteMissing == true }
+        // The shared refresh (widgets, intents) then keeps T3's counts.
+        let cache = SummaryCache(container: .temporary())
+        let actions = SamRabbitActions(account: account, cache: cache, tracker: TaskTracker(container: .temporary()),
+                                       includesInbox: true)
+        #expect(try await actions.refresh().inbox == nil)
+        try await bridge.control("inbox", ["missing": false])
+        let summary = try await actions.refresh()
+        #expect(summary.inbox?.needsYou == 7)
+        #expect(cache.load()?.summary.inbox?.needsYou == 7)
+        #expect(summary.needsYouCount == 7 && summary.t3.needsYou == 2)
+        // The watch never reads it.
+        let watch = SamRabbitActions(account: account, cache: SummaryCache(container: .temporary()),
+                                     tracker: TaskTracker(container: .temporary()), includesInbox: false)
+        #expect(try await watch.refresh().inbox == nil)
+    }
+}
+#endif

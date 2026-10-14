@@ -252,7 +252,9 @@ final class AppModel {
         let t3 = rows.compactMap(\.taskThread)
         if t3 != threads { threads = t3 }
         threadsLoaded = true
-        if snapshot.t3Connected { await notifications.check(threads: t3, needsYou: needsYouCount) }
+        let agents = rows.filter { $0.source != .t3 }
+        // While T3 Code is down its rows are the last ones: nothing new is announced from them.
+        await notifications.check(threads: snapshot.t3Connected ? t3 : [], agents: agents, needsYou: needsYouCount)
         await liveActivities.update(with: t3)
     }
 
@@ -288,12 +290,18 @@ final class AppModel {
                     try? await Task.sleep(for: .seconds(3))
                     continue
                 }
+                let asked = Date.now
                 let result = await BridgeError.capture { try await client.inbox(after: revision, wait: 25) }
                 if Task.isCancelled { return }
                 switch result {
                 case .success(let snapshot):
                     failures = 0
-                    guard snapshot.revision != self.inbox?.revision else { continue }
+                    // Revisions only grow: the same one (or one the 20 s refresh already passed) changes nothing.
+                    guard snapshot.revision > self.inbox?.revision ?? .min else {
+                        // The same list at once (a bridge that doesn't wait): ask again a little later, not in a loop.
+                        if Date.now.timeIntervalSince(asked) < 2 { try? await Task.sleep(for: .seconds(5)) }
+                        continue
+                    }
                     await self.apply(snapshot)
                     if let summary = self.summary {
                         self.summary = summary.with(inbox: snapshot)
@@ -540,10 +548,10 @@ final class AppModel {
         do {
             let result = try await client.inboxReply(item.id, text: text)
             Haptics.success()
-            if result.how == "terminal" {
+            if result.resumedInTerminal {
                 show(.success, "Sent to your Mac",
                      detail: result.dryRun ? "A test copy of the bridge: nothing opened."
-                         : "\(item.source.label) picks it up in a new Terminal window there.")
+                         : result.message ?? "\(item.source.label) picks it up in a new Terminal window there.")
             } else {
                 show(.success, "Reply sent", detail: item.title)
             }

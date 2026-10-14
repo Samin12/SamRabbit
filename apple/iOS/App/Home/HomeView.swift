@@ -98,6 +98,10 @@ struct OrbHeader: View {
         } else {
             parts.append("R1 seen \(Formatting.ago(summary.r1.lastSeenAt))")
         }
+        // While the R1 is live the headline says so: what needs you (every agent's) still shows here.
+        if summary.r1.live, model.needsYouCount > 0 {
+            parts.append("\(model.needsYouCount) need you")
+        }
         if summary.r1.live || model.needsYouCount > 0, model.workingCount > 0 {
             parts.append("\(model.workingCount) working")
         }

@@ -50,7 +50,13 @@ public struct SourceGlyph: View {
         }
         .frame(width: size, height: size)
         .accessibilityElement()
-        .accessibilityLabel(source.label)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    /// "Claude Code", or "T3 Code, run by Codex" for a T3 thread whose model family is known.
+    var accessibilityText: String {
+        guard source == .t3, let family = Self.family(agent) else { return source.label }
+        return "\(source.label), run by \(family == .codex ? "Codex" : "Claude")"
     }
 
     @ViewBuilder private var mark: some View {

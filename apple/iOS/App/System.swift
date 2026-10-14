@@ -8,8 +8,9 @@ import UserNotifications
 private let log = Logger(subsystem: "com.samrabbit.mobile", category: "system")
 
 /// Local notifications (no push: the bridge has no APNs). Each T3 request that needs you (keyed by
-/// thread and request id, shared with the background refresh through the App Group) and each task
-/// started from the phone that finishes is announced once.
+/// thread and request id, shared with the background refresh through the App Group), each Claude Code or Codex
+/// prompt waiting in its terminal or app (keyed by item and tool call), and each task started from the phone that
+/// finishes is announced once.
 final class NotificationController: Sendable {
     private let tracker = TaskTracker.shared
 
@@ -24,10 +25,11 @@ final class NotificationController: Sendable {
         }
     }
 
-    /// Plans and posts what changed since the last check. `needsYou`: the app icon's badge (every agent that needs
-    /// you, from the inbox; T3's waiting threads without it).
-    func check(threads: [TaskThread], needsYou: Int? = nil) async {
-        let plan = AlertPlanner.plan(threads: threads, announced: tracker.announced, tracked: tracker.tasks)
+    /// Plans and posts what changed since the last check. `agents`: the inbox's Claude Code and Codex items;
+    /// `needsYou`: the app icon's badge (every agent that needs you, from the inbox; T3's waiting threads without it).
+    func check(threads: [TaskThread], agents: [InboxItem] = [], needsYou: Int? = nil) async {
+        let plan = AlertPlanner.plan(threads: threads, agents: agents, announced: tracker.announced,
+                                     tracked: tracker.tasks)
         tracker.setAnnounced(plan.announced)
         tracker.update(plan.tracked)
         guard !plan.alerts.isEmpty, await authorized else { return }
@@ -35,14 +37,24 @@ final class NotificationController: Sendable {
             let content = UNMutableNotificationContent()
             content.title = alert.title
             content.body = alert.body
-            content.sound = .default
+            content.sound = Self.alertSound
             content.threadIdentifier = "samrabbit.tasks"
-            content.userInfo = ["url": "samrabbit://thread/\(alert.threadId)"]
+            content.userInfo = ["url": alert.link]
             content.interruptionLevel = alert.kind == .needsYou ? .timeSensitive : .active
             let request = UNNotificationRequest(identifier: alert.id, content: content, trigger: nil)
             try? await UNUserNotificationCenter.current().add(request)
         }
         try? await UNUserNotificationCenter.current().setBadgeCount(needsYou ?? threads.filter(\.status.needsYou).count)
+    }
+
+    /// Talk's rule: the simulator plays nothing out loud unless `-SamRabbitAudioOut on`, so its alerts come silent
+    /// (the UI tests' needs-you rows would otherwise chime through the Mac).
+    static var alertSound: UNNotificationSound? {
+        #if targetEnvironment(simulator)
+        UserDefaults.standard.string(forKey: "SamRabbitAudioOut") == "on" ? .default : nil
+        #else
+        .default
+        #endif
     }
 }
 
@@ -94,6 +106,7 @@ enum BackgroundRefresh {
             let fresh = try await client.summary(timeout: 15)
             let inbox = await inboxCall
             let summary = fresh.with(inbox: inbox, kept: SummaryCache.shared.load()?.summary.inbox)
+            let agents = (try? inbox.get())?.agentItems.filter { $0.source != .t3 } ?? []
             SummaryCache.shared.publish(summary) // reloads the widgets only when something changed
             var threads = summary.t3.threads
             // What waits for you comes from the thread list: its entries carry the request ids the
@@ -113,7 +126,9 @@ enum BackgroundRefresh {
             for task in TaskTracker.shared.tasks where !known.contains(task.threadId) {
                 if let detail = try? await client.thread(task.threadId) { threads.append(detail.thread) }
             }
-            if complete { await NotificationController().check(threads: threads, needsYou: summary.inbox?.needsYou) }
+            if complete {
+                await NotificationController().check(threads: threads, agents: agents, needsYou: summary.inbox?.needsYou)
+            }
             await LiveActivityController().update(with: threads)
         } catch {
             log.notice("background refresh failed")

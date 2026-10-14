@@ -79,6 +79,24 @@ The voice assistant (CONTRACTS-WAVE5, "Streaming turn protocol"), with canned an
 * The Mac app's twin of those routes (CONTRACTS-WAVE6): ``/v1/desktop/assistant/turn|session|cancel|end|announcements``
   with the desktop token (``X-SamRabbit-Desktop: fake-desktop-token``, loopback only) instead of a mobile token; the
   same answers, recorded with ``deviceId: "mac"``.
+
+The inbox (CONTRACTS-WAVE6 §A, the phone's twin of WAVE7: every agent on the Mac in one list):
+
+* ``GET /v1/mobile/inbox[?after=<revision>&wait=<0..25>]`` -> ``{revision, updatedAt, counts, sources, items}``: the T3
+  threads, seven Claude Code and Codex sessions (a permission prompt waiting in its terminal, one live and working, one
+  finished and unread, an old idle one; a Codex CLI run finished and unread, a Codex Desktop thread at work, a Codex
+  CLI run that failed) and the six latest chats, in the contract's order. ``revision`` starts from the time in ms and
+  grows by one whenever the list changes; with ``after`` equal to it the answer waits up to ``wait`` seconds for one.
+* ``GET /v1/mobile/inbox/items/<id>`` -> ``{item, messages}`` (the last 12); ``GET /v1/mobile/inbox/targets``;
+  ``POST /v1/mobile/inbox/new {text, projectId?, agent?, model?}`` -> 202 ``{itemId, threadId, title, projectName}``.
+* ``POST /v1/mobile/inbox/items/<id>/approve | answer | reply | stop | seen`` as the real bridge's: T3 items through the
+  threads; a Claude Code or Codex CLI session nobody runs takes a reply (202 ``{ok, how: "terminal", message}``: "a new
+  Terminal window" resumes it, live and working, finished six seconds later), a live one answers 409 ``session_live``,
+  a Codex Desktop thread or a chat 409 ``unsupported_action``. The phone's items never list ``open`` and ``POST
+  .../open`` answers 409 ``unsupported_action`` (only the Mac opens things on its screen).
+* ``POST /__fake/inbox {missing?, id?, live?, unread?, status?, clear?}`` / ``GET /__fake/inbox``: ``missing`` makes
+  every inbox route 404 (an older bridge); ``id`` with ``live`` / ``unread`` / ``status`` changes a session; the answer
+  lists what arrived (replies, seen, new tasks, refusals; ids and sizes only).
 Stdlib only, Python 3.9.
 """
 
@@ -1025,13 +1043,15 @@ class FakeBridge:
         unread = status not in ("working", "idle") and bool(x["unread"])
         if status == "error" and not unread:
             status = "idle"  # a failure he has seen settles; its label still says so
+        asking = status in ("needs-approval", "needs-input")
         if x["source"] == "codex" and x["desktop"]:
             can = ["open"]  # the app owns its threads
-        elif status in ("needs-approval", "needs-input") or x["live"]:
+        elif asking or x["live"]:
             can = ["open"]  # the CLI owns its prompt / the session is open in a terminal
         else:
             can = ["reply", "open"]
-        if unread and status not in ("needs-approval", "needs-input"):
+        # As the real bridge: a Claude Code prompt can't be marked seen (only answered); a Codex item can.
+        if unread and (x["source"] == "codex" or not asking):
             can.append("seen")
         return {"id": x["id"], "source": x["source"], "agent": x["source"], "title": x["title"],
                 "project": x["project"], "cwd": x["cwd"], "status": status, "statusLabel": x["statusLabel"],
@@ -1047,12 +1067,19 @@ class FakeBridge:
 
     INBOX_RANK = {"needs-approval": 0, "needs-input": 1, "error": 2, "working": 4}
 
+    @staticmethod
+    def phone_view(item: Dict[str, Any]) -> Dict[str, Any]:
+        """An item as ``/v1/mobile/inbox`` shows it: like the real bridge, the phone's items never list ``open``
+        (opening is the Mac's: the dock or the SamRabbit window)."""
+        return dict(item, can=[action for action in item["can"] if action != "open"])
+
     def inbox_items(self) -> List[Dict[str, Any]]:
         items = [self.session_item(x) for x in self.sessions.values()]
         if self.t3_available:
             items += [self.t3_inbox_item(t) for t in self.threads.values()]
         chats = sorted(self.conversations.values(), key=lambda c: c["lastAt"], reverse=True)[:6]
         items += [self.chat_item(c) for c in chats]
+        items = [self.phone_view(item) for item in items]
 
         def rank(item: Dict[str, Any]) -> Tuple[int, float]:
             status = item["status"]
@@ -1107,8 +1134,9 @@ class FakeBridge:
                             and p["type"] in ("message.user", "message.assistant.done") and p.get("text")]
             else:
                 item, messages = self.session_item(record), record["messages"]
-            return {"item": item, "messages": [{"role": m["role"], "text": m["text"][:4000], "at": iso(m["at"])}
-                                               for m in messages[-12:]]}
+            return {"item": self.phone_view(item),
+                    "messages": [{"role": m["role"], "text": m["text"][:4000], "at": iso(m["at"])}
+                                 for m in messages[-12:]]}
 
     def session_reply(self, x: Dict[str, Any], text: str) -> Dict[str, Any]:
         """Claude Code / Codex ``reply``: refused while a CLI owns the session (409 ``session_live``) or the app does
@@ -1120,7 +1148,7 @@ class FakeBridge:
             raise ApiError(409, "unsupported_action", "Codex Desktop owns this thread: open it there to reply.")
         if "reply" not in item["can"]:
             self.inbox_log["refused"].append({"id": x["id"], "code": "session_live"})
-            raise ApiError(409, "session_live", "It's open in a terminal: open it to answer there.")
+            raise ApiError(409, "session_live", "It's open in a terminal on the Mac: answer it there.")
         self.inbox_log["replies"].append({"id": x["id"], "chars": len(text)})
         x["messages"].append({"role": "user", "text": text, "at": time.time()})
         x.update(status="working", statusLabel="Working", summary="Working on your reply…", live=True, unread=False,
@@ -1134,7 +1162,7 @@ class FakeBridge:
                 x["messages"].append({"role": "assistant", "text": answer, "at": time.time()})
                 x.update(status="done", statusLabel="Finished", summary=answer, unread=True, updatedAt=time.time())
         self.later(6.0, done)
-        return {"ok": True, "how": "terminal"}
+        return {"ok": True, "how": "terminal", "message": "It continues in a new Terminal window on the Mac."}
 
     def inbox_action(self, item_id: str, action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         with self.lock:
@@ -1951,6 +1979,10 @@ class Handler(BaseHTTPRequestHandler):
         if action is None:
             self.only(method, "GET")
             return self.send_json(200, b.inbox_detail(item_id))
+        if action == "open":
+            # Like the real bridge: the phone never brings anything up on the Mac's screen.
+            self.only(method, "POST")
+            raise ApiError(409, "unsupported_action", "Opening is done on the Mac (the dock or the SamRabbit window).")
         if action not in ("approve", "answer", "reply", "stop", "seen"):
             raise ApiError(404, "not_found", "Not found.")
         self.only(method, "POST")

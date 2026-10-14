@@ -37,7 +37,7 @@ struct InboxCard: View {
             .buttonStyle(.plain)
             if let text = InboxText.body(item), !text.isEmpty {
                 Text(text)
-                    .font(item.heldOnMac == .waitingInTerminal && !item.pending.approvals.isEmpty
+                    .font(item.heldOnMac != nil && !item.pending.approvals.isEmpty
                           ? .system(size: 13, design: .monospaced) : .system(size: 14.5))
                     .foregroundStyle(SamTheme.ink2)
                     .lineLimit(4)
@@ -109,17 +109,17 @@ struct InboxHoldNote: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
-            Image(systemName: hold == .ownedByApp ? "macwindow" : "apple.terminal.fill")
+            Image(systemName: hold.symbol)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(SourceGlyph.tint(item.source))
                 .frame(width: 30, height: 30)
                 .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(SourceGlyph.tint(item.source).opacity(0.14)))
             VStack(alignment: .leading, spacing: 2) {
-                Text(hold.headline(item.source))
+                Text(hold.headline(item))
                     .font(.system(size: 14.5, weight: .semibold))
                     .foregroundStyle(SamTheme.ink)
-                Text(hold.detail(item.source))
+                Text(hold.detail(item))
                     .font(.system(size: 12.5))
                     .foregroundStyle(SamTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -253,8 +253,8 @@ struct SourceFilterBar: View {
     var body: some View {
         let present = [InboxSource.t3, .claude, .codex].filter { source in items.contains { $0.source == source } }
         ScrollView(.horizontal, showsIndicators: false) {
-            GlassEffectContainer(spacing: 8) {
-                HStack(spacing: 8) {
+            GlassEffectContainer(spacing: 6) {
+                HStack(spacing: 6) {
                     chip(nil, "All", count: items.count)
                     ForEach(present, id: \.self) { source in
                         chip(source, source.shortLabel, count: items.filter { $0.source == source }.count)
@@ -282,7 +282,7 @@ struct SourceFilterBar: View {
                     .foregroundStyle(selected ? SamTheme.ink : SamTheme.muted)
             }
             .foregroundStyle(selected ? SamTheme.ink : SamTheme.ink2)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .contentShape(.capsule)
         }
@@ -296,37 +296,30 @@ struct SourceFilterBar: View {
 
 /// The words the rows and cards use.
 enum InboxText {
-    /// "Website · Codex · 5 min ago" (a T3 thread names the model family running it; the glyph names the source).
+    /// "Website · 5 min ago" (the glyph names the source, and for a T3 thread the model family in its corner).
     static func meta(_ item: InboxItem) -> String {
-        [item.project, item.source == .t3 ? item.agentLabel : nil, Formatting.ago(item.updatedAt)]
-            .compactMap { $0 }.joined(separator: " · ")
+        [item.project, Formatting.ago(item.updatedAt)].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// What a card shows in its box: the request it waits on, else its last words.
     static func body(_ item: InboxItem) -> String? {
-        if let approval = item.pending.approvals.first {
-            return approval.detail.isEmpty ? approval.kindLabel : approval.detail
-        }
-        if let question = item.pending.inputs.first?.questions.first { return question.question }
+        if let detail = InboxPending.detail(item.pending) { return detail }
         if let pending = item.taskThread?.pending?.text, !pending.isEmpty { return pending }
         return item.summary.isEmpty ? nil : item.summary
     }
 
-    /// "JACKRABBIT-SRC · LIVE IN TERMINAL" (a row's last line).
+    /// "JACKRABBIT-SRC · LIVE IN TERMINAL" (a row's last line; the glyph already names the source).
     static func footer(_ item: InboxItem) -> String {
         var parts: [String] = []
         if let project = item.project { parts.append(project) }
-        switch item.source {
-        case .t3: if let agent = item.agentLabel { parts.append("T3 · \(agent)") } else { parts.append("T3 Code") }
-        case .claude, .codex: parts.append(item.source.label)
-        default: break
-        }
         if item.live {
             parts.append("Live in Terminal")
-        } else if item.heldOnMac == .ownedByApp {
+        } else if item.heldOnMac == .ownedByApp || item.heldOnMac == .waitingInApp {
             parts.append("Codex app")
         } else if !item.statusLabel.isEmpty, item.status != .working {
             parts.append(item.statusLabel)
+        } else if parts.isEmpty {
+            parts.append(item.source.label)
         }
         return parts.joined(separator: " · ")
     }

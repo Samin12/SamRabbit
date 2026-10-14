@@ -165,6 +165,12 @@ public struct InboxPending: Codable, Sendable, Equatable {
 
     public var isEmpty: Bool { approvals.isEmpty && inputs.isEmpty }
 
+    /// The words of what it waits on: the approval's detail (else its kind), else the first question.
+    public static func detail(_ pending: InboxPending) -> String? {
+        if let approval = pending.approvals.first { return approval.detail.isEmpty ? approval.kindLabel : approval.detail }
+        return pending.inputs.first?.questions.first?.question
+    }
+
     /// The first open request as the T3 cards know it (`PendingAction`): an approval (Approve / Deny with its
     /// request id), else the first question of the first input request.
     public var firstAction: PendingAction? {
@@ -288,15 +294,6 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
         }
     }
 
-    /// Who runs it, for the meta line: "Claude", "Codex", or nil.
-    public var agentLabel: String? {
-        switch (agent ?? (source == .claude || source == .codex ? source.rawValue : "")).lowercased() {
-        case "claude": "Claude"
-        case "codex": "Codex"
-        default: nil
-        }
-    }
-
     /// The T3 thread id of a T3 item.
     public var threadId: String? { source == .t3 ? key : nil }
 
@@ -309,14 +306,28 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
     }
 
     /// Why a Claude Code or Codex item can't be answered from the iPhone right now (nil: it can, or it is T3).
+    /// The phone's items never list `open` (only the Mac opens things on its screen), so what is left says it: a
+    /// prompt the CLI shows in its terminal (no `approve` / `answer`), a session a terminal owns (`live`, no
+    /// `reply`), or a thread of the Codex app.
     public var heldOnMac: InboxHold? {
         guard source == .claude || source == .codex else { return nil }
         if status == .needsApproval || status == .needsInput, !supports(.approve), !supports(.answer) {
-            return .waitingInTerminal
+            return asksInCodexApp ? .waitingInApp : .waitingInTerminal
         }
         if supports(.reply) { return nil }
         if live { return .openInTerminal }
         return source == .codex ? .ownedByApp : .openInTerminal
+    }
+
+    /// A Codex Desktop thread that asks something: the bridge says where ("Waiting for you in Codex", "Has a question
+    /// in Codex"; a CLI's say "in the terminal"). Nothing else tells the phone which app runs a Codex thread.
+    var asksInCodexApp: Bool {
+        source == .codex && statusLabel.lowercased().hasSuffix("in codex")
+    }
+
+    /// The id of the request it waits on (an approval's, else an input's), if any.
+    public var pendingRequestId: String? {
+        pending.approvals.first?.requestId ?? pending.inputs.first?.requestId
     }
 }
 
@@ -324,29 +335,44 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
 public enum InboxHold: String, Sendable, Equatable {
     /// The CLI shows a prompt (a permission, a question) in its terminal: only the terminal can answer it.
     case waitingInTerminal
+    /// The Codex app asks something in one of its threads: only the app can answer it.
+    case waitingInApp
     /// A CLI owns the session right now (open in a terminal): answer it there.
     case openInTerminal
     /// Codex Desktop runs this thread: only the app answers it.
     case ownedByApp
 
-    /// One line for the card.
-    public func headline(_ source: InboxSource) -> String {
+    /// One line for the card: the bridge's own words for a prompt ("Has a question in the terminal", "May be waiting
+    /// for you in the terminal"), else ours.
+    public func headline(_ item: InboxItem) -> String {
         switch self {
-        case .waitingInTerminal: "Waiting for you in the terminal"
-        case .openInTerminal: "Open in Terminal on your Mac"
-        case .ownedByApp: "Open in the \(source == .codex ? "Codex" : "agent") app on your Mac"
+        case .waitingInTerminal:
+            item.statusLabel.lowercased().contains("in the terminal") ? item.statusLabel : "Waiting for you in the terminal"
+        case .waitingInApp: "Waiting for you in the Codex app"
+        case .openInTerminal: "Open in a terminal on your Mac"
+        case .ownedByApp: "Runs in the Codex app on your Mac"
         }
     }
 
     /// What to do about it.
-    public func detail(_ source: InboxSource) -> String {
+    public func detail(_ item: InboxItem) -> String {
         switch self {
         case .waitingInTerminal:
-            "\(source.label) is asking in its terminal on your Mac. Answer it there; it shows up here again when it moves on."
+            "\(item.source.label) is asking in its terminal on your Mac. Answer it there; it shows up here again when it moves on."
+        case .waitingInApp:
+            "The Codex app on your Mac is asking. Answer it in the app; it shows up here again when it moves on."
         case .openInTerminal:
-            "\(source.label) is running in a terminal on your Mac. Reply there, or here once it's closed."
+            "\(item.source.label) is running in a terminal on your Mac. Reply there, or here once it's closed."
         case .ownedByApp:
             "The Codex app on your Mac runs this thread. Answer it in the app."
+        }
+    }
+
+    /// The symbol beside it.
+    public var symbol: String {
+        switch self {
+        case .waitingInTerminal, .openInTerminal: "apple.terminal.fill"
+        case .waitingInApp, .ownedByApp: "macwindow"
         }
     }
 }
@@ -383,7 +409,7 @@ public struct InboxSourceState: Codable, Sendable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: AnyKey.self)
-        ok = c.optionalBool("connected") ?? c.optionalBool("available") ?? true
+        ok = c.optionalBool("connected") ?? c.optionalBool("available") ?? c.optionalBool("ok") ?? true
         reason = c.text("reason")
     }
 }
@@ -615,22 +641,28 @@ public struct InboxItemDetail: Codable, Sendable, Equatable {
     }
 }
 
-/// What `reply` did (`202 {ok, how}`): `terminal` (a new Terminal window on the Mac resumed the session with the
-/// reply), `t3`, `app`. `dryRun`: a bridge copy that opens nothing.
+/// What `reply` did (`202 {ok, how, message?}`): `terminal` (a new Terminal window on the Mac resumed the session
+/// with the reply; `message` says so in the Mac's words), `t3`, `app`. `dryRun`: a bridge copy that opens nothing.
 public struct InboxReplyResult: Codable, Sendable, Equatable {
     public var how: String?
+    public var message: String?
     public var dryRun: Bool
 
-    public init(how: String? = nil, dryRun: Bool = false) {
+    public init(how: String? = nil, message: String? = nil, dryRun: Bool = false) {
         self.how = how
+        self.message = message
         self.dryRun = dryRun
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: AnyKey.self)
         how = c.text("how")
+        message = c.text("message").map { Formatting.clip($0, 200) }
         dryRun = c.bool("dryRun")
     }
+
+    /// It went to a new Terminal window on the Mac (a Claude Code or Codex CLI session resumed with the reply).
+    public var resumedInTerminal: Bool { how == "terminal" }
 }
 
 /// `GET /v1/mobile/inbox/targets`: where a new task can go (T3's projects, the Claude and Codex providers T3
@@ -720,7 +752,7 @@ public struct InboxTargets: Codable, Sendable, Equatable {
         let c = try decoder.container(keyedBy: AnyKey.self)
         projects = c.list(Project.self, "projects").filter { !$0.id.isEmpty }
         agents = c.list(Agent.self, "agents").filter { !$0.id.isEmpty }
-        defaultChoice = c.value(Choice.self, "default") ?? Choice()
+        defaultChoice = c.value(Choice.self, "default") ?? c.value(Choice.self, "defaultChoice") ?? Choice()
     }
 
     public func agent(_ id: String?) -> Agent? { agents.first { $0.id == id } }

@@ -193,7 +193,9 @@ struct InboxItemHeader: View {
 
     var statusLine: String {
         var parts = [item.statusLabel.isEmpty ? item.status.label : item.statusLabel]
-        if item.live, item.heldOnMac != .waitingInTerminal { parts.append("open in Terminal") }
+        if item.live, item.heldOnMac != .waitingInTerminal, !item.statusLabel.lowercased().contains("terminal") {
+            parts.append("open in Terminal")
+        }
         return parts.joined(separator: " · ")
     }
 
