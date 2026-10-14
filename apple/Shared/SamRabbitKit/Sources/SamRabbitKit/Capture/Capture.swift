@@ -345,12 +345,21 @@ public struct CaptureNotice: Sendable, Equatable {
     public var title: String
     public var detail: String?
     public var symbol: String
+    /// What a locked phone may show under the title (the Live Activity's last line): where it went and what to do
+    /// next, never what was said or the Mac's line about it (a journal line is private). nil: the title alone.
+    public var glance: String?
+    /// The Mac has the note, even when it couldn't do it or heard nothing: it was sent (recording it again would
+    /// make a second one).
+    public var reachedMac: Bool
 
-    public init(tone: Tone, title: String, detail: String? = nil, symbol: String) {
+    public init(tone: Tone, title: String, detail: String? = nil, symbol: String, glance: String? = nil,
+                reachedMac: Bool = false) {
         self.tone = tone
         self.title = title
         self.detail = detail
         self.symbol = symbol
+        self.glance = glance
+        self.reachedMac = reachedMac
     }
 
     /// From the Mac's answer. The bridge's own line (`outcome.detail`: "Started “Fix login” in Website.") is the
@@ -359,29 +368,35 @@ public struct CaptureNotice: Sendable, Equatable {
         let outcome = status.outcome
         switch status.state {
         case .done where outcome?.kind == .nothing, .failed where status.error == "no_speech":
-            self.init(tone: .failed, title: "I didn't catch anything", detail: "Nothing was saved.", symbol: "ear")
+            self.init(tone: .failed, title: "I didn't catch anything", detail: "Nothing was saved.", symbol: "ear",
+                      glance: "Nothing was saved.", reachedMac: true)
         case .done:
             let outcome = outcome ?? CaptureOutcome(kind: status.suggestion == nil ? .unknown : .note)
             let title = outcome.kind == .unknown ? "Sent" : outcome.headline
             var parts: [String] = []
+            var glance: [String] = []
             if let said = outcome.detail ?? status.say, !Self.repeats(said, title) { parts.append(said) }
             if outcome.kind == .note {
                 // A saved note: what it suggests, and where it waits.
                 if let suggestion = status.suggestion { parts.append(suggestion.label) }
                 parts.append("It's in Tasks.")
+                glance.append("It's in Tasks.")
             } else if parts.isEmpty, let heard = status.heard, !heard.isEmpty {
                 parts.append("“\(Formatting.clip(heard, 80))”")
             }
             let detail = parts.joined(separator: " ")
             self.init(tone: .sent, title: title, detail: detail.isEmpty ? nil : Formatting.clip(detail, 120),
-                      symbol: outcome.symbol)
+                      symbol: outcome.symbol, glance: glance.isEmpty ? nil : glance.joined(separator: " "),
+                      reachedMac: true)
         case .failed:
             let said = outcome?.detail.flatMap { Self.repeats($0, "Your Mac couldn't do it") ? nil : $0 }
             self.init(tone: .failed, title: "Your Mac couldn't do it",
                       detail: said.map { Formatting.clip($0, 120) } ?? "It kept what you said. Check Tasks on your iPhone.",
-                      symbol: "exclamationmark.triangle.fill")
+                      symbol: "exclamationmark.triangle.fill", glance: "It kept what you said. Check Tasks.",
+                      reachedMac: true)
         case .received, .transcribed:
-            self.init(tone: .sent, title: "Sent", detail: "Your Mac is on it.", symbol: "checkmark")
+            self.init(tone: .sent, title: "Sent", detail: "Your Mac is on it.", symbol: "checkmark",
+                      glance: "Your Mac is on it.", reachedMac: true)
         }
     }
 
@@ -395,14 +410,19 @@ public struct CaptureNotice: Sendable, Equatable {
 
     /// The recording is kept here until the Mac can be reached.
     public static func queued(waiting: Int = 1) -> CaptureNotice {
-        CaptureNotice(tone: .queued, title: "Saved", detail: waiting > 1
-            ? "\(waiting) notes will go when your Mac is reachable." : "It goes when your Mac is reachable.",
-            symbol: "tray.and.arrow.up.fill")
+        let detail = waiting > 1 ? "\(waiting) notes will go when your Mac is reachable." : "It goes when your Mac is reachable."
+        return CaptureNotice(tone: .queued, title: "Saved", detail: detail, symbol: "tray.and.arrow.up.fill",
+                             glance: detail)
     }
 
     /// The watch handed the recording to the iPhone (`WCSession.transferFile`), which sends it on.
-    public static let handedToPhone = CaptureNotice(tone: .queued, title: "Saved",
-                                                    detail: "Your iPhone sends it on.", symbol: "iphone.and.arrow.forward")
+    public static let handedToPhone = CaptureNotice(tone: .queued, title: "Saved", detail: "Your iPhone sends it on.",
+                                                    symbol: "iphone.and.arrow.forward", glance: "Your iPhone sends it on.")
+
+    /// The device's own words about why a note didn't go (nothing said in them): the screen and the Lock Screen alike.
+    public static func plain(_ tone: Tone, _ title: String, _ detail: String, symbol: String) -> CaptureNotice {
+        CaptureNotice(tone: tone, title: title, detail: detail, symbol: symbol, glance: detail)
+    }
 
     /// "Sent ✓ — Added to your journal" (one line: the Live Activity, accessibility).
     public var line: String {
@@ -410,6 +430,13 @@ public struct CaptureNotice: Sendable, Equatable {
         guard let detail, !detail.isEmpty else { return head }
         return "\(head) · \(detail)"
     }
+}
+
+extension InboxSnapshot {
+    /// The voice notes that failed on the Mac and wait in Tasks (`note:` items with status error): what Home's "didn't
+    /// go through" line counts, so it only ever points at notes Tasks shows (and can dismiss). The summary's
+    /// `captures.failed` counts a week; the inbox keeps a note's item for three days.
+    public var failedNotes: Int { items.filter { $0.source == .note && $0.status == .error }.count }
 }
 
 /// `summary.captures`: the last three notes (what each became, in a word and the bridge's line), how many failed
@@ -504,14 +531,23 @@ struct CaptureList: Decodable {
 }
 
 extension BridgeError {
+    /// The refusals a voice note is given up for (its recording deleted): sending the same recording again can't
+    /// change them. Too long, not audio, too big, a different recording under its id, an id the Mac won't take, an
+    /// empty file. Only these: losing a note is worse than trying once more.
+    public static let finalCaptureCodes: Set<String> = [
+        "audio_too_long", "unsupported_audio", "body_too_large", "capture_conflict", "invalid_capture_id", "empty_audio",
+    ]
+
     /// Whether a voice note that got this answer stays in the outbox to be sent again: yes for the Mac out of reach,
-    /// busy or failing, an older bridge (404, until it is updated) and a token it refused (pair again, then it goes);
-    /// no for a refusal sending it again can't change (not audio, too long, a different recording under its id).
+    /// busy or failing, an older bridge (404, until it is updated), a token it refused (pair again, then it goes), an
+    /// answer the bridge marks `retryable` (a recording that didn't arrive whole: 400 `invalid_audio`), the iPhone
+    /// turning the watch's relay down (409 `not_paired` while it pairs again) and any refusal not known to be final;
+    /// no only for `finalCaptureCodes`.
     public var isRetryableCapture: Bool {
         switch self {
         case .unreachable, .cancelled, .invalidResponse, .unauthorized, .notPaired: return true
-        case .server(let status, _, _, _):
-            return !(400..<500).contains(status) || [401, 404, 408, 425, 429].contains(status)
+        case .server(_, let code, _, let retryable):
+            return retryable || !Self.finalCaptureCodes.contains(code)
         }
     }
 }

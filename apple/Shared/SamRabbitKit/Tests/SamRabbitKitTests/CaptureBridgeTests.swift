@@ -43,6 +43,26 @@ final class PhoneCaptureRelay: BridgeRelay, @unchecked Sendable {
     }
 }
 
+/// An iPhone the watch prefers to go through right now, which turns the note down itself (it is pairing again:
+/// `BridgeAccount.performRelayedCapture`'s 409 `not_paired`): the Mac never saw it.
+final class RefusingPhoneRelay: BridgeRelay, @unchecked Sendable {
+    let asked = Mutex(0)
+
+    var prefersRelay: Bool { true }
+    func noteDirectRoute(worked: Bool) {}
+
+    func relay(_ request: BridgeRequest) async throws -> (status: Int, body: Data) {
+        let refusal = WatchRelay.Response.refusal(409, "not_paired", "Pair the iPhone first.")
+        return (refusal.status, refusal.body)
+    }
+
+    func relayCapture(_ audio: Data, meta: CaptureMeta) async throws -> (status: Int, body: Data) {
+        asked.withLock { $0 += 1 }
+        let refusal = WatchRelay.Response.refusal(409, "not_paired", "Pair the iPhone first.")
+        return (refusal.status, refusal.body)
+    }
+}
+
 /// Voice notes and the morning brief against `apple/dev/fake_bridge.py` (CONTRACTS-WAVE8): the upload as the bridge
 /// sees it (headers, the file's bytes), the same note sent twice, what became of it, its suggestion done by a tap,
 /// the note in the inbox, the Mac out of reach, the watch's note through the iPhone, the brief and its verbs, and
@@ -248,6 +268,30 @@ struct CaptureBridgeTests {
         }
     }
 
+    /// The iPhone the watch went through first refused the note itself (not paired): the watch tries the Mac directly
+    /// and it arrives; with the Mac out of reach too, it stays on the watch to be sent again (never thrown away).
+    @Test func aRefusalByTheIPhoneItselfTriesTheMacDirectly() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (_, phone) = try await bridge.pairedClient()
+        let context = try await phone.provisionWatch()
+        let relay = RefusingPhoneRelay()
+        let watch = BridgeClient(hosts: [bridge.host], token: context.token, relay: relay)
+        let file = try VoiceClip.make(seconds: 1)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let meta = CaptureMeta(source: .watch, seconds: 1)
+        let answer = try await watch.capture(file: file, meta: meta)
+        #expect(answer.captureId == meta.captureId, "it reached the Mac directly")
+        #expect(relay.asked.withLock { $0 } == 1, "the iPhone was asked first")
+        let closed = try SilentPort(listening: false)
+        let stranded = BridgeClient(hosts: [closed.host], token: context.token, relay: RefusingPhoneRelay())
+        do {
+            _ = try await stranded.capture(file: file, meta: CaptureMeta(source: .watch))
+            Issue.record("nobody took it")
+        } catch let error as BridgeError {
+            #expect(error.isRetryableCapture, "kept: \(error)")
+        }
+    }
+
     // MARK: - The brief
 
     @Test func theBriefItsVerbsAndARefresh() async throws {
@@ -281,10 +325,15 @@ struct CaptureBridgeTests {
         #expect(drafted.url?.absoluteString.contains("authuser=sam%40example.com") == true)
         #expect(drafted.message == "Saved as a draft in Gmail. Open it to send.")
         #expect(try await client.briefingAct("bi_dana", action: "draft_reply").url == drafted.url, "a second tap: the same draft")
-        // Make task, Block, Dismiss, Open on an agent (its inbox item).
-        let tasked = try await client.briefingAct("bi_acme", action: "make_task")
+        // Make task with the words the phone showed (`taskPrompt`), Block, Dismiss, Open on an agent (its inbox item).
+        let acme = try #require(brief.items(in: .doFirst).first { $0.id == "bi_acme" })
+        #expect(acme.taskPrompt == "Look into Acme's checkout errors. Two customers saw 500s since last night")
+        let tasked = try await client.briefingAct("bi_acme", action: "make_task",
+                                                  options: ["text": .string(acme.taskPrompt + " Logs first.")])
         #expect(tasked.threadId != nil)
         #expect(tasked.itemId == "t3:" + (tasked.threadId ?? ""))
+        let act = try #require(try await fakeGet(bridge, "briefing")["acts"].array?.last)
+        #expect(act["text"].string == acme.taskPrompt + " Logs first.", "exactly the words he saw")
         #expect(try await client.briefingAct("bi_fyi_payout", action: "dismiss").state == .dismissed)
         let blocked = try await client.briefingAct("bi_conflict", action: "block_time")
         #expect(blocked.state == .blocked)

@@ -99,7 +99,7 @@ change one session; `unsure`: the Mac's process list didn't answer, so neither `
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 255 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 261 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
@@ -133,13 +133,16 @@ TEST_RUNNER_SAMRABBIT_FAKE_BRIDGE=127.0.0.1:3799 xcodebuild -project apple/SamRa
 `VoiceNoteUITests` (iPhone, the made-up voice, real taps, nothing played): Home's Voice note records at once and sends
 itself after a pause ("Sent ✓ — Added to your journal", his words after the cue in the fake journal, the m4a with
 the note's id, time and source, Home's voice-notes line); Stop & send of a note the Mac only saved, waiting in Tasks
-with its suggestion, Start task; nothing heard (Try again); the Mac out of reach (kept, sent later with the same id);
-the intent (`-SamRabbitIntent note`) and its second press; a `samrabbit://capture` link waits for a tap and a
-cancelled note is never sent; the Live Activity's Stop on the Lock Screen. `BriefingUITests` (`-SamRabbitBriefAllDay
+with its suggestion, Start task; nothing heard (Try again); the Mac out of reach (kept, Home says it waits, "Tap to
+try now" sends it at once with the same id and the line follows); the intent (`-SamRabbitIntent note`) and its second
+press; a `samrabbit://capture` link waits for a tap and a cancelled note is never sent; the Live Activity's Stop on
+the Lock Screen and the outcome there without his words. `BriefingUITests` (`-SamRabbitBriefAllDay
 YES` lifts the noon limit in debug builds): the brief at the top of Home, Draft reply (a draft, Open draft, the Mac's
-line), Remind me at 2 PM (the menu), Make task, Block 30 min on the clash, Done, Today's conflict, FYI and Dismiss, what it read, an agent's Review
+line), Remind me at 2 PM (the menu), Make task (its words first: Cancel starts nothing, Start sends what he typed),
+Block 30 min on the clash, Done, Today's conflict, FYI and Dismiss, what it read, an agent's Review
 opening its task, Refresh; no brief yet leaves Home as it was. `WatchVoiceNoteTests`: the Voice Note control's intent
-records and sends itself, Stop & send through the iPhone with the watch's token, the Brief page and Done.
+records and sends itself, Stop & send through the iPhone with the watch's token, the Brief page and Done, Make task's
+confirm page (its exact words, then Start sends them).
 
 `TasksUITests` (iPhone, real taps against the fake bridge's inbox): Home counts every agent's needs-you (line and tab
 badge) and shows a Claude Code card beside T3's; Tasks lists T3, Claude Code and Codex with their glyphs under Needs
@@ -481,16 +484,23 @@ level, and it stops on 2.5 s of quiet after speech, Stop, the intent again (a se
 0.4 s is dropped. The Live Activity (`CaptureActivityAttributes`, `CaptureLiveActivity`) shows the timer and Stop
 (`StopVoiceNoteIntent`) on the Lock Screen and the Dynamic Island; with `UIBackgroundModes: audio` it keeps recording
 locked or in the background. The recording goes into the App Group outbox (`CaptureOutbox`: `<id>.m4a` + `<id>.json`,
-kept until the Mac says `received`, retried after 5 s, 30 s, 2 min, then every 10 min, on the app coming to the front,
-the network coming back and the background refresh; 50 notes, 7 days) and up with `CaptureUploader` (a quick upload
+kept until the Mac says `received`, retried after 5 s, 30 s, 2 min, then every 10 min, and at once, whatever the
+pause, when the app comes to the front, on Home's "Tap to try now" and when the network comes back; also in the
+background refresh; 50 notes, 7 days; a note on its way is left to its upload. Only a refusal sending again can't change
+ends a note and deletes its recording, `BridgeError.finalCaptureCodes`: too long, not audio, too big, another
+recording under its id; a `retryable` answer, an unknown code or the iPhone turning the watch's relay down keep it)
+and up with `CaptureUploader` (a quick upload
 in front, else a background `URLSession` upload task that finishes with the app suspended) to `POST
 /v1/mobile/capture` with `X-SamRabbit-Capture` (a UUID made when it started: sending it again is harmless),
 `X-SamRabbit-Captured-At` (with the offset) and `X-SamRabbit-Source: iphone`; then `GET …/capture/<id>?wait=8`
 for what the Mac did: "Sent ✓ — Added to your journal", "Started a T3 task · Started “Fix login” in Website.",
 "On your calendar", "Saved as a note · Start it as a T3 task? It's in Tasks.", "I didn't catch anything", or "Saved ·
 it goes when your Mac is reachable". A saved note waits in Tasks (`note:<captureId>`, source `note`, its suggestion
-as a button, Keep as note, Dismiss), and Home has a line for notes waiting on the iPhone, a note that failed or what
-the latest one became. `VoiceNoteBackgroundIntent` (an `AudioRecordingIntent`, off unless Settings > Action Button >
+as a button, Keep as note, Dismiss), and Home has a line for notes waiting on the iPhone (it follows each upload as
+it ends), the failed notes Tasks shows, or what the latest one became. The Live Activity's last line, on a locked
+phone, says only where the note went ("Sent ✓ · Added to your journal", "Saved as a note · It's in Tasks."), never what
+was said; a note the Mac has but couldn't do (or heard nothing in) says "Sent" with what went wrong, "Not sent" only
+for one it never got. `VoiceNoteBackgroundIntent` (an `AudioRecordingIntent`, off unless Settings > Action Button >
 "Record without opening SamRabbit") tries to record with the app staying in the background and continues in the
 foreground whenever iOS refuses. On the watch: `WatchDestination.note`, the "Voice Note" control (the Ultra's Action
 Button), a Voice note complication (circular, corner), Quick's Voice note and Siri "SamRabbit note" open
@@ -503,12 +513,15 @@ goes into the watch's outbox, then directly, else through the iPhone in chunks w
 headline, `sections[]` Do first / Today / Agents / FYI, each item with one or two verbs, `can`, its state and what a
 verb did) and `summary.briefing` (`BriefingOverview`, headline and count). Home shows a Morning section at the top
 until noon (Hark-style: the verb is the button): Do first and Agents as cards with their verbs (Draft reply makes a
-Gmail **draft**, never sent, and offers Open draft in the right account; Make task; Block 30 min; Remind me: in an
+Gmail **draft**, never sent, and offers Open draft in the right account; Make task first shows the words the task
+starts with, editable (`BriefTaskSheet`; the item's title and why, or the Mac's `taskText` when it sends it), and sends
+exactly those as `text`, since they come from an email; Block 30 min; Remind me: in an
 hour, at 2 PM, tonight or tomorrow, the item keeping its verbs; Open / Join; an agent's Review opens its task in
 Tasks) and Done / Dismiss, Today's events with the conflict flagged, FYI
 folded (a tap opens the email), what it read, and a refresh (one build every five minutes on the Mac). A handled item
 says what the Mac did ("Blocked 30 min at 10:05 AM."). The widgets draw the first open items the iPhone adds to the
-summary (`with(briefing:)`); the watch has a Brief page (headline, the first verb and Done) and a complication
+summary (`with(briefing:)`; Done then Dismiss, in Home's order); the watch has a Brief page (headline, the first verb
+and Done; Make task shows its exact words on a confirm page first) and a complication
 (rectangular, inline). `samrabbit://brief[/<id>]` opens Home at the brief.
 
 **turnId**: the iPhone's Talk and the watch send `turnId` with `POST /assistant/cancel` (one engine,

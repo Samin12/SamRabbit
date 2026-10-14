@@ -73,10 +73,12 @@ struct BriefPage: View {
     }
 }
 
-/// One item: the title, why, its first verb (when the watch can do it) and Done.
+/// One item: the title, why, its first verb (when the watch can do it) and Done. Make task first shows the words
+/// the task starts with (they were written from an email), and starts only from there.
 struct BriefCard: View {
     @Environment(WatchModel.self) private var model
     let item: BriefingItem
+    @State private var confirmingTask = false
 
     var body: some View {
         let busy = model.busy.contains(item.id)
@@ -99,7 +101,11 @@ struct BriefCard: View {
             HStack(spacing: 6) {
                 if item.state == .open || item.state == .snoozed, let verb = item.verbs.first(where: { $0.kind != .open }) {
                     Button {
-                        Task { await model.briefAct(item, verb.kind) }
+                        if verb.kind == .makeTask {
+                            confirmingTask = true
+                        } else {
+                            Task { await model.briefAct(item, verb.kind) }
+                        }
                     } label: {
                         Text(verb.label).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
                             .minimumScaleFactor(0.8).frame(maxWidth: .infinity)
@@ -127,5 +133,47 @@ struct BriefCard: View {
         }
         .watchCard(tint: item.section == .agents ? SamTheme.violet : SamTheme.amber, padding: 9)
         .opacity(busy ? 0.6 : 1)
+        .sheet(isPresented: $confirmingTask) {
+            BriefTaskConfirm(item: item) { confirmingTask = false }
+        }
+    }
+}
+
+/// Make task's confirm page: exactly the words the T3 task starts with (written from an email: read them first),
+/// then Start. The watch takes no typing, so to change them: on the iPhone.
+struct BriefTaskConfirm: View {
+    @Environment(WatchModel.self) private var model
+    let item: BriefingItem
+    let close: () -> Void
+
+    var body: some View {
+        let words = item.taskPrompt
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("The task starts with")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(SamTheme.muted)
+                Text(words)
+                    .font(.system(size: 14))
+                    .foregroundStyle(SamTheme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .watchCard(padding: 9)
+                    .accessibilityIdentifier("brief-task-text")
+                Label("From an email: read it first. To change it, use your iPhone.", systemImage: "envelope")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(SamTheme.amber)
+                Button {
+                    close()
+                    Task { await model.briefAct(item, .makeTask, text: words) }
+                } label: {
+                    Text("Start task").font(.system(size: 14, weight: .semibold)).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(SamTheme.orb)
+                .accessibilityIdentifier("brief-task-start")
+            }
+            .padding(.horizontal, 2)
+        }
+        .navigationTitle("New task")
     }
 }

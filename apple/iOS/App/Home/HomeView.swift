@@ -178,7 +178,7 @@ struct VoiceNotesLine: View {
         if let line {
             Button {
                 if model.capture.waiting > 0 {
-                    model.capture.sceneActive() // the outbox tries again now
+                    model.capture.tryNow() // every waiting note goes now, its pause or not
                 } else {
                     model.tab = .tasks
                 }
@@ -221,9 +221,11 @@ struct VoiceNotesLine: View {
                         detail: "They go by themselves once it answers. Tap to try now.")
         }
         guard let part = model.summary?.captures else { return nil }
-        if part.failed > 0 {
+        // The failed notes Tasks shows (and can dismiss); the summary's week-long count only until the inbox is read.
+        let failed = model.inbox?.failedNotes ?? part.failed
+        if failed > 0 {
             return Line(symbol: "exclamationmark.triangle.fill", tint: SamTheme.red,
-                        title: part.failed == 1 ? "A voice note didn't go through" : "\(part.failed) voice notes didn't go through",
+                        title: failed == 1 ? "A voice note didn't go through" : "\(failed) voice notes didn't go through",
                         detail: "Your Mac kept what you said. See it in Tasks.")
         }
         guard let latest = part.latest() else { return nil }

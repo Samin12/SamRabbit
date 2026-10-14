@@ -59,6 +59,9 @@ public enum WatchRelay {
                                          "assistant", "briefing", "capture", "captures"]
     /// Relayed another way (`TurnRelay`: the answer streams back in pieces), never as one request.
     static let notRelayed: Set<String> = ["assistant/turn"]
+    /// The iPhone's own refusals (`Response.refusal`) that say nothing about the Mac: the phone isn't paired, doesn't
+    /// pass that on, or passes on too much right now.
+    static let phoneRefusalCodes: Set<String> = ["not_paired", "relay_forbidden", "relay_busy", "transcribe_busy"]
 
     public struct Request: Codable, Sendable, Equatable {
         public var method: String

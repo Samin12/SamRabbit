@@ -176,8 +176,7 @@ struct VoiceNotePreview: View {
             CaptureActivityLockFace(state: CaptureActivityState(phase: .recording), startedAt: started)
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(hex: 0x120A12).opacity(0.88)))
                 .padding(.horizontal, 10)
-            CaptureActivityLockFace(state: CaptureActivityState(phase: .sent,
-                                                                line: "Added to your journal · “moved the cleaning to Friday”",
+            CaptureActivityLockFace(state: CaptureActivityState(phase: .sent, line: "Added to your journal",
                                                                 stoppedAt: started.addingTimeInterval(9)),
                                     startedAt: started)
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(hex: 0x120A12).opacity(0.88)))

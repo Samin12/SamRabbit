@@ -129,8 +129,9 @@ final class VoiceNoteUITests: XCTestCase {
         app.buttons["capture-close"].tap()
     }
 
-    /// The Mac out of reach: "Saved", kept on the iPhone; it goes by itself once the Mac answers again (the outbox
-    /// tries again: the same note, the same id).
+    /// The Mac out of reach: "Saved", kept on the iPhone, and Home says it waits; once the Mac answers again, Home's
+    /// "Tap to try now" sends it at once, whatever pause the outbox had it in (the same note, the same id), and Home's
+    /// line follows.
     func testTheMacOutOfReachKeepsTheNoteAndSendsItLater() throws {
         fake("capture", ["mode": "drop"])
         try launch(voice: "hold")
@@ -145,10 +146,22 @@ final class VoiceNoteUITests: XCTestCase {
         snap("phone-note-6-queued")
         let dropped = (fakeGet("capture")["uploads"] as? [[String: Any]] ?? []).compactMap { $0["captureId"] as? String }
         let id = try XCTUnwrap(dropped.last, "it tried")
+        // The recorder closes by itself; Home says the note waits on this iPhone.
+        XCTAssertTrue(waitUntil(timeout: 10) { !result.exists }, "the recorder closes")
+        let line = app.descendants(matching: .any)["home-voice-notes"]
+        XCTAssertTrue(waitUntil(timeout: 15) { line.exists && line.isHittable && line.label.contains("waiting for your Mac") },
+                      "Home's line")
+        snap("phone-note-6b-home-waiting")
+        // The Mac answers again: "Tap to try now" sends it at once, whatever pause it was in (the same note, the same
+        // id), and Home's line follows without leaving the app.
         fake("capture", ["mode": "ok"])
-        XCTAssertTrue(waitUntil(timeout: 90) {
+        line.tap()
+        XCTAssertTrue(waitUntil(timeout: 15) {
             (self.fakeGet("capture")["captures"] as? [[String: Any]] ?? []).contains { $0["captureId"] as? String == id }
         }, "the same note reached the Mac once it answered again")
+        XCTAssertTrue(waitUntil(timeout: 10) { !(line.exists && line.label.contains("waiting for your Mac")) },
+                      "Home no longer says it waits: \(line.exists ? line.label : "-")")
+        snap("phone-note-6c-home-sent")
     }
 
     /// The Action Button's intent (`-SamRabbitIntent note`) opens the recorder recording; the intent again (the second
@@ -182,8 +195,8 @@ final class VoiceNoteUITests: XCTestCase {
         XCTAssertEqual((fakeGet("capture")["uploads"] as? [Any] ?? []).count, before, "a cancelled note is never sent")
     }
 
-    /// Recording goes on with the phone locked: the Live Activity on the Lock Screen shows the timer and Stop, and its
-    /// Stop sends the note.
+    /// Recording goes on with the phone locked: the Live Activity on the Lock Screen shows the timer and Stop, its
+    /// Stop sends the note, and what the Mac did shows there without anything of what was said.
     func testTheLiveActivityStopsAndSends() throws {
         try launch(voice: "hold")
         homeTile("Voice note").tap()
@@ -203,8 +216,14 @@ final class VoiceNoteUITests: XCTestCase {
         stop.tap()
         XCTAssertTrue(waitUntil(timeout: 20) { (self.fakeGet("capture")["uploads"] as? [Any] ?? []).count > before },
                       "sent from the Lock Screen")
-        Thread.sleep(forTimeInterval: 2.5)
-        snap("phone-note-10-lock-screen-sent", settle: 0.5)
+        // What the Mac did, on the locked phone: where it went, never his words (a journal line is private).
+        let outcome = springboard.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Added to your journal'"))
+        XCTAssertTrue(outcome.firstMatch.waitForExistence(timeout: 12), "the outcome on the Lock Screen")
+        snap("phone-note-10-lock-screen-sent", settle: 1.2) // past the text's transition, before it goes (4 s)
+        // (The fixtures' calendar has its own "dentist" in a Lock Screen widget: look for his words, the note's own.)
+        XCTAssertFalse(springboard.staticTexts.matching(NSPredicate(format: "label CONTAINS 'cleaning to Friday'"))
+                        .firstMatch.exists, "nothing of what was said: \(outcome.firstMatch.label)")
+        XCTAssertFalse(outcome.firstMatch.label.contains("“"), outcome.firstMatch.label)
         springboard.swipeUp()
         app.activate()
     }

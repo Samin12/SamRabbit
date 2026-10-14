@@ -14,7 +14,7 @@ extension CaptureActivityState {
         case .recording: SamTheme.red
         case .sending: SamTheme.orbPale
         case .sent: SamTheme.mint
-        case .queued: SamTheme.amber
+        case .queued, .problem: SamTheme.amber
         case .failed: SamTheme.red
         }
     }

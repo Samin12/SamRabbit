@@ -23,6 +23,8 @@ enum AppSheet: Identifiable, Equatable {
     case manualPair
     /// A link asked for something that writes: what will happen, and a Confirm button.
     case confirm(LinkAction)
+    /// Make task on a brief item: the words the task starts with (written from an email), to read and edit first.
+    case briefTask(BriefingItem, BriefingAction)
 
     var id: String {
         switch self {
@@ -34,6 +36,7 @@ enum AppSheet: Identifiable, Equatable {
         case .pair: "pair"
         case .manualPair: "manualPair"
         case .confirm: "confirm"
+        case .briefTask: "briefTask"
         }
     }
 }
@@ -308,20 +311,29 @@ final class AppModel {
         #endif
     }
 
+    /// Make task on a brief item: its words first (`BriefTaskSheet`), editable; the task starts only on Start, with
+    /// exactly those words (`act(on:_:options:)` with `text`). They were written from an email, so an agent never runs
+    /// words he didn't see.
+    func confirmTask(_ item: BriefingItem, _ verb: BriefingAction) {
+        sheet = .briefTask(item, verb)
+    }
+
     /// One of a brief item's verbs, by his tap. Draft reply makes a Gmail draft (never sent) and opens it; Make task
-    /// starts a T3 task; Block time and Remind me go on the calendar; Done and Dismiss take it off; Open opens its
-    /// Gmail thread (with the right account). The item changes at once; the Mac's next brief confirms.
-    func act(on item: BriefingItem, _ action: BriefingAction, options: [String: JSONValue] = [:]) async {
+    /// (after `confirmTask`) starts a T3 task with the words he saw; Block time and Remind me go on the calendar; Done
+    /// and Dismiss take it off; Open opens its Gmail thread (with the right account). The item changes at once; the
+    /// Mac's next brief confirms. False: the Mac didn't do it (said in a toast).
+    @discardableResult
+    func act(on item: BriefingItem, _ action: BriefingAction, options: [String: JSONValue] = [:]) async -> Bool {
         if action.kind == .open, let url = action.url ?? item.openURL {
             UIApplicationOpener.open(url)
-            return
+            return true
         }
         // An agent waiting (Agents): its item in Tasks, where it is approved or answered.
         if action.kind == .open, let itemId = item.inboxItemId {
             openInbox(itemId)
-            return
+            return true
         }
-        guard !busyBriefItems.contains(item.id) else { return }
+        guard !busyBriefItems.contains(item.id) else { return false }
         busyBriefItems.insert(item.id)
         defer { busyBriefItems.remove(item.id) }
         do {
@@ -356,9 +368,11 @@ final class AppModel {
                 Haptics.tap()
             }
             if action.kind == .makeTask || action.kind == .blockTime { await refresh() } else { await reloadBriefing() }
+            return true
         } catch {
             fail(error)
             await reloadBriefing()
+            return false
         }
     }
 

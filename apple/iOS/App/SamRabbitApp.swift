@@ -156,6 +156,7 @@ struct SheetView: View {
         case .pair(let link): PairConfirmSheet(link: link)
         case .manualPair: NavigationStack { ManualPairView() }
         case .confirm(let action): LinkConfirmSheet(action: action)
+        case .briefTask(let item, let verb): BriefTaskSheet(item: item, verb: verb)
         }
     }
 }

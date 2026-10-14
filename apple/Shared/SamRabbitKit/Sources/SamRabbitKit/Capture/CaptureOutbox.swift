@@ -6,11 +6,11 @@ import Synchronization
 ///
 /// A note stays `waiting` (its recording kept) until the bridge answered the upload with `received` or later;
 /// then the recording is deleted and the entry kept a day (`sent`, with what the Mac did) for the screens that
-/// show it. A refusal that sending again can't change (a 4xx other than 401/408/409/429: too long, not audio) ends
-/// it `failed`. The watch's notes it handed to the iPhone (`WCSession.transferFile`) are `handedOff` once the
-/// transfer finished. Waiting notes are tried again with a growing pause (`backoff`), dropped after seven days,
-/// and at most `maxEntries` are kept. Nothing here logs what was said: the recordings are never read but to upload
-/// them.
+/// show it. Only a refusal that sending again can't change (`BridgeError.finalCaptureCodes`: too long, not audio,
+/// another recording under its id) ends it `failed`. The watch's notes it handed to the iPhone
+/// (`WCSession.transferFile`) are `handedOff` once the transfer finished. Waiting notes are tried again with a
+/// growing pause (`backoff`), dropped after seven days, and at most `maxEntries` are kept. Nothing here logs what
+/// was said: the recordings are never read but to upload them.
 public final class CaptureOutbox: Sendable {
     public enum State: String, Codable, Sendable, Equatable {
         case waiting, sent, failed, handedOff
@@ -115,17 +115,22 @@ public final class CaptureOutbox: Sendable {
         lock.withLock { _ in readAll() }
     }
 
-    /// The waiting notes whose pause is over, oldest first.
-    public func due(now: Date = .now) -> [Entry] {
-        entries().filter { $0.state == .waiting && ($0.nextAttemptAt ?? .distantPast) <= now }
+    /// The waiting notes whose pause is over, oldest first, but those in `excluding` (on their way now: an upload
+    /// still running is not started again).
+    public func due(now: Date = .now, excluding: Set<String> = []) -> [Entry] {
+        entries().filter {
+            $0.state == .waiting && ($0.nextAttemptAt ?? .distantPast) <= now && !excluding.contains($0.id)
+        }
     }
 
     /// How many notes still wait for the Mac.
     public var waiting: Int { entries().filter { $0.state == .waiting }.count }
 
-    /// When the next waiting note is due (nil: none waits).
-    public func nextDue(now: Date = .now) -> Date? {
-        entries().filter { $0.state == .waiting }.map { max(now, $0.nextAttemptAt ?? now) }.min()
+    /// When the next waiting note is due (nil: none waits), but those in `excluding` (on their way now: their
+    /// upload's end decides what comes next, so nothing ticks while it runs).
+    public func nextDue(now: Date = .now, excluding: Set<String> = []) -> Date? {
+        entries().filter { $0.state == .waiting && !excluding.contains($0.id) }
+            .map { max(now, $0.nextAttemptAt ?? now) }.min()
     }
 
     // MARK: - Outcomes

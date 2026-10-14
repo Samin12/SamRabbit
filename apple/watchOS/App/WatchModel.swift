@@ -203,13 +203,15 @@ final class WatchModel {
         return !briefing.shown.isEmpty
     }
 
-    /// Done / Dismiss / Remind / Draft reply on a brief item (a draft is saved in Gmail, never sent: open it on the
-    /// iPhone to send it).
-    func briefAct(_ item: BriefingItem, _ kind: BriefingAction.Kind) async {
+    /// Done / Dismiss / Remind / Draft reply / Make task on a brief item (a draft is saved in Gmail, never sent: open
+    /// it on the iPhone to send it). Make task goes only from its confirm page, with the words shown there (`text`:
+    /// `BriefingItem.taskPrompt`), never the Mac's own unseen ones.
+    func briefAct(_ item: BriefingItem, _ kind: BriefingAction.Kind, text: String? = nil) async {
         let action = item.actions.first { $0.kind == kind } ?? BriefingAction(kind)
+        let options: [String: JSONValue] = text.map { ["text": .string($0)] } ?? [:]
         await run(item.id) {
-            let result = try await self.actions.briefingAct(item.id, action: action.action, state: kind == .done
-                ? .done : kind == .dismiss ? .dismissed : nil)
+            let result = try await self.actions.briefingAct(item.id, action: action.action, options: options,
+                                                            state: kind == .done ? .done : kind == .dismiss ? .dismissed : nil)
             let state = result.state ?? (kind == .done ? .done : kind == .dismiss ? .dismissed : item.state)
             self.briefing = self.briefing?.with(item.id, state: state, draftUrl: kind == .draftReply ? result.url : nil,
                                                 line: result.message)
@@ -227,7 +229,7 @@ final class WatchModel {
     func start() {
         active = true
         consumePendingRoute()
-        captures.flush() // notes that waited for the Mac
+        captures.flush(now: true) // notes that waited for the Mac go now, their pause or not
         loop?.cancel()
         loop = Task { [weak self] in
             while !Task.isCancelled {

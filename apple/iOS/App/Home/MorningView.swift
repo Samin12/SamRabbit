@@ -4,7 +4,8 @@ import SwiftUI
 /// The morning brief at the top of Home until noon (Hark-style: what needs you first, and the verb is the button):
 /// the headline, then Do first with each item's verbs (Draft reply, Make task, Block, Remind, Open) and Done /
 /// Dismiss, Today's events (conflicts flagged), the Agents waiting and, folded, FYI. A verb resolves the item with a
-/// tap: Draft reply saves a Gmail draft (never sent) and opens it; the item says what happened.
+/// tap: Draft reply saves a Gmail draft (never sent) and opens it; Make task first shows the words the task starts
+/// with (written from an email), to read and edit; the item says what happened.
 struct MorningSection: View {
     @Environment(AppModel.self) private var model
     @State private var showFYI = false
@@ -310,7 +311,12 @@ struct BriefVerbButton: View {
         } else {
             Button {
                 Haptics.tap()
-                Task { await model.act(on: item, verb) }
+                // Make task: its words first (written from an email); it starts only on Start.
+                if verb.kind == .makeTask {
+                    model.confirmTask(item, verb)
+                } else {
+                    Task { await model.act(on: item, verb) }
+                }
             } label: {
                 label
             }
@@ -387,7 +393,11 @@ struct BriefEventRow: View {
             Spacer(minLength: 0)
             if item.state == .open, let verb = item.verbs.first {
                 Button {
-                    Task { await model.act(on: item, verb) }
+                    if verb.kind == .makeTask {
+                        model.confirmTask(item, verb)
+                    } else {
+                        Task { await model.act(on: item, verb) }
+                    }
                 } label: {
                     Text(verb.label).font(.system(size: 13, weight: .semibold))
                 }

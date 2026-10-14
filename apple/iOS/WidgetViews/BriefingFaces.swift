@@ -44,7 +44,7 @@ struct BriefingHeader: View {
     }
 }
 
-/// One item: its verb-first title, why, Dismiss and Done, which run in the background.
+/// One item: its verb-first title, why, Done and Dismiss (in Home's order: ✓ then ✕), which run in the background.
 struct BriefingWidgetRow: View {
     let item: BriefingItem
 
@@ -67,15 +67,6 @@ struct BriefingWidgetRow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Button(intent: BriefingItemIntent(itemId: item.id, action: .dismiss)) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(SamTheme.muted)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.white.opacity(0.07)))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss")
             Button(intent: BriefingItemIntent(itemId: item.id, action: .done)) {
                 Image(systemName: "checkmark")
                     .font(.system(size: 12, weight: .bold))
@@ -85,6 +76,15 @@ struct BriefingWidgetRow: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Done")
+            Button(intent: BriefingItemIntent(itemId: item.id, action: .dismiss)) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(SamTheme.muted)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.white.opacity(0.07)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
         }
     }
 

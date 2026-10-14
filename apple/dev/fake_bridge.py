@@ -135,7 +135,8 @@ calendar conflict), Today (the calendar's events, the first flagged), Agents (th
   section, kind, title, why, actions: [{type, label}], can, state, updatedAt, account?, url?, suggestion?, draft?,
   startsAt?, endsAt?, conflict?, itemId?, source?, result?}]}], accounts, counts, composed}``.
 * ``POST /v1/mobile/briefing/items/<id>/act {action, …}`` -> ``{ok, item, result, revision}``: ``draft_reply`` (``body?``;
-  a made-up Gmail drafts link in the item's account: nothing is ever sent), ``make_task`` (a fake T3 task),
+  a made-up Gmail drafts link in the item's account: nothing is ever sent), ``make_task`` (``text?``, the words the
+  phone showed; a fake T3 task),
   ``block_time`` (``minutes?``, a fake block), ``remind`` (``in``: 1h, 2pm, tonight, tomorrow; state ``reminded``),
   ``done``, ``dismiss``, ``open`` (its link, or the agent's ``itemId``); an action the item's ``can`` doesn't list
   answers 409 ``unsupported_action``, a second tap of the same verb what the first did.
@@ -1794,7 +1795,9 @@ class FakeBridge:
             if action not in item["can"]:
                 raise ApiError(409, "unsupported_action", "That item can't do that.")
             self.briefing_log["acts"].append(dict({"itemId": item_id, "action": action},
-                                                  **({"in": str(body["in"])} if body.get("in") else {})))
+                                                  **({"in": str(body["in"])} if body.get("in") else {}),
+                                                  **({"text": body["text"]} if isinstance(body.get("text"), str)
+                                                     else {})))
             if action == "open":
                 if not item.get("url") and not item.get("itemId"):
                     raise ApiError(409, "unsupported_action", "There is nothing to open for it.")
@@ -2319,8 +2322,8 @@ class Handler(BaseHTTPRequestHandler):
                                             **{k: list(v) for k, v in b.capture_log.items()}})
         if path == "/__fake/briefing":
             # ``mode``: ready, none (not built yet: "waiting"), building, failed, off, missing (an older bridge);
-            # ``reset`` puts today's fixture back (and the five-minute refresh limit); GET lists the taps (item and
-            # action), the refreshes and the items' states.
+            # ``reset`` puts today's fixture back (and the five-minute refresh limit); GET lists the taps (item,
+            # action, Remind's ``in`` and Make task's ``text``), the refreshes and the items' states.
             if method == "POST":
                 body = self.body()
                 with b.lock:

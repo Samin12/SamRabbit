@@ -69,6 +69,9 @@ final class CaptureModel {
         self.uploader = uploader
         makeSource = source ?? { MicrophoneSource.source(limit: CaptureFormat.iphoneMaxSeconds) }
         waiting = uploader.waiting
+        // A note that went later (a retry, the network back, a background upload's end): the count follows, and a
+        // note the Mac saved shows in Tasks.
+        uploader.observe(Self.onUploader { [weak self] status in self?.uploaded(status) })
         CaptureRemote.onStop = { [weak self] in self?.stop() }
         CaptureRemote.listen()
         // Nothing records at launch: a Live Activity left by an earlier run (the app was closed) goes.
@@ -248,14 +251,13 @@ final class CaptureModel {
             finish(status.notice, stoppedAt: stoppedAt)
         case .failure(let error):
             if error == .unauthorized {
-                finish(CaptureNotice(tone: .queued, title: "Saved", detail: "Pair again with your Mac to send it.",
-                                     symbol: "iphone.slash"), stoppedAt: stoppedAt)
+                finish(.plain(.queued, "Saved", "Pair again with your Mac to send it.", symbol: "iphone.slash"),
+                       stoppedAt: stoppedAt)
             } else if error.isRetryableCapture {
                 finish(.queued(waiting: max(1, uploader.waiting)), stoppedAt: stoppedAt)
             } else {
-                finish(CaptureNotice(tone: .failed, title: "Your Mac didn't take it",
-                                     detail: error.errorDescription ?? "Try recording it again.",
-                                     symbol: "exclamationmark.triangle.fill"), stoppedAt: stoppedAt)
+                finish(.plain(.failed, "Your Mac didn't take it", error.errorDescription ?? "Try recording it again.",
+                              symbol: "exclamationmark.triangle.fill"), stoppedAt: stoppedAt)
             }
         }
     }
@@ -341,11 +343,31 @@ final class CaptureModel {
         heardSpeech = false
     }
 
-    /// The app came to the front: the outbox tries again, the count follows.
+    /// The app came to the front: every waiting note goes now (its pause or not), the count follows.
     func sceneActive() {
-        uploader.flush(quick: true)
-        waiting = uploader.waiting
+        tryNow()
         activity.retry()
+    }
+
+    /// "Tap to try now" (Home's line), the app in front: every waiting note goes at once.
+    func tryNow() {
+        uploader.flush(quick: true, now: true)
+        waiting = uploader.waiting
+    }
+
+    /// An upload ended (the recorder's or one in the background). The recorder's own note says itself once the Mac
+    /// answered (`deliver`); any other the Mac has now refreshes Tasks.
+    private func uploaded(_ status: CaptureStatus?) {
+        waiting = uploader.waiting
+        guard let status, phase != .sending else { return }
+        onDelivered?(status)
+    }
+
+    /// The uploader calls back on its own queue. Nonisolated, so the closure doesn't inherit the main actor: Swift 6
+    /// traps a main-actor closure that runs anywhere else.
+    nonisolated private static func onUploader(_ changed: @escaping @MainActor @Sendable (CaptureStatus?) -> Void)
+        -> @Sendable (CaptureStatus?) -> Void {
+        { status in DispatchQueue.main.async { MainActor.assumeIsolated { changed(status) } } }
     }
 }
 

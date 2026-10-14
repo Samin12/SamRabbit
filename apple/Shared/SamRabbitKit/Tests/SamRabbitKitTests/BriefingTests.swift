@@ -255,6 +255,27 @@ struct BriefingTests {
         #expect(MobileSummary.sample().briefing?.headline.isEmpty == false)
     }
 
+    /// Make task starts with words he saw: the title and why on the card (the Mac's own fallback), or the Mac's
+    /// `taskText` when it sends it (shown first too). Never the Mac's unseen words.
+    @Test func makeTaskStartsWithTheWordsShown() throws {
+        let brief = try decode()
+        let acme = try #require(brief.items(in: .doFirst).first { $0.id == "bi_77c01b9e4d3a10aa" })
+        #expect(acme.taskText == nil, "today's bridge keeps its own words to itself")
+        #expect(acme.taskPrompt == "Look into Acme's checkout errors. \(acme.why)")
+        #expect(BriefingItem(id: "a", section: .doFirst, title: "Is staging down?", why: "Two alerts").taskPrompt
+                == "Is staging down? Two alerts")
+        #expect(BriefingItem(id: "a", section: .doFirst, title: "Renew the domain").taskPrompt == "Renew the domain")
+        let proposed = try BridgeJSON.decode(BriefingItem.self, from: Data("""
+        {"id":"bi_x","section":"doFirst","title":"Look into checkout errors","why":"500s since last night",
+         "taskText":"Find why checkout returns 500 since last night and propose a fix.","actions":["make_task"]}
+        """.utf8))
+        #expect(proposed.taskPrompt == "Find why checkout returns 500 since last night and propose a fix.")
+        let again = try BridgeJSON.decode(BriefingItem.self, from: BridgeJSON.encoder().encode(proposed))
+        #expect(again.taskText == proposed.taskText)
+        let long = try BridgeJSON.decode(BriefingItem.self, from: Data(#"{"id":"bi_y","title":"T","taskText":"\#(String(repeating: "a", count: 900))"}"#.utf8))
+        #expect((long.taskText?.count ?? 0) <= BriefingItem.maxTaskText)
+    }
+
     @Test func anItemSurvivesTheWidgetsCache() throws {
         let brief = try decode()
         let summary = MobileSummary().with(briefing: .success(brief), kept: nil)

@@ -2,15 +2,20 @@ import Foundation
 
 /// What a voice note on the iPhone is doing, for its Live Activity (the Lock Screen and the Dynamic Island) and the
 /// recorder: recording (with Stop), sending, then what the Mac did ("Sent ✓ — Added to your journal"), kept on the
-/// phone until the Mac can be reached, or failed. Platform-neutral (the attributes are iOS only), so `swift test`
-/// covers it.
+/// phone until the Mac can be reached, sent but not done there (nothing heard, the Mac couldn't do it), or not sent.
+/// It shows on a locked phone, so its line never carries what was said. Platform-neutral (the attributes are iOS
+/// only), so `swift test` covers it.
 public struct CaptureActivityState: Codable, Hashable, Sendable {
     public enum Phase: String, Codable, Sendable, Hashable {
-        case recording, sending, sent, queued, failed
+        case recording, sending, sent, queued
+        /// The Mac has it but couldn't do it, or heard nothing in it: sent, with what went wrong.
+        case problem
+        /// It didn't reach the Mac and won't go by itself.
+        case failed
     }
 
     public var phase: Phase
-    /// The outcome's line once it went ("Added to your journal · “the walk was great”").
+    /// The outcome's line once it went ("Added to your journal", "Saved as a note · It's in Tasks.").
     public var line: String
     /// When the recording stopped (the timer stops there).
     public var stoppedAt: Date?
@@ -23,24 +28,26 @@ public struct CaptureActivityState: Codable, Hashable, Sendable {
         self.stoppedAt = stoppedAt
     }
 
-    /// From what the recorder shows once the note went.
+    /// From what the recorder shows once the note went: its title and what a locked phone may show of it
+    /// (`CaptureNotice.glance`), never the words the recorder repeats.
     public init(_ notice: CaptureNotice, stoppedAt: Date?) {
         let phase: Phase = switch notice.tone {
         case .sent: .sent
         case .queued: .queued
-        case .failed: .failed
+        case .failed: notice.reachedMac ? .problem : .failed
         }
-        let line = [notice.title == "Sent" ? nil : notice.title, notice.detail].compactMap { $0 }.joined(separator: " · ")
+        let line = [notice.title == "Sent" ? nil : notice.title, notice.glance].compactMap { $0 }.joined(separator: " · ")
         self.init(phase: phase, line: line, stoppedAt: stoppedAt)
     }
 
-    /// "Recording…", "Sending…", "Sent ✓", "Saved", "Not sent".
+    /// "Recording…", "Sending…", "Sent ✓", "Saved", "Sent" (but not done), "Not sent".
     public var word: String {
         switch phase {
         case .recording: "Recording…"
         case .sending: "Sending…"
         case .sent: "Sent ✓"
         case .queued: "Saved"
+        case .problem: "Sent"
         case .failed: "Not sent"
         }
     }
@@ -51,12 +58,13 @@ public struct CaptureActivityState: Codable, Hashable, Sendable {
         case .sending: "arrow.up.circle.fill"
         case .sent: "checkmark.circle.fill"
         case .queued: "tray.and.arrow.up.fill"
+        case .problem: "exclamationmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
         }
     }
 
     /// The activity is over (it ends a few seconds after showing this).
-    public var final: Bool { phase == .sent || phase == .queued || phase == .failed }
+    public var final: Bool { phase == .sent || phase == .queued || phase == .problem || phase == .failed }
 }
 
 #if os(iOS) && canImport(ActivityKit)

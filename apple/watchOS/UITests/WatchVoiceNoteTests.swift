@@ -79,6 +79,31 @@ final class WatchVoiceNoteTests: XCTestCase {
         snap("watch-brief-2-done")
     }
 
+    /// Make task on the Brief page: first the exact words the task starts with (written from an email), then Start
+    /// sends exactly those; nothing starts from the card itself.
+    func test4_MakeTaskShowsItsWordsFirst() throws {
+        let app = try launch(page: "brief")
+        XCTAssertTrue(app.staticTexts["brief-headline"].waitForExistence(timeout: 20), "the Brief page")
+        let verb = app.buttons["brief-verb-bi_acme"]
+        for _ in 0..<6 where !(verb.exists && verb.isHittable) { app.swipeUp() }
+        XCTAssertTrue(verb.waitForExistence(timeout: 5))
+        XCTAssertEqual(verb.label, "Make task")
+        verb.tap()
+        let words = app.staticTexts["brief-task-text"]
+        XCTAssertTrue(words.waitForExistence(timeout: 5), "its words first")
+        XCTAssertEqual(words.label, "Look into Acme's checkout errors. Two customers saw 500s since last night")
+        let acts = { (self.fakeGet("briefing")["acts"] as? [[String: String]]) ?? [] }
+        XCTAssertTrue(acts().isEmpty, "nothing started yet")
+        snap("watch-brief-3-task-words")
+        let start = app.buttons["brief-task-start"]
+        for _ in 0..<4 where !(start.exists && start.isHittable) { app.swipeUp() }
+        start.tap()
+        XCTAssertTrue(waitUntil(timeout: 10) {
+            acts().last == ["itemId": "bi_acme", "action": "make_task",
+                            "text": "Look into Acme's checkout errors. Two customers saw 500s since last night"]
+        }, "exactly the words shown: \(acts())")
+    }
+
     // MARK: - Helpers
 
     private func launch(page: String = "status", intent: String? = nil, voice: String = "speech",

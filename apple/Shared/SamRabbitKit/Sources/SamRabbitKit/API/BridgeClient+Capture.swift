@@ -28,7 +28,7 @@ extension BridgeClient {
         -> CaptureStatus {
         let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         guard size > 0 else {
-            throw BridgeError.server(status: 400, code: "invalid_audio", message: "The recording is empty.", retryable: false)
+            throw BridgeError.server(status: 400, code: "empty_audio", message: "The recording is empty.", retryable: false)
         }
         guard size <= CaptureFormat.maxBytes else {
             throw BridgeError.server(status: 413, code: "body_too_large", message: "That note is too long.",
@@ -111,7 +111,9 @@ extension BridgeClient {
             relayTried = true
             do {
                 let answer = try await relay.relayCapture(try source.bytes(), meta: meta)
-                if answer.status != 0 { return answer } // 0: the phone couldn't reach the Mac either; try directly
+                // 0: the phone couldn't reach the Mac either; the phone's own refusal (not paired, busy): the Mac never
+                // saw it. Either way: try directly.
+                if answer.status != 0, !Self.phoneRefused(answer) { return answer }
             } catch BridgeError.unreachable {
                 // nothing went that way: try directly
             }
@@ -129,6 +131,14 @@ extension BridgeClient {
         relay.noteDirectRoute(worked: false)
         if relayTried { throw BridgeError.unreachable(reason) }
         return try Self.relayed(try await relay.relayCapture(try source.bytes(), meta: meta))
+    }
+
+    /// The iPhone turned the watch's relay down itself (`WatchRelay.Response.refusal`: it isn't paired, it passes on
+    /// too much right now), so the Mac never saw the note: another way may still get it there.
+    static func phoneRefused(_ answer: (status: Int, body: Data)) -> Bool {
+        guard !(200..<300).contains(answer.status),
+              case .server(_, let code, _, _) = BridgeError.from(status: answer.status, data: answer.body) else { return false }
+        return WatchRelay.phoneRefusalCodes.contains(code)
     }
 
     /// What an upload's answer means (a background upload reads its answer itself): the note as the Mac has it, or

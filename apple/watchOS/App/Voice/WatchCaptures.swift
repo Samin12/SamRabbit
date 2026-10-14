@@ -67,10 +67,12 @@ final class WatchCaptures {
         }
     }
 
-    /// Sends the notes whose pause is over (the app came to the front), quietly.
-    func flush() {
+    /// Sends the notes whose pause is over, quietly; `now`: every waiting note, its pause or not (the app came to the
+    /// front). Notes on their way (being sent, or handed to the iPhone) are left to it.
+    func flush(now: Bool = false) {
         outbox.prune()
-        let due = outbox.due().filter { !link.transferring($0.id) }
+        if now { outbox.retryNow() }
+        let due = outbox.due(excluding: sending).filter { !link.transferring($0.id) }
         guard !due.isEmpty else { return }
         Task {
             for entry in due { _ = await send(entry, outcomeWait: 0) }

@@ -245,12 +245,18 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
     public var can: [String]
     /// What its verb did, in the Mac's words ("Blocked 30 min at 10:05 AM.", "I'll remind you at 2:00 PM.").
     public var resultLine: String?
+    /// The words the Mac proposes to start a T3 task with (`taskText`, written by its model from the email), when it
+    /// sends them: only ever shown first and sent back as he left them (`taskPrompt`).
+    public var taskText: String?
+
+    /// The longest task text the Mac writes (`samrabbit_briefing.TASK_CHARS`).
+    public static let maxTaskText = 400
 
     public init(id: String, section: BriefingSection, kind: String = "email", account: String? = nil, title: String,
                 why: String = "", suggestion: String? = nil, actions: [BriefingAction] = [], priority: Int = 2,
                 state: State = .open, url: URL? = nil, draftUrl: URL? = nil, startsAt: Date? = nil,
                 endsAt: Date? = nil, conflict: Bool = false, inboxItemId: String? = nil, can: [String] = [],
-                resultLine: String? = nil) {
+                resultLine: String? = nil, taskText: String? = nil) {
         self.id = id
         self.section = section
         self.kind = kind
@@ -269,6 +275,7 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
         self.inboxItemId = inboxItemId
         self.can = can
         self.resultLine = resultLine
+        self.taskText = taskText
     }
 
     /// `section` comes from the item or, inside `sections[]`, from its part (`defaultSection`).
@@ -306,6 +313,7 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
         inboxItemId = c.text("inboxItemId", "itemId") ?? c.json("source")["itemId"].text
         can = c.list(String.self, "can")
         resultLine = c.text("resultLine") ?? result["say"].text
+        taskText = c.text("taskText").map { Formatting.clip($0, Self.maxTaskText) }
     }
 
     /// What an item of `section` is when it doesn't say.
@@ -323,6 +331,18 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
         var seen = Set<String>()
         let primary = actions.filter { $0.kind != .done && $0.kind != .dismiss && seen.insert($0.action).inserted }
         return Array(primary.prefix(2))
+    }
+
+    /// What Make task starts the T3 task with. It is shown before the task starts (editable on the iPhone, on the
+    /// watch's confirm page) and sent as the task's `text`, so the agent never runs words he didn't see: the brief's
+    /// words come from emails, which anyone can write. The Mac's `taskText` when it sends it, else the title and why
+    /// he sees on the card (the Mac's own fallback).
+    public var taskPrompt: String {
+        if let taskText, !taskText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return taskText }
+        let head = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = why.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tail.isEmpty else { return head }
+        return head.last.map { ".!?".contains($0) } == true ? "\(head) \(tail)" : "\(head). \(tail)"
     }
 
     /// Where Open goes: its own link, else the Open verb's.

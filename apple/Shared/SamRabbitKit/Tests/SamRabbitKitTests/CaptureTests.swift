@@ -126,8 +126,63 @@ struct CaptureTests {
         #expect(waiting.say == "Sent.")
         #expect(waiting.error == "transcribe_unavailable")
         #expect(waiting.retryAt == BridgeDates.date(from: "2026-10-14T13:21:40Z"))
-        #expect(waiting.notice == CaptureNotice(tone: .sent, title: "Sent", detail: "Your Mac is on it.", symbol: "checkmark"))
+        #expect(waiting.notice == CaptureNotice(tone: .sent, title: "Sent", detail: "Your Mac is on it.", symbol: "checkmark",
+                                                glance: "Your Mac is on it.", reachedMac: true))
         #expect(waiting.notice.line == "Sent ✓ · Your Mac is on it.")
+    }
+
+    /// The Live Activity stays on a locked phone: its last line says where the note went (and what to do next), never
+    /// what was said or the Mac's line about it. A note the Mac has but couldn't do says "Sent", not "Not sent" (a
+    /// second recording would make a second note).
+    @Test func theLockScreenNeverShowsWhatWasSaid() throws {
+        func state(_ json: String) throws -> CaptureActivityState {
+            CaptureActivityState(try BridgeJSON.decode(CaptureStatus.self, from: Data(json.utf8)).notice, stoppedAt: nil)
+        }
+        let journal = try state(#"{"captureId":"a","state":"done","heard":"Put this in my journal: called the dentist","outcome":{"kind":"journal","detail":"Added to your journal."}}"#)
+        #expect(journal.phase == .sent)
+        #expect(journal.line == "Added to your journal")
+        #expect(!journal.line.contains("dentist"))
+        let task = try state(#"{"captureId":"a","state":"done","heard":"Make a task to fix login","outcome":{"kind":"task","detail":"Started “Fix login” in Website."}}"#)
+        #expect(task.line == "Started a T3 task")
+        let note = try state(#"{"captureId":"a","state":"done","heard":"Pricing tonight","outcome":{"kind":"note","detail":"Saved as a note."},"suggestion":{"action":"task","label":"Start it as a T3 task?"}}"#)
+        #expect(note.line == "Saved as a note · It's in Tasks.")
+        let working = try state(#"{"captureId":"a","state":"received"}"#)
+        #expect(working.line == "Your Mac is on it.")
+        // Reached the Mac, not done there.
+        let nothing = try state(#"{"captureId":"a","state":"done","outcome":{"kind":"nothing"}}"#)
+        #expect(nothing.phase == .problem)
+        #expect(nothing.word == "Sent")
+        #expect(nothing.line == "I didn't catch anything · Nothing was saved.")
+        let failed = try state(#"{"captureId":"a","state":"failed","heard":"Put this in my journal: private","outcome":{"kind":"failed","detail":"Couldn't save it: the journal is down."}}"#)
+        #expect(failed.phase == .problem)
+        #expect(failed.line == "Your Mac couldn't do it · It kept what you said. Check Tasks.")
+        #expect(failed.final)
+        // Kept on the phone, or refused before the Mac had it: the device's own words.
+        let queued = CaptureActivityState(.queued(waiting: 2), stoppedAt: nil)
+        #expect(queued.phase == .queued)
+        #expect(queued.line == "Saved · 2 notes will go when your Mac is reachable.")
+        let refused = CaptureActivityState(.plain(.failed, "Your Mac didn't take it", "Recordings can be at most 300 seconds.",
+                                                  symbol: "exclamationmark.triangle.fill"), stoppedAt: nil)
+        #expect(refused.phase == .failed)
+        #expect(refused.word == "Not sent")
+        #expect(refused.line == "Your Mac didn't take it · Recordings can be at most 300 seconds.")
+        // The recorder itself still shows his words.
+        let screen = try BridgeJSON.decode(CaptureStatus.self, from: Data(#"{"captureId":"a","state":"done","heard":"Put this in my journal: called the dentist","outcome":{"kind":"journal","detail":"Added to your journal."}}"#.utf8))
+        #expect(screen.notice.detail == "“Put this in my journal: called the dentist”")
+    }
+
+    /// Home's "didn't go through" line counts the failed notes Tasks shows (`note:` items with status error, for three
+    /// days), not the summary's week.
+    @Test func failedNotesAreTheOnesTasksShows() throws {
+        let inbox = try BridgeJSON.decode(InboxSnapshot.self, from: Data("""
+        {"revision":1,"items":[
+          {"id":"note:a","source":"note","title":"Voice note","status":"error","can":["act","dismiss","seen"]},
+          {"id":"note:b","source":"note","title":"Pricing","status":"needs-input","can":["act","dismiss","seen"]},
+          {"id":"t3:t_1","source":"t3","title":"Fix login","status":"error"},
+          {"id":"note:c","source":"note","title":"Saved","status":"idle"}]}
+        """.utf8))
+        #expect(inbox.failedNotes == 1)
+        #expect(InboxSnapshot().failedNotes == 0)
     }
 
     @Test func aListAndTheSummaryPart() throws {
@@ -214,6 +269,67 @@ struct CaptureTests {
         #expect(outbox.entry(meta.captureId)?.state == .failed)
         #expect(outbox.waiting == 0)
         #expect(!FileManager.default.fileExists(atPath: outbox.audioURL(meta.captureId).path))
+    }
+
+    /// A refusal is final only for `finalCaptureCodes`. The real bridge's "The recording did not arrive completely"
+    /// (400 `invalid_audio`, `retryable: true`: a stalled upload) and the iPhone's own relay refusal while it pairs
+    /// again (409 `not_paired`) keep the note and its recording for another try.
+    @Test func aNoteIsKeptForEveryRefusalThatMayChange() throws {
+        func envelope(_ status: Int, _ code: String, retryable: Bool) -> BridgeError {
+            BridgeError.from(status: status, data: Data(#"{"error":{"code":"\#(code)","message":"m","retryable":\#(retryable)}}"#.utf8))
+        }
+        let stalled = envelope(400, "invalid_audio", retryable: true)
+        #expect(stalled.isRetryableCapture)
+        let refusal = WatchRelay.Response.refusal(409, "not_paired", "Pair the iPhone first.")
+        let relayed = BridgeError.from(status: refusal.status, data: refusal.body)
+        #expect(relayed.code == "not_paired")
+        #expect(relayed.isRetryableCapture)
+        #expect(BridgeClient.phoneRefused((refusal.status, refusal.body)), "the iPhone's own: try the Mac directly")
+        #expect(!BridgeClient.phoneRefused((409, Data(#"{"error":{"code":"capture_conflict"}}"#.utf8))), "the Mac's")
+        #expect(!BridgeClient.phoneRefused((202, Data(#"{"captureId":"a","state":"received"}"#.utf8))))
+        // A clock that ran ahead, an unknown word from a newer bridge: kept too.
+        #expect(envelope(400, "invalid_captured_at", retryable: false).isRetryableCapture)
+        #expect(envelope(422, "something_new", retryable: false).isRetryableCapture)
+        // Only these end it.
+        for code in BridgeError.finalCaptureCodes {
+            #expect(!envelope(code == "capture_conflict" ? 409 : 413, code, retryable: false).isRetryableCapture, "\(code)")
+        }
+        #expect(BridgeError.finalCaptureCodes.isSuperset(of: ["audio_too_long", "unsupported_audio", "body_too_large",
+                                                              "capture_conflict", "invalid_capture_id"]))
+
+        let outbox = CaptureOutbox.temporary()
+        defer { try? FileManager.default.removeItem(at: outbox.folder) }
+        for error in [stalled, relayed] {
+            let meta = CaptureMeta(source: .iphone)
+            try outbox.add(recording: try Self.recording(), meta: meta)
+            outbox.failed(meta.captureId, error: error.code ?? "", retryable: error.isRetryableCapture)
+            #expect(outbox.entry(meta.captureId)?.state == .waiting)
+            #expect(FileManager.default.fileExists(atPath: outbox.audioURL(meta.captureId).path), "the recording is kept")
+        }
+        #expect(outbox.waiting == 2)
+    }
+
+    /// A note on its way (a background upload still running) is neither due nor what the next retry waits for: the
+    /// uploader doesn't start it again, and nothing ticks every second while its upload is pending.
+    @Test func notesOnTheirWayAreLeftToTheirUpload() throws {
+        let outbox = CaptureOutbox.temporary()
+        defer { try? FileManager.default.removeItem(at: outbox.folder) }
+        let now = Date(timeIntervalSince1970: 5_000)
+        let first = CaptureMeta(capturedAt: now.addingTimeInterval(-20), source: .iphone)
+        let second = CaptureMeta(capturedAt: now.addingTimeInterval(-10), source: .iphone)
+        try outbox.add(recording: try Self.recording(), meta: first)
+        try outbox.add(recording: try Self.recording(), meta: second)
+        // The quick try failed (tried again in 5 s) and a background upload carries it on.
+        outbox.failed(first.captureId, error: "unreachable", retryable: true, now: now)
+        let later = now.addingTimeInterval(60)
+        #expect(outbox.due(now: later).map(\.id) == [first.captureId, second.captureId])
+        #expect(outbox.due(now: later, excluding: [first.captureId]).map(\.id) == [second.captureId])
+        #expect(outbox.due(now: later, excluding: [first.captureId, second.captureId]).isEmpty)
+        #expect(outbox.nextDue(now: later, excluding: [first.captureId, second.captureId]) == nil, "nothing to tick for")
+        #expect(outbox.nextDue(now: now, excluding: [second.captureId]) == now.addingTimeInterval(5))
+        // "Tap to try now": its pause is over at once.
+        outbox.retryNow()
+        #expect(outbox.due(now: now).count == 2)
     }
 
     @Test func pruningDropsOldNotesStrayFilesAndTheExcess() throws {

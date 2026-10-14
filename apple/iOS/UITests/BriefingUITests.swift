@@ -34,7 +34,8 @@ final class BriefingUITests: XCTestCase {
     }
 
     /// The brief leads Home: the headline, Do first with each item's verbs, Today with its conflict, the agent
-    /// waiting, FYI folded, what it read. Draft reply saves a draft (never sent) and says so; Make task starts a task;
+    /// waiting, FYI folded, what it read. Draft reply saves a draft (never sent) and says so; Make task shows the
+    /// words the task starts with first (Cancel starts nothing; Start sends exactly what he left there);
     /// Block 30 min blocks time on the clash and says when; Review opens the agent's task in Tasks; Done takes an item
     /// off; Dismiss on FYI; the refresh button builds it again.
     func testTheMorningBriefLeadsHomeAndItsVerbsResolveItems() throws {
@@ -67,12 +68,29 @@ final class BriefingUITests: XCTestCase {
         XCTAssertEqual(lastTap(), ["itemId": "bi_dana", "action": "draft_reply"])
         snap("phone-brief-1-drafted")
 
-        // Make task.
+        // Make task: first the words the task starts with (written from an email), editable; Cancel starts nothing.
         let task = app.buttons["brief-make_task-bi_acme"]
         scrollTo(task)
         task.tap()
+        let words = app.descendants(matching: .any)["brief-task-text"]
+        XCTAssertTrue(words.waitForExistence(timeout: 5), "its words first")
+        XCTAssertEqual(words.value as? String, "Look into Acme's checkout errors. Two customers saw 500s since last night")
+        XCTAssertTrue(app.descendants(matching: .any)["brief-task-warning"].exists, "says they come from an email")
+        snap("phone-brief-1b-task-words")
+        app.buttons["brief-task-cancel"].tap()
+        XCTAssertTrue(waitUntil(timeout: 5) { !words.exists })
+        XCTAssertEqual(lastTap(), ["itemId": "bi_dana", "action": "draft_reply"], "nothing started")
+        // Again, in his own words (the whole text selected and typed over): exactly what he left goes.
+        task.tap()
+        XCTAssertTrue(words.waitForExistence(timeout: 5))
+        words.tap()
+        words.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        let edited = "Find why Acme's checkout returns 500s. Start with the logs."
+        words.typeText(edited)
+        XCTAssertEqual(words.value as? String, edited)
+        app.buttons["brief-task-start"].tap()
         XCTAssertTrue(app.staticTexts["Task started"].waitForExistence(timeout: 10))
-        XCTAssertEqual(lastTap(), ["itemId": "bi_acme", "action": "make_task"])
+        XCTAssertEqual(lastTap(), ["itemId": "bi_acme", "action": "make_task", "text": edited])
         XCTAssertTrue(app.staticTexts["brief-state-bi_acme"].waitForExistence(timeout: 10))
 
         // Block 30 min on the calendar clash: blocked, and when.
