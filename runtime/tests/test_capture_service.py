@@ -121,7 +121,8 @@ class CaptureServiceTest(unittest.TestCase):
         self.assertEqual(("queued", lines.QUEUED_OUTDATED_LINE), (view["state"], view["say"]))
         self.assertEqual(1, self.service.pending_count())
         self.clock.now += 30
-        self.assertEqual(0, self.service.run_due(), "an outdated bridge is retried slowly")
+        self.service.wake()
+        self.assertEqual(0, self.service.run_due(), "an outdated bridge is retried slowly, not on every wake")
         self.fake.responses.clear()
         self.clock.now += 60
         self.assertEqual(1, self.service.run_due())

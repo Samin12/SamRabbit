@@ -44,6 +44,9 @@ FOLLOW_FOR_SECONDS = 10 * 60.0
 BACKOFF_SECONDS = (2, 5, 15, 60, 300)
 # A bridge that refuses the R1 (token, outdated route, not paired) is not retried fast; a re-pairing wakes it.
 SLOW_CODES = frozenset({"mac_unauthorized", "mac_token_unavailable", "bridge_outdated", "mac_not_configured"})
+# Failures a bridge answering again (or a re-pairing) can fix: those notes go at once on a wake.
+WAKE_CODES = frozenset({"mac_unreachable", "mac_no_answer", "mac_not_configured", "mac_token_unavailable",
+                        "mac_unauthorized"})
 TRIGGERS = frozenset({"triple_press", "hold", "tap", "debug"})
 WAKE_DEBOUNCE_SECONDS = 5.0
 _CAPTURE_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -170,7 +173,8 @@ class CaptureService:
         with self._wake:
             if now - self._last_wake < WAKE_DEBOUNCE_SECONDS:
                 return
-            queued = [item for item in self._outbox.values() if item.state == "queued" and item.next_at > now]
+            queued = [item for item in self._outbox.values() if item.state == "queued" and item.next_at > now
+                      and (item.last_error is None or item.last_error in WAKE_CODES)]
             if not queued:
                 return
             self._last_wake = now

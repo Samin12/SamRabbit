@@ -117,10 +117,12 @@ class BriefingService:
             self._thread = None
 
     def wake(self) -> None:
-        """The bridge answered someone or was re-paired: fetch now if the last fetch failed (debounced)."""
+        """The bridge answered someone or was re-paired: fetch now if the last fetch could not reach it
+        (debounced). An outdated bridge or an HTTP error waits for the normal cadence."""
         now = self._clock()
         with self._wake:
-            if self._failures == 0 and self._meta.get("fetchedAt") is not None:
+            if self._meta.get("fetchedAt") is not None and \
+                    (self._failures == 0 or self._meta.get("error") not in _UNREACHABLE):
                 return
             if now - self._last_wake < WAKE_DEBOUNCE_SECONDS:
                 return
@@ -268,6 +270,8 @@ class BriefingService:
                 self._next_at = self._clock() + self._interval()
             elif self._meta.get("error") == "mac_not_configured":
                 self._next_at = self._clock() + UNCONFIGURED_INTERVAL_SECONDS
+            elif self._meta.get("error") == "bridge_outdated":
+                self._next_at = self._clock() + self._interval()  # an old bridge: no fast retries
             else:
                 self._next_at = self._clock() + min(self._interval(), backoff_seconds(self._failures))
         return ok

@@ -140,6 +140,12 @@ class BriefingServiceTest(unittest.TestCase):
         self.service.run_due()
         view = self.service.view()
         self.assertEqual(("off", False), (view["status"], view["available"]))
+        self.assertEqual(self.clock.now + service_module.OTHER_INTERVAL_SECONDS, self.service._next_at,
+                         "an old bridge is asked again at the normal cadence, not every few seconds")
+        self.clock.now += 60
+        self.service.wake()
+        self.assertEqual(self.clock.now - 60 + service_module.OTHER_INTERVAL_SECONDS, self.service._next_at,
+                         "other bridge traffic does not wake the brief for an old bridge")
 
     def test_voice_tools_read_numbered_items_and_act_by_number(self) -> None:
         self.service.fetch_once()
