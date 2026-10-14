@@ -377,6 +377,44 @@ enum DockBriefLinks {
     }
 }
 
+/// "Make task" starts a T3 agent (tools and all) from an email: the words it gets are the ones the brief shows (the
+/// item's title and why), sent as the action's `text`, never the model's own `taskText` (written from the email, which
+/// Samin never sees); and he reads them, with what the bridge adds, before it starts.
+enum DockBriefTask {
+    /// "Reply to Dana about the SOW. She needs the signed copy by Friday."
+    static func text(_ item: DockBriefItem) -> String {
+        let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let why = item.why.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !why.isEmpty else { return title }
+        guard let last = title.last else { return why }
+        return title + (".?!…".contains(last) ? " " : ". ") + why
+    }
+
+    /// What the bridge puts after the words (samrabbit_briefing `_task`): for an email, a line naming it.
+    static func added(_ item: DockBriefItem) -> String? {
+        item.kind == "email" ? "SamRabbit adds which email it came from (sender and subject)." : nil
+    }
+}
+
+/// After "↻": the bridge's 202 `{status: "building", revision}`; the brief is read again (a long poll on that revision)
+/// until it is built, at most this many times (a build reads the mail and asks Claude: tens of seconds).
+enum DockBriefRefresh {
+    static let polls = 5
+    static let wait = 25
+
+    /// The refresh's answer: (building: wait for it, the revision to wait past, what to say instead).
+    static func answer(status: Int, data: Data) -> (building: Bool, revision: Int?, note: String?) {
+        let object = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        let revision = (object["revision"] as? Int) ?? (object["revision"] as? Double).map { Int($0) }
+        switch status {
+        case 200..<300: return (true, revision, nil)
+        case 429: return (false, nil, "It was read a moment ago. Try again in a few minutes.")
+        case 0: return (false, nil, "The Mac bridge isn’t answering.")
+        default: return (false, nil, "The bridge couldn’t read the mail again right now.")
+        }
+    }
+}
+
 /// "Remind me" (the brief's own verb): in an hour, at 2 PM, tonight at 6, tomorrow at 9 (each only while it is still
 /// ahead). The bridge puts a 15-minute "Reminder: …" on the calendar then; the item shows "Reminder set for …".
 enum DockBriefRemind {

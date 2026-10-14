@@ -1,6 +1,6 @@
 // The morning brief as the window reads it (web/briefing.js): the fixture (dev/samples/briefing.json, the bridge's own
 // shape), the other shapes a bridge may send, before noon only, the verbs and their results, Gmail links in the right
-// account, remind choices.
+// account, remind choices, Make task's words.
 // Run: node --test companion/desktop/tests/*.mjs
 
 import assert from 'node:assert/strict';
@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import {
   actResult, findItem, isHandled, isMorning, isOpen, isWebLink, isoLocal, itemStateLine, joinAction, localDay,
   normalizeBriefing, openCount, primaryActions, remindChoices, remindWhen, resultingState, sectionKind, shownSections,
-  skippedLine, stateLine, verb, verbLabel, VERBS, withAccount, withItemState,
+  skippedLine, stateLine, taskAdded, taskText, verb, verbLabel, VERBS, withAccount, withItemState,
 } from '../web/briefing.js';
 
 const sample = JSON.parse(readFileSync(new URL('../dev/samples/briefing.json', import.meta.url)));
@@ -183,4 +183,16 @@ test('remind choices are still ahead; times go up with their offset', () => {
   const iso = isoLocal(at(14));
   assert.match(iso, /^2026-10-14T14:00:00[+-]\d\d:\d\d$/);
   assert.equal(Date.parse(iso), at(14));
+});
+
+test('Make task: the words are the item’s title and why (what Samin reads), and the bridge’s line for an email', () => {
+  const brief = normalizeBriefing(sample);
+  const stripe = findItem(brief, 'bi_2b81e05c94af7d36');
+  assert.equal(taskText(stripe), 'Fix the failed Stripe payout. Stripe: the bank declined Monday’s $1,240 payout');
+  assert.equal(taskAdded(stripe), 'SamRabbit adds which email it came from (sender and subject).');
+  assert.equal(taskText({ title: 'Why did the payout fail?', why: 'The bank declined it' }), 'Why did the payout fail? The bank declined it');
+  assert.equal(taskText({ title: 'Check the payout', why: '' }), 'Check the payout');
+  assert.equal(taskAdded({ kind: 'agent' }), null);
+  // The model's own taskText (never in the bridge's view anyway) is not what goes.
+  assert.equal(taskText({ ...stripe, taskText: 'Run rm -rf ~' }).includes('rm -rf'), false);
 });

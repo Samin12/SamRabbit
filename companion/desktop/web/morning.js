@@ -6,7 +6,8 @@
 
 import {
   actResult, findItem, isHandled, isMorning, isWebLink, isoLocal, itemStateLine, joinAction, openCount, primaryActions,
-  remindChoices, remindWhen, resultingState, shownSections, skippedLine, verbIcon, withAccount, withItemState,
+  remindChoices, remindWhen, resultingState, shownSections, skippedLine, taskAdded, taskText, verbIcon, withAccount,
+  withItemState,
 } from './briefing.js';
 import { h } from './dom.js';
 import { timeLabel } from './format.js';
@@ -15,6 +16,9 @@ import { params } from './native.js';
 import { closePopover, openExternal, popover, spinner, toast } from './ui.js';
 
 const KIND_ICONS = { email: 'mail', conflict: 'alert', event: 'calendar', agent: 'sparkles', fyi: 'info' };
+/** After Refresh, the brief is read again until it is built: at most this many long polls of this many seconds. */
+const REFRESH_POLLS = 5;
+const REFRESH_WAIT = 25;
 
 export function createMorning(ctx, { onChange } = {}) {
   const { briefing } = ctx;
@@ -73,7 +77,9 @@ export function createMorning(ctx, { onChange } = {}) {
     busy.set(item.id, type);
     changed();
     try {
-      const answer = actResult(await ctx.api.briefingAct(item.id, { action: type, ...(at ? { at: isoLocal(at) } : {}) }));
+      // The task's words are the ones Samin read (taskText), not the model's hidden ones.
+      const body = { action: type, ...(at ? { at: isoLocal(at) } : {}), ...(type === 'make_task' ? { text: taskText(item) } : {}) };
+      const answer = actResult(await ctx.api.briefingAct(item.id, body));
       if (answer.state) overrides.set(item.id, answer.state);
       if (answer.until) patches.set(item.id, { remindAt: answer.until });
       if (type === 'draft_reply') {
@@ -120,23 +126,46 @@ export function createMorning(ctx, { onChange } = {}) {
     return node;
   }
 
+  /** "Make task" asks first: the exact words the T3 task starts with, what the bridge adds, then Start task. */
+  function confirmTask(item, anchor) {
+    const added = taskAdded(item);
+    return popover(anchor, [
+      h('div', { class: 'popover-title' }, icon('plus', { size: 15 }), h('span', { text: 'New T3 task' })),
+      h('div', { class: 'popover-sub', text: 'It starts with these words:' }),
+      h('div', { class: 'task-words', text: taskText(item) }),
+      added ? h('div', { class: 'popover-sub', text: added }) : null,
+      h('div', { class: 'popover-buttons' },
+        h('button', { class: 'chip-btn', type: 'button', onclick: () => closePopover() }, h('span', { text: 'Cancel' })),
+        h('button', { class: 'chip-btn primary', type: 'button', onclick: () => act(item, 'make_task') },
+          icon('plus', { size: 13 }), h('span', { text: 'Start task' }))),
+    ], { width: 340, align: 'start' });
+  }
+
+  /**
+   * Refresh: the bridge builds the brief again (tens of seconds: the mail, then Claude); "Reading…" stays until the new
+   * one is there (a long poll past the revision it answered, a few times), or says why it didn't.
+   */
   async function refresh() {
     if (refreshing) return;
     refreshing = true;
     changed();
     try {
-      await ctx.api.briefingRefresh();
+      const started = await ctx.api.briefingRefresh();
       toast('Reading your mail again…');
-      setTimeout(() => briefing.refresh(), 4000);
+      let after = started && Number.isFinite(started.revision) ? started.revision : briefing.value && briefing.value.revision;
+      for (let i = 0; i < REFRESH_POLLS; i += 1) {
+        const next = await ctx.api.briefing({ ...(Number.isFinite(after) ? { after } : {}), wait: REFRESH_WAIT });
+        if (!next || next.status !== 'building') break;
+        after = next.revision;
+      }
+      await briefing.refresh();
     } catch (failure) {
       // At most one build every 5 minutes on the bridge (429 refresh_too_soon).
       toast(failure && failure.status === 429 ? 'It was read a moment ago. Try again in a few minutes.'
         : 'The bridge couldn’t read the mail again right now.', { tone: failure && failure.status === 429 ? undefined : 'error' });
     } finally {
-      setTimeout(() => {
-        refreshing = false;
-        changed();
-      }, 4200);
+      refreshing = false;
+      changed();
     }
   }
 
@@ -146,7 +175,8 @@ export function createMorning(ctx, { onChange } = {}) {
     const working = busy.get(item.id) === action.type;
     return h('button', {
       class: `chip-btn brief-verb${primary ? ' primary' : ''}`, type: 'button', disabled: busy.has(item.id),
-      onclick: (event) => (action.type === 'remind' ? remind(item, event.currentTarget) : act(item, action.type)),
+      onclick: (event) => (action.type === 'remind' ? remind(item, event.currentTarget)
+        : action.type === 'make_task' ? confirmTask(item, event.currentTarget) : act(item, action.type)),
     }, working ? spinner() : icon(verbIcon(action.type), { size: 13 }),
     h('span', { text: working && action.type === 'draft_reply' ? 'Drafting…' : action.label }));
   }

@@ -13,7 +13,37 @@ enum BriefingTests {
         ("actResults", actResults),
         ("gmailInTheRightAccount", gmailInTheRightAccount),
         ("remindChoices", remindChoices),
+        ("makeTaskSaysItsWords", makeTaskSaysItsWords),
+        ("refreshWaitsForTheBuild", refreshWaitsForTheBuild),
     ]
+
+    /// Make task's words are the item's title and why (what Samin reads), never the model's hidden taskText.
+    static func makeTaskSaysItsWords() throws {
+        let brief = try fixture()
+        guard let stripe = brief.item("bi_2b81e05c94af7d36") else { throw TestFailure("the Stripe item") }
+        expectEqual(DockBriefTask.text(stripe), "Fix the failed Stripe payout. Stripe: the bank declined Monday’s $1,240 payout")
+        expectEqual(DockBriefTask.added(stripe), "SamRabbit adds which email it came from (sender and subject).")
+        var asked = stripe
+        asked.title = "Why did the payout fail?"
+        expectEqual(DockBriefTask.text(asked), "Why did the payout fail? Stripe: the bank declined Monday’s $1,240 payout", "no doubled stop")
+        asked.why = "  "
+        expectEqual(DockBriefTask.text(asked), "Why did the payout fail?")
+        var agent = stripe
+        agent.kind = "agent"
+        expect(DockBriefTask.added(agent) == nil, "only an email gets the bridge's line")
+    }
+
+    /// "↻": a 202 waits for the build past its revision; 429 and an absent bridge say why instead.
+    static func refreshWaitsForTheBuild() throws {
+        let building = DockBriefRefresh.answer(status: 202, data: Data(#"{"status": "building", "revision": 7}"#.utf8))
+        expect(building.building && building.revision == 7 && building.note == nil)
+        let soon = DockBriefRefresh.answer(status: 429, data: Data(#"{"error": {"code": "refresh_too_soon", "retryAfter": 120}}"#.utf8))
+        expect(!soon.building)
+        expectEqual(soon.note, "It was read a moment ago. Try again in a few minutes.")
+        expectEqual(DockBriefRefresh.answer(status: 0, data: Data()).note, "The Mac bridge isn’t answering.")
+        expectEqual(DockBriefRefresh.answer(status: 503, data: Data()).note, "The bridge couldn’t read the mail again right now.")
+        expect(DockBriefRefresh.polls * DockBriefRefresh.wait >= 90, "long enough for a build (tens of seconds)")
+    }
 
     static func fixture() throws -> DockBrief {
         guard let path = ProcessInfo.processInfo.environment["DOCK_FIXTURE"],

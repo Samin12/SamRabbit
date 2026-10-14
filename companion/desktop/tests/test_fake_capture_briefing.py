@@ -207,6 +207,54 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         self.assertEqual((body["state"], body["outcome"]["kind"], body["error"]["code"]), ("failed", "failed", "t3_not_connected"))
         self.assertEqual(self.call("GET", "/v1/desktop/capture/%s" % uuid.uuid4())[0], 404)
 
+    def test_a_slow_bridge_and_its_outcome_reads(self) -> None:
+        self.call("POST", "/dev/capture", {"hold": 0.6})
+        started = time.monotonic()
+        status, _ = self.capture(wav(1))
+        self.assertEqual(status, 202)
+        self.assertGreaterEqual(time.monotonic() - started, 0.55, "hold: the upload's answer comes late")
+        self.call("POST", "/dev/capture", {"hold": 0})
+        capture_id = str(uuid.uuid4())
+        self.capture(wav(1), capture_id)
+        before = self.call("GET", "/dev/capture")[1]["polls"]
+        self.call("GET", "/v1/desktop/capture/%s?wait=5" % capture_id)
+        self.assertEqual(self.call("GET", "/dev/capture")[1]["polls"], before + 1, "each outcome read is counted")
+
+    def test_voice_notes_in_the_inbox(self) -> None:
+        self.call("POST", "/dev/inbox/reset", {})
+        before = self.call("GET", "/v1/desktop/inbox")[1]
+        self.assertFalse(any(i["id"].startswith("note:") for i in before["items"]), "only on request")
+        self.call("POST", "/dev/inbox/notes", {})
+        inbox = self.call("GET", "/v1/desktop/inbox")[1]
+        self.assertGreater(inbox["revision"], before["revision"])
+        notes = {i["id"]: i for i in inbox["items"] if i["source"] == "note"}
+        kept = notes["note:3f2b8c1e-7d4a-4e9b-8f21-6a5c0d9e1b47"]
+        failed = notes["note:9c4e2a7b-1f3d-4b8e-a6c5-2d7f0e8b3a91"]
+        # The bridge's own shape (samrabbit_capture inbox_items).
+        self.assertEqual((kept["status"], kept["suggestion"]["action"], kept["can"]), ("needs-input", "task", ["act", "dismiss", "seen"]))
+        self.assertEqual((failed["status"], failed["suggestion"]), ("error", None))
+        self.assertEqual(kept["captureId"], kept["id"][5:])
+        self.assertFalse(any(key.startswith("_") for key in kept))
+        detail = self.call("GET", "/v1/desktop/inbox/items/%s" % kept["id"])[1]
+        self.assertEqual([m["role"] for m in detail["messages"]], ["user", "assistant"])
+        # Seen: a kept note no longer asks; a failed one stays an error (only out of the dock's count once seen).
+        self.call("POST", "/v1/desktop/inbox/items/%s/seen" % failed["id"], {})
+        failed_now = next(i for i in self.call("GET", "/v1/desktop/inbox")[1]["items"] if i["id"] == failed["id"])
+        self.assertEqual((failed_now["status"], failed_now["unread"]), ("error", False))
+        # Act: the suggestion (it leaves the inbox: it is a task now), a retry for the failed one, nothing for a block.
+        status, body = self.call("POST", "/v1/desktop/inbox/items/%s/act" % kept["id"], {"action": "task"})
+        self.assertEqual((status, body["capture"]["outcome"]["kind"]), (200, "task"))
+        status, body = self.call("POST", "/v1/desktop/inbox/items/%s/act" % failed["id"], {})
+        self.assertEqual((status, body["capture"]["state"]), (202, "received"), "a failed note is tried again")
+        ids = [i["id"] for i in self.call("GET", "/v1/desktop/inbox")[1]["items"]]
+        self.assertFalse(any(i.startswith("note:") for i in ids), "both left the inbox")
+        self.call("POST", "/dev/inbox/notes", {})
+        status, body = self.call("POST", "/v1/desktop/inbox/items/%s/act" % kept["id"], {"action": "block"})
+        self.assertEqual((status, body["error"]["code"]), (400, "invalid_action"))
+        status, body = self.call("POST", "/v1/desktop/inbox/items/%s/act" % kept["id"], {"action": "retry"})
+        self.assertEqual((status, body["error"]["code"]), (409, "not_failed"))
+        self.call("POST", "/dev/inbox/reset", {})
+
     # ------------------------------------------------------------------ the brief
 
     def test_the_brief_is_todays(self) -> None:
@@ -246,7 +294,8 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         self.assertEqual(drafted["revision"], brief["revision"] + 1)
         again = self.call("POST", "/v1/desktop/briefing/items/%s/act" % first["id"], {"action": "draft_reply"})[1]
         self.assertEqual(again["result"], drafted["result"], "a second tap answers what the first did")
-        tasked = self.call("POST", "/v1/desktop/briefing/items/%s/act" % second["id"], {"action": "make_task"})[1]
+        words = "Fix the failed Stripe payout. Stripe: the bank declined Monday’s $1,240 payout"
+        tasked = self.call("POST", "/v1/desktop/briefing/items/%s/act" % second["id"], {"action": "make_task", "text": words})[1]
         self.assertTrue(tasked["result"]["itemId"].startswith("t3:"))
         self.assertEqual(self.call("POST", "/v1/desktop/briefing/items/%s/act" % second["id"], {"action": "remind"})[1]
                          ["error"]["code"], "unsupported_action", "only what the item can")
@@ -265,6 +314,7 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         acts = self.call("GET", "/dev/briefing")[1]["acts"]
         self.assertEqual([a["action"] for a in acts], ["draft_reply", "draft_reply", "make_task", "remind"],
                          "refusals change nothing")
+        self.assertEqual(acts[2]["text"], words, "the task's words are kept for the tests")
 
     def test_long_poll_and_refresh(self) -> None:
         brief = self.call("GET", "/v1/desktop/briefing")[1]
@@ -277,6 +327,25 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         status, payload = self.call("POST", "/v1/desktop/briefing/refresh", {})
         self.assertEqual((status, payload["error"]["code"]), (429, "refresh_too_soon"), "once in 5 minutes")
         self.assertGreater(payload["error"]["retryAfter"], 0)
+
+    def test_posts_leave_a_kept_alive_connection_clean(self) -> None:
+        # The window's Refresh then reads the brief on the same connection: the POST's body must have been read (an
+        # unread "{}" made the next request "{}GET …", 501).
+        import http.client
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        headers = {"X-SamRabbit-Desktop": self.token, "Content-Type": "application/json"}
+        try:
+            for path in ("/dev/capture/reset", "/dev/briefing/reset", "/v1/desktop/briefing/refresh"):
+                connection.request("POST", path, body=b"{}", headers=headers)
+                response = connection.getresponse()
+                response.read()
+                self.assertIn(response.status, (200, 202), path)
+                connection.request("GET", "/v1/desktop/briefing?wait=0", headers=headers)
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 200, "the request after %s" % path)
+        finally:
+            connection.close()
 
     def test_states_and_failures(self) -> None:
         self.call("POST", "/dev/briefing", {"status": "off"})

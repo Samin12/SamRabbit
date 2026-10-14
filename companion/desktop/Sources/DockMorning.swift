@@ -14,6 +14,10 @@ final class DockBriefingStore: ObservableObject {
     @Published private(set) var notes: [String: DockStore.Note] = [:]
     /// The item whose "Remind me" choices are open.
     @Published var remindOpen: String?
+    /// The item whose "Make task" waits for Samin's yes (the task's words shown first).
+    @Published var taskOpen: String?
+    /// Why "↻" didn't read the mail again (too soon, the bridge away), for a few seconds.
+    @Published private(set) var refreshNote: String?
     /// The Gmail draft each drafted item opened (to open it again).
     @Published private(set) var drafts: [String: String] = [:]
     @Published private(set) var refreshing = false
@@ -88,16 +92,42 @@ final class DockBriefingStore: ObservableObject {
         return answer.status
     }
 
-    /// "↻" in the section: the bridge builds it again (at most once in 5 minutes there), read a moment later.
+    /// "↻" in the section: the bridge builds it again (at most once in 5 minutes there); the spinner stays until the
+    /// new brief is there (a long poll past the revision it answered), or says why it didn't.
     func refresh() {
         guard live, !refreshing else { return }
         refreshing = true
+        refreshNote = nil
         Task {
             let answer = await DockBriefingAPI.send("POST", "/v1/desktop/briefing/refresh", body: [:])
             Log.write("dock: briefing refresh (HTTP \(answer.status))")
-            try? await Task.sleep(for: .seconds(answer.status == 202 ? 4 : 0.5))
-            await fetch()
+            let reply = DockBriefRefresh.answer(status: answer.status, data: answer.data)
+            if reply.building {
+                var after = reply.revision ?? brief?.revision
+                for _ in 0..<DockBriefRefresh.polls {
+                    var query = [URLQueryItem(name: "wait", value: String(DockBriefRefresh.wait))]
+                    if let after { query.append(URLQueryItem(name: "after", value: String(after))) }
+                    let read = await DockBriefingAPI.send("GET", "/v1/desktop/briefing", query: query, timeout: TimeInterval(DockBriefRefresh.wait + 10))
+                    guard read.status == 200, let next = DockBrief.decode(read.data) else { break }
+                    fetchedAt = Date()
+                    if next != brief { brief = next }
+                    if next.status != "building" { break }
+                    after = next.revision
+                }
+            } else {
+                await fetch()
+                showRefreshNote(reply.note)
+            }
             refreshing = false
+        }
+    }
+
+    private func showRefreshNote(_ note: String?) {
+        refreshNote = note
+        guard note != nil else { return }
+        Task {
+            try? await Task.sleep(for: .seconds(6))
+            if refreshNote == note { refreshNote = nil }
         }
     }
 
@@ -106,6 +136,7 @@ final class DockBriefingStore: ObservableObject {
     func act(_ item: DockBriefItem, _ type: String, at: Date? = nil) {
         guard busy[item.id] == nil else { return }
         remindOpen = nil
+        taskOpen = nil
         notes[item.id] = nil
         // Open with a link needs no bridge; an agent item opens in the dock's list.
         if type == "open" {
@@ -128,6 +159,8 @@ final class DockBriefingStore: ObservableObject {
         }
         var body: [String: Any] = ["action": type]
         if let at { body["at"] = VoiceNoteUpload.iso(at) }
+        // The task's words are the ones Samin read (DockBriefTask), not the model's hidden ones.
+        if type == "make_task" { body["text"] = DockBriefTask.text(item) }
         Task {
             let answer = await DockBriefingAPI.send("POST", DockBriefingAPI.itemPath(item.id), body: body)
             busy[item.id] = nil
@@ -191,11 +224,13 @@ enum DockBriefingAPI {
     }
 
     /// (HTTP status, body): 0 = unreachable, -1 = no desktop token.
-    static func send(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil) async -> (status: Int, data: Data) {
+    static func send(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil,
+                     timeout: TimeInterval? = nil) async -> (status: Int, data: Data) {
         var components = URLComponents(url: Config.origin, resolvingAgainstBaseURL: false)!
         components.percentEncodedPath = path
         components.queryItems = query.isEmpty ? nil : query
-        guard let url = components.url, var request = Config.request(url, timeout: method == "GET" ? 10 : 45) else { return (-1, Data()) }
+        guard let url = components.url,
+              var request = Config.request(url, timeout: timeout ?? (method == "GET" ? 10 : 45)) else { return (-1, Data()) }
         request.httpMethod = method
         if let body {
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -231,6 +266,12 @@ struct DockMorningSection: View {
             let rows = brief.dockRows(now: now)
             VStack(alignment: .leading, spacing: 6 * p) {
                 header(brief, p)
+                if let note = morning.refreshNote {
+                    Text(note)
+                        .font(.system(size: 11 * p))
+                        .foregroundStyle(DockPalette.tertiary)
+                        .padding(.horizontal, 10 * p)
+                }
                 if !brief.headline.isEmpty {
                     Text(brief.headline)
                         .font(.system(size: 13 * p, weight: .semibold))
@@ -373,6 +414,9 @@ struct DockMorningRow: View {
                     buttons(p, busy: busy)
                         .padding(.top, 3 * p)
                 }
+                if morning.taskOpen == item.id {
+                    taskConfirm(p)
+                }
                 if morning.remindOpen == item.id {
                     DockFlow(spacing: 5 * p, lineSpacing: 5 * p) {
                         ForEach(DockBriefRemind.choices(now: now), id: \.label) { choice in
@@ -419,7 +463,12 @@ struct DockMorningRow: View {
                 DockCapsuleButton(title: action.label, symbol: DockBriefAction.symbol(action.type),
                                   style: index == 0 ? .accent : .plain, scale: p, disabled: busy != nil) {
                     if action.type == "remind" {
+                        morning.taskOpen = nil
                         morning.remindOpen = morning.remindOpen == item.id ? nil : item.id
+                    } else if action.type == "make_task" {
+                        // A T3 agent from an email: its words first, then Samin's yes.
+                        morning.remindOpen = nil
+                        morning.taskOpen = morning.taskOpen == item.id ? nil : item.id
                     } else {
                         morning.act(item, action.type)
                     }
@@ -434,6 +483,41 @@ struct DockMorningRow: View {
                 DockRoundButton(symbol: "xmark", size: 24 * p, fill: Color.clear, help: "Dismiss: not today") { morning.act(item, "dismiss") }
             }
         }
+    }
+
+    /// "Make task" asks first: the exact words the T3 task starts with (what the brief shows, DockBriefTask), what the
+    /// bridge adds, then Start task or Cancel.
+    private func taskConfirm(_ p: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 6 * p) {
+            Text("New T3 task with these words")
+                .font(.system(size: 10 * p, weight: .semibold))
+                .textCase(.uppercase)
+                .kerning(0.5 * p)
+                .foregroundStyle(DockPalette.tertiary)
+            Text(DockBriefTask.text(item))
+                .font(.system(size: 12 * p))
+                .foregroundStyle(DockPalette.ink.opacity(0.92))
+                .lineLimit(5)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .padding(.horizontal, 9 * p)
+                .padding(.vertical, 7 * p)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 9 * p, style: .continuous).fill(Color.black.opacity(0.3)))
+                .overlay(RoundedRectangle(cornerRadius: 9 * p, style: .continuous).strokeBorder(Color.white.opacity(0.06), lineWidth: 1))
+            if let added = DockBriefTask.added(item) {
+                Text(added)
+                    .font(.system(size: 10.5 * p))
+                    .foregroundStyle(DockPalette.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 6 * p) {
+                DockCapsuleButton(title: "Start task", symbol: "play.fill", style: .accent, scale: p * 0.92,
+                                  disabled: morning.busy[item.id] != nil) { morning.act(item, "make_task") }
+                DockCapsuleButton(title: "Cancel", style: .quiet, scale: p * 0.92) { morning.taskOpen = nil }
+            }
+        }
+        .padding(.top, 2 * p)
     }
 
     private func glyph(_ p: CGFloat) -> some View {

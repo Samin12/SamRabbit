@@ -15,7 +15,8 @@ makes no Gmail draft, starts no T3 task and puts nothing on a calendar: each act
   ``retryAfter``.
 * ``POST /v1/desktop/briefing/items/<id>/act {action, …}`` -> ``{ok, item, result, revision}``, only for an action in
   the item's ``can`` (else 409 ``unsupported_action``): ``draft_reply`` -> ``{draftId, url, account, say}`` (a Gmail
-  drafts link in the item's account), ``make_task`` -> ``{threadId, itemId, title, say}``, ``block_time`` ->
+  drafts link in the item's account), ``make_task`` (``text?``: the task's words, kept in the dev log's ``acts``) ->
+  ``{threadId, itemId, title, say}``, ``block_time`` ->
   ``{eventId, startsAt, endsAt, say}``, ``remind`` (``in: 1h | 2pm | tonight | tomorrow`` or ``at``) -> ``{eventId,
   until, say}``, ``done`` / ``dismiss`` -> ``{}``, ``open`` -> ``{url, itemId}`` (no change). A second tap of a done
   action answers what the first did.
@@ -112,6 +113,7 @@ class FakeBriefing:
         try:
             if path == "/dev/briefing/reset":
                 self.only(method, "POST")
+                self.json_body(handler)  # read, so a kept-alive connection's next request starts clean
                 self.reset()
                 return handler.json(200, {"ok": True})
             if path == "/dev/briefing":
@@ -128,6 +130,7 @@ class FakeBriefing:
                 return handler.json(200, self.read(params))
             if path == "/v1/desktop/briefing/refresh":
                 self.only(method, "POST")
+                self.json_body(handler)  # as the bridge (an optional body): the page's next request on the connection
                 status, payload = self.refresh()
                 return handler.json(status, payload)
             prefix = "/v1/desktop/briefing/items/"
@@ -262,7 +265,8 @@ class FakeBriefing:
             item = self.find(item_id)
             if action not in item.get("can", []):
                 raise Refusal(409, "unsupported_action", "That item can't do that.")
-            self.acts.append({"id": item_id, "action": action, "at": body.get("at"), "in": body.get("in")})
+            self.acts.append({"id": item_id, "action": action, "at": body.get("at"), "in": body.get("in"),
+                              "text": body.get("text") if isinstance(body.get("text"), str) else None})
             if self.fail == action:
                 raise Refusal(502, "gmail_failed", "Gmail didn't answer. Nothing was changed.", True)
             if action == "open":

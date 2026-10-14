@@ -293,6 +293,24 @@ export function actResult(raw) {
   };
 }
 
+/**
+ * "Make task" starts a T3 agent (tools and all) from an email: its words are the ones the brief shows (the item's title
+ * and why), sent as the action's `text`, never the model's own `taskText` (written from the email Samin never sees);
+ * Home shows them before it starts. The dock's DockBriefTask.
+ */
+export function taskText(item) {
+  const title = text(item && item.title);
+  const why = text(item && item.why);
+  if (!why) return title;
+  if (!title) return why;
+  return title + ('.?!…'.includes(title.at(-1)) ? ' ' : '. ') + why;
+}
+
+/** What the bridge puts after the words (samrabbit_briefing `_task`): for an email, a line naming it. */
+export function taskAdded(item) {
+  return item && item.kind === 'email' ? 'SamRabbit adds which email it came from (sender and subject).' : null;
+}
+
 /** "Remind me": in an hour, at 2 PM, tonight at 6, tomorrow at 9 (each only while it is still ahead). */
 export function remindChoices(now = Date.now()) {
   const at = (hour, days = 0) => {
