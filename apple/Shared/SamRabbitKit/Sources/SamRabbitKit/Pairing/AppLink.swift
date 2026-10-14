@@ -73,6 +73,9 @@ public enum AppLink: Sendable, Equatable {
     case confirm(LinkAction)
     /// `thread/<id>` (or `task/<id>`): the Tasks tab, with the thread when there is an id.
     case thread(String?)
+    /// `inbox/<itemId>` (`claude:<id>`, `codex:<id>`, `t3:<id>`): the Tasks tab with that agent's item (the widgets'
+    /// rows). Only opens it: answering is done there, by the person.
+    case inbox(String?)
     /// `conversation/<id>` (or `chat/<id>`): the Chats tab, with the conversation.
     case conversation(String?)
     /// `tab/<name>`
@@ -128,6 +131,8 @@ public enum AppLink: Sendable, Equatable {
             } else {
                 self = .thread(parts.first)
             }
+        case "inbox":
+            self = .inbox(parts.first)
         case "conversation", "chat":
             self = .conversation(parts.first)
         case "tab":

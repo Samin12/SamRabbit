@@ -51,10 +51,14 @@ public struct MobileSummary: Codable, Sendable, Equatable {
     public var transcribe: TranscribeStatus?
     /// Whether the watch can talk to the assistant, and which brain answers (`nil`: a bridge without one).
     public var assistant: AssistantStatus?
+    /// Every agent on the Mac (T3, Claude Code, Codex): the inbox's counts and first items, added by the iPhone from
+    /// `/v1/mobile/inbox` (`with(inbox:)`); `nil`: T3's counts only (the watch, an older bridge).
+    public var inbox: InboxOverview?
 
     public init(generatedAt: Date? = nil, mac: MacStatus = .init(), r1: R1Status = .init(), t3: TaskOverview = .init(),
                 calendar: CalendarOverview = .init(), latestConversation: ConversationPreview? = nil,
-                journal: JournalStatus = .init(), transcribe: TranscribeStatus? = nil, assistant: AssistantStatus? = nil) {
+                journal: JournalStatus = .init(), transcribe: TranscribeStatus? = nil, assistant: AssistantStatus? = nil,
+                inbox: InboxOverview? = nil) {
         self.generatedAt = generatedAt
         self.mac = mac
         self.r1 = r1
@@ -64,6 +68,7 @@ public struct MobileSummary: Codable, Sendable, Equatable {
         self.journal = journal
         self.transcribe = transcribe
         self.assistant = assistant
+        self.inbox = inbox
     }
 
     public init(from decoder: Decoder) throws {
@@ -78,6 +83,7 @@ public struct MobileSummary: Codable, Sendable, Equatable {
         journal = c.value(JournalStatus.self, "journal") ?? .init()
         transcribe = c.value(TranscribeStatus.self, "transcribe")
         assistant = c.value(AssistantStatus.self, "assistant")
+        inbox = c.value(InboxOverview.self, "inbox")
     }
 
     /// The next event that has not ended yet.

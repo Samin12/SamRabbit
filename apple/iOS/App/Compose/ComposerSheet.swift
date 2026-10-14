@@ -235,13 +235,25 @@ struct GeneratedResultCard: View {
 }
 
 /// "+" in Tasks: a new task with a project picker (automatic placement by default).
+/// A new T3 Code task: what to do, which agent runs it (Claude or Codex, and the model; automatic: the project's
+/// own) and where (automatic placement, or a project). The agents and models are what T3 offers (`/inbox/targets`);
+/// an older bridge without them offers the projects only.
 struct NewTaskSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var projectId: String?
+    @State private var agent: String?
+    @State private var modelId: String?
     @State private var working = false
     @FocusState private var focused: Bool
+
+    var projectChoices: [TaskProject] {
+        if let targets = model.targets, !targets.projects.isEmpty {
+            return targets.projects.map { TaskProject(id: $0.id, name: $0.title) }
+        }
+        return model.projects
+    }
 
     var body: some View {
         NavigationStack {
@@ -257,10 +269,30 @@ struct NewTaskSheet: View {
                     .listRowBackground(Color.clear)
                 }
                 .listRowBackground(SamTheme.glass2)
+                if let targets = model.targets, !targets.agents.isEmpty {
+                    Section("Agent") {
+                        Picker("Agent", selection: $agent) {
+                            Text("Automatic").tag(String?.none)
+                            ForEach(targets.agents) { choice in
+                                Text(choice.label).tag(Optional(choice.id))
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("new-task-agent")
+                        if let chosen = targets.agent(agent), !chosen.models.isEmpty {
+                            Picker("Model", selection: $modelId) {
+                                ForEach(chosen.models) { option in
+                                    Text(option.label).tag(Optional(option.id))
+                                }
+                            }
+                        }
+                    }
+                    .listRowBackground(SamTheme.glass2)
+                }
                 Section("Project") {
                     Picker("Project", selection: $projectId) {
                         Label("Automatic", systemImage: "sparkles").tag(String?.none)
-                        ForEach(model.projects) { project in
+                        ForEach(projectChoices) { project in
                             Text(project.name).tag(Optional(project.id))
                         }
                     }
@@ -268,6 +300,12 @@ struct NewTaskSheet: View {
                     .labelsHidden()
                 }
                 .listRowBackground(SamTheme.glass2)
+            }
+            .onChange(of: agent) { _, chosen in
+                // The model this agent ran last (the Mac's default for it), else its first.
+                let models = model.targets?.agent(chosen)?.models ?? []
+                let preferred = model.targets?.defaultChoice.agent == chosen ? model.targets?.defaultChoice.model : nil
+                modelId = models.first { $0.id == preferred }?.id ?? models.first?.id
             }
             .samScreen()
             .navigationTitle("New task")
@@ -279,8 +317,10 @@ struct NewTaskSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
                         working = true
+                        let choice = InboxTargets.Choice(projectId: projectId, agent: agent,
+                                                         model: agent == nil ? nil : modelId)
                         Task {
-                            if await model.ask(text, projectId: projectId) { dismiss() }
+                            if await model.newTask(text, choice: choice) { dismiss() }
                             working = false
                         }
                     } label: {
@@ -290,7 +330,10 @@ struct NewTaskSheet: View {
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || working)
                 }
             }
-            .task { await model.loadProjects() }
+            .task {
+                await model.loadTargets()
+                if model.targets == nil { await model.loadProjects() }
+            }
             .onAppear { focused = true }
         }
     }

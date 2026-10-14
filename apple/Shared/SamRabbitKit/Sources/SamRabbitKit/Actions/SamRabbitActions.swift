@@ -10,11 +10,25 @@ public struct SamRabbitActions: Sendable {
     public let account: BridgeAccount
     public let cache: SummaryCache
     public let tracker: TaskTracker
+    /// `refresh` also reads the inbox (`/v1/mobile/inbox`) and puts its counts into the summary, so the widgets
+    /// count every agent on the Mac. The iPhone does; the watch keeps T3's counts (it never reads the inbox).
+    public let includesInbox: Bool
 
-    public init(account: BridgeAccount = .shared, cache: SummaryCache = .shared, tracker: TaskTracker = .shared) {
+    public init(account: BridgeAccount = .shared, cache: SummaryCache = .shared, tracker: TaskTracker = .shared,
+                includesInbox: Bool = SamRabbitActions.inboxByDefault) {
         self.account = account
         self.cache = cache
         self.tracker = tracker
+        self.includesInbox = includesInbox
+    }
+
+    /// The iPhone (and its widgets and intents) read the inbox; the watch doesn't.
+    public static var inboxByDefault: Bool {
+        #if os(iOS)
+        true
+        #else
+        false
+        #endif
     }
 
     public static let shared = SamRabbitActions()
@@ -66,10 +80,20 @@ public struct SamRabbitActions: Sendable {
         await refreshQuietly()
     }
 
-    /// Fetches the summary and hands it to the widgets (reloaded only when it changed).
+    /// Fetches the summary (and on the iPhone the inbox beside it, for every agent's counts) and hands it to the
+    /// widgets (reloaded only when it changed).
     @discardableResult
     public func refresh(timeout: TimeInterval = 10) async throws -> MobileSummary {
-        let summary = try await account.requireClient().summary(timeout: timeout)
+        let client = try account.requireClient()
+        guard includesInbox else {
+            let summary = try await client.summary(timeout: timeout)
+            cache.publish(summary)
+            return summary
+        }
+        async let summaryCall = client.summary(timeout: timeout)
+        async let inboxCall = BridgeError.capture { try await client.inbox(timeout: timeout) }
+        let fresh = try await summaryCall
+        let summary = fresh.with(inbox: await inboxCall, kept: cache.load()?.summary.inbox)
         cache.publish(summary)
         return summary
     }

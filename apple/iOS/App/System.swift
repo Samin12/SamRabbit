@@ -24,8 +24,9 @@ final class NotificationController: Sendable {
         }
     }
 
-    /// Plans and posts what changed since the last check.
-    func check(threads: [TaskThread]) async {
+    /// Plans and posts what changed since the last check. `needsYou`: the app icon's badge (every agent that needs
+    /// you, from the inbox; T3's waiting threads without it).
+    func check(threads: [TaskThread], needsYou: Int? = nil) async {
         let plan = AlertPlanner.plan(threads: threads, announced: tracker.announced, tracked: tracker.tasks)
         tracker.setAnnounced(plan.announced)
         tracker.update(plan.tracked)
@@ -41,7 +42,7 @@ final class NotificationController: Sendable {
             let request = UNNotificationRequest(identifier: alert.id, content: content, trigger: nil)
             try? await UNUserNotificationCenter.current().add(request)
         }
-        try? await UNUserNotificationCenter.current().setBadgeCount(threads.filter(\.status.needsYou).count)
+        try? await UNUserNotificationCenter.current().setBadgeCount(needsYou ?? threads.filter(\.status.needsYou).count)
     }
 }
 
@@ -88,7 +89,11 @@ enum BackgroundRefresh {
         let account = BridgeAccount.shared
         guard let client = account.client() else { return }
         do {
-            let summary = try await client.summary(timeout: 15)
+            // The inbox beside the summary: the widgets and the badge count every agent on the Mac.
+            async let inboxCall = BridgeError.capture { try await client.inbox(timeout: 15) }
+            let fresh = try await client.summary(timeout: 15)
+            let inbox = await inboxCall
+            let summary = fresh.with(inbox: inbox, kept: SummaryCache.shared.load()?.summary.inbox)
             SummaryCache.shared.publish(summary) // reloads the widgets only when something changed
             var threads = summary.t3.threads
             // What waits for you comes from the thread list: its entries carry the request ids the
@@ -108,7 +113,7 @@ enum BackgroundRefresh {
             for task in TaskTracker.shared.tasks where !known.contains(task.threadId) {
                 if let detail = try? await client.thread(task.threadId) { threads.append(detail.thread) }
             }
-            if complete { await NotificationController().check(threads: threads) }
+            if complete { await NotificationController().check(threads: threads, needsYou: summary.inbox?.needsYou) }
             await LiveActivityController().update(with: threads)
         } catch {
             log.notice("background refresh failed")

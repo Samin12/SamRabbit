@@ -59,7 +59,10 @@ struct SummaryProvider: TimelineProvider {
         let account = BridgeAccount.shared
         guard account.pairing != nil, let client = account.client() else { return cached() }
         do {
-            let summary = try await client.summary(timeout: 8)
+            // The inbox beside the summary, so the counts and rows cover every agent on the Mac.
+            async let inbox = BridgeError.capture { try await client.inbox(timeout: 8) }
+            let fresh = try await client.summary(timeout: 8)
+            let summary = fresh.with(inbox: await inbox, kept: SummaryCache.shared.load()?.summary.inbox)
             SummaryCache.shared.save(summary)
             return WidgetSnapshot(date: .now, summary: summary, fetchedAt: .now, paired: true)
         } catch {
@@ -89,7 +92,7 @@ struct TasksWidget: Widget {
                 .widgetURL(URL(string: "samrabbit://tab/tasks"))
         }
         .configurationDisplayName("Tasks")
-        .description("Your T3 Code tasks: what needs you first.")
+        .description("Your T3 Code, Claude Code and Codex work: what needs you first.")
         .supportedFamilies([.systemMedium])
     }
 }
