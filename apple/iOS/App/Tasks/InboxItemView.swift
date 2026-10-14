@@ -4,7 +4,8 @@ import SwiftUI
 /// One Claude Code or Codex session (T3 threads have `ThreadDetailView`): its last messages, where it is, and what
 /// can be done from here. A session no terminal owns takes a reply: the Mac resumes it in a new Terminal window
 /// with it (`claude --resume` / `codex resume`), so the CLI's own permission prompts stay on the Mac. One that waits
-/// in its terminal, is open there, or belongs to the Codex app says so instead.
+/// in its terminal, is open there, or belongs to the Codex app says so instead. Opening a finished or failed one is
+/// seeing it: it is marked seen (here and on the Mac's dock).
 struct InboxItemView: View {
     @Environment(AppModel.self) private var model
     let itemId: String
@@ -14,12 +15,13 @@ struct InboxItemView: View {
     @State private var sending = false
     @FocusState private var composerFocused: Bool
 
-    /// The freshest copy: the detail's, else the list's.
+    /// The list's copy (the long-poll keeps it fresh; a Mark seen shows there at once).
+    var listed: InboxItem? { model.tasks.first { $0.id == itemId } }
+
+    /// The freshest copy: the list's, unless the detail read something later.
     var item: InboxItem? {
-        let listed = model.tasks.first { $0.id == itemId }
         guard let detail else { return listed }
-        // The list may be newer (the long-poll): its state wins when it moved on.
-        if let listed, (listed.updatedAt ?? .distantPast) > (detail.item.updatedAt ?? .distantPast) { return listed }
+        if let listed, (listed.updatedAt ?? .distantPast) >= (detail.item.updatedAt ?? .distantPast) { return listed }
         return detail.item
     }
 
@@ -96,7 +98,11 @@ struct InboxItemView: View {
                 try? await Task.sleep(for: .seconds(item?.status == .working ? 3 : 8))
             }
         }
-        .onChange(of: model.inbox?.revision) { _, _ in Task { await load() } }
+        // Seen once per state while it is on screen.
+        .task(id: listed?.seenMark) { await model.sawItem(itemId) }
+        // Read again when this item moved on (not on every change of the inbox: a working agent elsewhere moves
+        // the revision every few seconds).
+        .onChange(of: listed?.changeMark) { _, _ in Task { await load() } }
     }
 
     @ViewBuilder private func bottom(_ item: InboxItem) -> some View {

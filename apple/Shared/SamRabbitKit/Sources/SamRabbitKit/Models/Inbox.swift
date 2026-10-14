@@ -308,7 +308,9 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
     /// Why a Claude Code or Codex item can't be answered from the iPhone right now (nil: it can, or it is T3).
     /// The phone's items never list `open` (only the Mac opens things on its screen), so what is left says it: a
     /// prompt the CLI shows in its terminal (no `approve` / `answer`), a session a terminal owns (`live`, no
-    /// `reply`), or a thread of the Codex app.
+    /// `reply`), a thread of the Codex app, or a Claude Code session the Mac couldn't check (`ps` failed: the bridge
+    /// then sends neither `live` nor `reply`, and a reply would be refused with 503 `session_check_failed`).
+    /// A Codex CLI session in that state reads as the app's: nothing in an item tells the two apart.
     public var heldOnMac: InboxHold? {
         guard source == .claude || source == .codex else { return nil }
         if status == .needsApproval || status == .needsInput, !supports(.approve), !supports(.answer) {
@@ -316,7 +318,41 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
         }
         if supports(.reply) { return nil }
         if live { return .openInTerminal }
-        return source == .codex ? .ownedByApp : .openInTerminal
+        return source == .codex ? .ownedByApp : .unknownOnMac
+    }
+
+    /// The bridge only guesses that it waits ("May be waiting for you in the terminal": a Codex tool call that went
+    /// quiet with approvals on; a long build looks the same). Listed like the others, never announced.
+    public var isGuess: Bool { statusLabel.lowercased().hasPrefix("may be") }
+
+    /// Seeing it now: `<id>@<updatedAt>` while it is unread and can be marked seen, else nil. Its screen marks it
+    /// seen once per mark (a session that finishes again while it is open is marked again).
+    public var seenMark: String? {
+        guard unread, supports(.seen) else { return nil }
+        return "\(id)@\(Self.stamp(updatedAt))"
+    }
+
+    /// The item once seen, as the bridge says it next: not unread, no `seen`, and a Claude Code or Codex failure
+    /// settled (idle; nothing else settles it). A T3 thread that failed stays an error until T3 settles it.
+    public var markedSeen: InboxItem {
+        var seen = self
+        seen.unread = false
+        seen.can.removeAll { $0 == InboxCapability.seen.rawValue }
+        if seen.status == .error, source != .t3 { seen.status = .idle }
+        return seen
+    }
+
+    /// What says its screen should read it again: its state, the request it waits on, who holds it, what it can
+    /// do, and while it isn't working its time (a working one is read again every few seconds anyway, and its time
+    /// moves with every line it writes).
+    public var changeMark: String {
+        [status.rawValue, pendingRequestId ?? "", live ? "live" : "", can.joined(separator: ","),
+         status == .working ? "" : Self.stamp(updatedAt)].joined(separator: "|")
+    }
+
+    /// Milliseconds since 1970 as text ("" without a time).
+    static func stamp(_ date: Date?) -> String {
+        date.map { String(Int64(($0.timeIntervalSince1970 * 1000).rounded())) } ?? ""
     }
 
     /// A Codex Desktop thread that asks something: the bridge says where ("Waiting for you in Codex", "Has a question
@@ -341,6 +377,9 @@ public enum InboxHold: String, Sendable, Equatable {
     case openInTerminal
     /// Codex Desktop runs this thread: only the app answers it.
     case ownedByApp
+    /// The Mac couldn't tell whether a terminal runs this Claude Code session (its process list didn't answer), so
+    /// it takes no reply that could start a second one.
+    case unknownOnMac
 
     /// One line for the card: the bridge's own words for a prompt ("Has a question in the terminal", "May be waiting
     /// for you in the terminal"), else ours.
@@ -351,6 +390,7 @@ public enum InboxHold: String, Sendable, Equatable {
         case .waitingInApp: "Waiting for you in the Codex app"
         case .openInTerminal: "Open in a terminal on your Mac"
         case .ownedByApp: "Runs in the Codex app on your Mac"
+        case .unknownOnMac: "Can't tell if it's open on your Mac"
         }
     }
 
@@ -365,6 +405,8 @@ public enum InboxHold: String, Sendable, Equatable {
             "\(item.source.label) is running in a terminal on your Mac. Reply there, or here once it's closed."
         case .ownedByApp:
             "The Codex app on your Mac runs this thread. Answer it in the app."
+        case .unknownOnMac:
+            "Your Mac couldn't check whether a terminal runs this session. Try again in a moment, or answer it there."
         }
     }
 
@@ -373,6 +415,7 @@ public enum InboxHold: String, Sendable, Equatable {
         switch self {
         case .waitingInTerminal, .openInTerminal: "apple.terminal.fill"
         case .waitingInApp, .ownedByApp: "macwindow"
+        case .unknownOnMac: "questionmark.circle.fill"
         }
     }
 }
@@ -506,6 +549,57 @@ public struct InboxSnapshot: Codable, Sendable, Equatable {
                                                  total: items.count),
                              sources: ["t3": InboxSourceState(ok: true)], items: items)
     }
+
+    /// Says something the shown list (`current`) doesn't: a later revision. Revisions only grow (they start from the
+    /// bridge's time in milliseconds, so a restarted bridge is later too); an answer built before the shown one (the
+    /// 20 s refresh landing after the long-poll) or the same one again changes nothing, and must not undo what the
+    /// app changed at once (a Mark seen) while the Mac's answer is on its way.
+    public func isNewer(than current: InboxSnapshot?) -> Bool {
+        guard let current else { return true }
+        return revision > current.revision
+    }
+}
+
+/// What Tasks and Home list (`items`, in the contract's order) and whether T3's among them are the last ones kept
+/// while T3 Code isn't answering (`t3Stale`). Those stay visible, read-only, and count nowhere: the bridge's counts,
+/// the widgets and Siri leave them out too, and what they waited on may have been answered meanwhile.
+public struct InboxRows: Sendable, Equatable {
+    public var items: [InboxItem]
+    public var t3Stale: Bool
+
+    public init(items: [InboxItem] = [], t3Stale: Bool = false) {
+        self.items = items
+        self.t3Stale = t3Stale
+    }
+
+    /// The rows of an inbox that loaded: its agents' items; while T3 Code isn't answering (`t3Problem`), T3's
+    /// last rows (`previous`) too.
+    public init(_ snapshot: InboxSnapshot, previous: [InboxItem]) {
+        guard snapshot.t3Problem != nil else {
+            self.init(items: snapshot.agentItems)
+            return
+        }
+        let kept = previous.filter { $0.source == .t3 }
+        self.init(items: InboxSnapshot.ordered(snapshot.agentItems.filter { $0.source != .t3 } + kept),
+                  t3Stale: !kept.isEmpty)
+    }
+
+    /// The Mac answered but its inbox didn't (a server error, a timeout on its first scan): T3's own thread list,
+    /// fresh, with the other agents' last rows (`previous`).
+    public init(threads: [TaskThread], keeping previous: [InboxItem]) {
+        let others = previous.filter { $0.source != .t3 && $0.isAgent }
+        self.init(items: InboxSnapshot.ordered(InboxSnapshot.fromThreads(threads).items + others))
+    }
+
+    /// What can be acted on from here and counts.
+    public var live: [InboxItem] { t3Stale ? items.filter { $0.source != .t3 } : items }
+
+    /// T3's last rows while T3 Code isn't answering.
+    public var stale: [InboxItem] { t3Stale ? items.filter { $0.source == .t3 } : [] }
+
+    public var needsYou: Int { live.filter(\.needsYou).count }
+
+    public var working: Int { live.filter { $0.status == .working }.count }
 }
 
 extension InboxItem {
@@ -609,6 +703,10 @@ extension BridgeError {
 
     /// A Claude Code or Codex session is open in a terminal on the Mac (409 `session_live`): answer it there.
     public var isSessionLive: Bool { code == "session_live" }
+
+    /// The Mac couldn't tell whether a terminal runs the session (503 `session_check_failed`, retryable): it
+    /// started nothing.
+    public var isSessionCheckFailed: Bool { code == "session_check_failed" }
 }
 
 /// `GET /v1/mobile/inbox/items/<id>` -> `{item, messages}` (the last messages, each at most 4000 characters).

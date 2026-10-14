@@ -363,6 +363,164 @@ struct InboxTests {
         #expect(t3.alerts.map(\.link) == ["samrabbit://thread/t_deploy"])
     }
 
+    /// Opening a finished or failed item marks it seen once per state; what it looks like then is what the bridge
+    /// says next (a Claude Code or Codex failure settles, a T3 one stays an error until T3 settles it).
+    @Test func seeingAnItem() throws {
+        let inbox = try snapshot()
+        let changelog = try item("claude:changelog", in: inbox)
+        let mark = try #require(changelog.seenMark)
+        #expect(mark == "claude:changelog@1791954000000")
+        // Finished again later (a new turn): a new mark, so it is marked again.
+        var again = changelog
+        again.updatedAt = changelog.updatedAt?.addingTimeInterval(90)
+        #expect(again.seenMark != mark)
+        // Nothing to mark: a Claude Code prompt (only the terminal answers it), something already seen, working.
+        #expect(try item("claude:flaky", in: inbox).seenMark == nil)
+        #expect(try item("codex:cli-idle", in: inbox).seenMark == nil)
+        #expect(try item("claude:retry", in: inbox).seenMark == nil)
+
+        let seen = changelog.markedSeen
+        #expect(!seen.unread && !seen.supports(.seen) && seen.supports(.reply))
+        #expect(seen.status == .done && !seen.needsYou && seen.seenMark == nil)
+        var failed = changelog
+        failed.status = .error
+        #expect(failed.needsYou)
+        #expect(failed.markedSeen.status == .idle && !failed.markedSeen.needsYou)
+        var t3Failed = try item("t3:t_deploy", in: inbox)
+        t3Failed.status = .error
+        #expect(t3Failed.markedSeen.status == .error && t3Failed.markedSeen.needsYou)
+        #expect(!t3Failed.markedSeen.supports(.seen))
+    }
+
+    /// A screen reads its item again when that item moved on: not for every line a working agent writes (its time),
+    /// but for a new state, request, owner, what it can do, or a finished one's new time.
+    @Test func whenAScreenReadsAgain() throws {
+        let inbox = try snapshot()
+        let retry = try item("claude:retry", in: inbox)
+        var wrote = retry
+        wrote.updatedAt = retry.updatedAt?.addingTimeInterval(2)
+        wrote.summary = "Editing the next file…"
+        #expect(wrote.changeMark == retry.changeMark)
+        var finished = retry
+        finished.status = .done
+        #expect(finished.changeMark != retry.changeMark)
+        var closed = retry
+        closed.live = false
+        closed.can = ["reply"]
+        #expect(closed.changeMark != retry.changeMark)
+        let changelog = try item("claude:changelog", in: inbox)
+        var later = changelog
+        later.updatedAt = changelog.updatedAt?.addingTimeInterval(60)
+        #expect(later.changeMark != changelog.changeMark)
+        #expect(changelog.markedSeen.changeMark != changelog.changeMark)
+        var asked = try item("claude:flaky", in: inbox)
+        let first = asked.changeMark
+        asked.pending = InboxPending(approvals: [InboxApproval(requestId: "toolu_02")])
+        #expect(asked.changeMark != first)
+    }
+
+    /// When the Mac couldn't check its process list, a Claude Code session arrives with neither `live` nor `reply`:
+    /// the phone says it can't tell, not that a terminal owns it.
+    @Test func whenTheMacCantTellWhoRunsIt() throws {
+        let inbox = try snapshot("""
+        {"revision": 4, "items": [
+          {"id": "claude:unsure", "source": "claude", "title": "U", "status": "done", "statusLabel": "Finished",
+           "unread": true, "can": ["seen"], "live": false},
+          {"id": "claude:unsure-idle", "source": "claude", "title": "V", "status": "idle", "can": [], "live": false},
+          {"id": "codex:unsure", "source": "codex", "title": "W", "status": "done", "can": [], "live": false}]}
+        """)
+        let unsure = try item("claude:unsure", in: inbox)
+        #expect(unsure.heldOnMac == .unknownOnMac)
+        #expect(InboxHold.unknownOnMac.headline(unsure) == "Can't tell if it's open on your Mac")
+        #expect(InboxHold.unknownOnMac.detail(unsure).contains("Try again in a moment"))
+        #expect(try item("claude:unsure-idle", in: inbox).heldOnMac == .unknownOnMac)
+        // A Codex item looks the same as a Codex Desktop thread: the app's (nothing in it tells them apart).
+        #expect(try item("codex:unsure", in: inbox).heldOnMac == .ownedByApp)
+        #expect(BridgeError.server(status: 503, code: "session_check_failed", message: "", retryable: true)
+            .isSessionCheckFailed)
+        #expect(!BridgeError.server(status: 409, code: "session_live", message: "", retryable: false)
+            .isSessionCheckFailed)
+    }
+
+    /// T3 Code down: its last rows stay, read-only and counted nowhere (like the bridge's counts and the widgets);
+    /// an inbox that fails gets T3's own list beside the others' last rows.
+    @Test func t3sLastRowsWhileItIsDown() throws {
+        let up = try snapshot()
+        let shown = InboxRows(up, previous: [])
+        #expect(!shown.t3Stale && shown.items == up.agentItems && shown.stale.isEmpty)
+        #expect(shown.needsYou == 5 && shown.working == 2)
+
+        let down = try snapshot("""
+        {"revision": 1791955209100, "sources": {"t3": {"connected": false, "reason": "t3_unavailable"}},
+         "counts": {"needsYou": 1, "working": 0, "total": 1},
+         "items": [{"id":"claude:a","source":"claude","title":"A","status":"done","unread":true,"can":["reply","seen"],
+                    "updatedAt":"2026-10-14T05:21:00Z"}]}
+        """)
+        let kept = InboxRows(down, previous: shown.items)
+        #expect(kept.t3Stale)
+        #expect(kept.stale.map(\.id) == ["t3:t_deploy", "t3:t_odd"])
+        #expect(kept.live.map(\.id) == ["claude:a"])
+        #expect(kept.items.first?.id == "t3:t_deploy") // still in the contract's order
+        #expect(kept.needsYou == 1 && kept.needsYou == down.overview().needsYou) // as the widgets count
+        // The previous Claude Code and Codex rows are not kept: the inbox has them fresh.
+        #expect(!kept.items.contains { $0.id == "claude:flaky" })
+        // Down from the start: nothing to keep, nothing stale.
+        #expect(!InboxRows(down, previous: []).t3Stale)
+        // Back up: fresh rows.
+        #expect(InboxRows(up, previous: kept.items) == shown)
+
+        let threads = [TaskThread(threadId: "t_new", title: "New", status: .needsApproval,
+                                  updatedAt: BridgeDates.date(from: "2026-10-14T05:30:00Z"),
+                                  pending: PendingAction(kind: .approval, text: "Run it?", requestId: "r9"))]
+        let fallback = InboxRows(threads: threads, keeping: shown.items)
+        #expect(!fallback.t3Stale)
+        #expect(fallback.items.filter { $0.source == .t3 }.map(\.id) == ["t3:t_new"])
+        #expect(fallback.items.filter { $0.source != .t3 }.map(\.id) == shown.items.filter { $0.source != .t3 }.map(\.id))
+        #expect(fallback.items.first?.id == "t3:t_new")
+    }
+
+    /// A list built before the shown one (the 20 s refresh landing after the long-poll), or the same one, changes
+    /// nothing; a restarted bridge starts from its time in milliseconds, so it is later.
+    @Test func olderListsChangeNothing() throws {
+        let shown = try snapshot()
+        var older = shown
+        older.revision -= 1
+        var newer = shown
+        newer.revision += 1
+        #expect(shown.isNewer(than: nil))
+        #expect(newer.isNewer(than: shown))
+        #expect(!shown.isNewer(than: shown))
+        #expect(!older.isNewer(than: shown))
+    }
+
+    /// Prompts only the Mac answers come as normal alerts (not time-sensitive); the bridge's guesses aren't
+    /// announced; a prompt without a known tool call is keyed by when it started waiting.
+    @Test func agentAlertsAreQuietAboutWhatOnlyTheMacAnswers() throws {
+        let inbox = try snapshot()
+        let plan = AlertPlanner.plan(threads: [try #require(try item("t3:t_deploy", in: inbox).taskThread)],
+                                     agents: inbox.agentItems, announced: [:], tracked: [])
+        #expect(plan.alerts.map(\.onlyOnMac) == [false, true, true]) // T3's, then the terminal's and the app's
+
+        // "May be waiting": a quiet Codex tool call, as a long build is. Listed, not announced.
+        var guess = try item("codex:desk-q", in: inbox)
+        guess.status = .needsApproval
+        guess.statusLabel = "May be waiting for you in the terminal"
+        guess.pending = InboxPending(approvals: [InboxApproval(requestId: "call_build", kind: "command",
+                                                               detail: "Wants to run: make test")])
+        #expect(guess.isGuess && guess.needsYou)
+        #expect(AlertPlanner.plan(threads: [], agents: [guess], announced: [:], tracked: []).alerts.isEmpty)
+
+        // A prompt only Claude Code's registry reports (the stand-in id "terminal"): one alert per wait.
+        var registry = try item("claude:flaky", in: inbox)
+        registry.pending = InboxPending(approvals: [InboxApproval(requestId: "terminal")])
+        let first = AlertPlanner.plan(threads: [], agents: [registry], announced: [:], tracked: [])
+        #expect(first.alerts.map(\.id) == ["needs:claude:flaky|terminal@1791955080000"])
+        #expect(AlertPlanner.plan(threads: [], agents: [registry], announced: first.announced, tracked: []).alerts.isEmpty)
+        var next = registry
+        next.updatedAt = registry.updatedAt?.addingTimeInterval(600)
+        #expect(AlertPlanner.plan(threads: [], agents: [next], announced: first.announced, tracked: []).alerts.count == 1)
+    }
+
     /// The revision starts from the time in milliseconds: 64-bit on the watch's 32-bit hardware too.
     @Test func noIntOverflowsOn32BitWatches() throws {
         let inbox = try snapshot()
@@ -454,6 +612,14 @@ struct InboxBridgeTests {
         let finished = try await client.inboxItem(Self.changelog)
         #expect(finished.item.status == .done && finished.item.unread)
         #expect(finished.messages.last?.text.contains("I followed your note") == true)
+
+        // The Mac's process list doesn't answer: neither live nor reply, "can't tell"; a reply starts nothing (503).
+        _ = try await bridge.control("inbox", ["id": .string(Self.changelog), "live": false, "unsure": true])
+        let unsure = try #require(try await client.inbox().items.first { $0.id == Self.changelog })
+        #expect(!unsure.live && !unsure.supports(.reply))
+        #expect(unsure.heldOnMac == .unknownOnMac)
+        await #expect { _ = try await client.inboxReply(Self.changelog, text: "go") }
+            throws: { ($0 as? BridgeError)?.isSessionCheckFailed == true && ($0 as? BridgeError)?.isRetryable == true }
     }
 
     /// T3 items act through the inbox routes too (approve with T3's own decisions, answer, reply), and a new task

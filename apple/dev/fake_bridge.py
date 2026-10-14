@@ -94,9 +94,11 @@ The inbox (CONTRACTS-WAVE6 §A, the phone's twin of WAVE7: every agent on the Ma
   Terminal window" resumes it, live and working, finished six seconds later), a live one answers 409 ``session_live``,
   a Codex Desktop thread or a chat 409 ``unsupported_action``. The phone's items never list ``open`` and ``POST
   .../open`` answers 409 ``unsupported_action`` (only the Mac opens things on its screen).
-* ``POST /__fake/inbox {missing?, id?, live?, unread?, status?, clear?}`` / ``GET /__fake/inbox``: ``missing`` makes
-  every inbox route 404 (an older bridge); ``id`` with ``live`` / ``unread`` / ``status`` changes a session; the answer
-  lists what arrived (replies, seen, new tasks, refusals; ids and sizes only).
+* ``POST /__fake/inbox {missing?, id?, live?, unread?, unsure?, status?, clear?}`` / ``GET /__fake/inbox``:
+  ``missing`` makes every inbox route 404 (an older bridge); ``id`` with ``live`` / ``unread`` / ``status`` changes a
+  session, ``unsure`` as when the Mac's process list didn't answer (the real bridge then sends neither ``live`` nor
+  ``reply``, and a reply answers 503 ``session_check_failed``); the answer lists what arrived (replies, seen, new
+  tasks, refusals; ids and sizes only).
 Stdlib only, Python 3.9.
 """
 
@@ -1046,8 +1048,8 @@ class FakeBridge:
         asking = status in ("needs-approval", "needs-input")
         if x["source"] == "codex" and x["desktop"]:
             can = ["open"]  # the app owns its threads
-        elif asking or x["live"]:
-            can = ["open"]  # the CLI owns its prompt / the session is open in a terminal
+        elif asking or x["live"] or x.get("unsure"):
+            can = ["open"]  # the CLI owns its prompt / the session is open in a terminal / nobody can tell
         else:
             can = ["reply", "open"]
         # As the real bridge: a Claude Code prompt can't be marked seen (only answered); a Codex item can.
@@ -1056,7 +1058,8 @@ class FakeBridge:
         return {"id": x["id"], "source": x["source"], "agent": x["source"], "title": x["title"],
                 "project": x["project"], "cwd": x["cwd"], "status": status, "statusLabel": x["statusLabel"],
                 "summary": x["summary"], "updatedAt": iso(x["updatedAt"]), "unread": unread, "pending": x["pending"],
-                "can": can, "live": bool(x["live"]) and not x["desktop"], "progress": None, "phase": None}
+                "can": can, "live": bool(x["live"]) and not x["desktop"] and not x.get("unsure"), "progress": None,
+                "phase": None}
 
     def chat_item(self, conv: Dict[str, Any]) -> Dict[str, Any]:
         return {"id": "chat:" + conv["conversationId"], "source": "samrabbit", "agent": None, "title": conv["title"],
@@ -1146,6 +1149,10 @@ class FakeBridge:
         if x["source"] == "codex" and x["desktop"]:
             self.inbox_log["refused"].append({"id": x["id"], "code": "unsupported_action"})
             raise ApiError(409, "unsupported_action", "Codex Desktop owns this thread: open it there to reply.")
+        if x.get("unsure"):
+            self.inbox_log["refused"].append({"id": x["id"], "code": "session_check_failed"})
+            raise ApiError(503, "session_check_failed", "The Mac couldn't tell whether a terminal runs this session.",
+                           retryable=True)
         if "reply" not in item["can"]:
             self.inbox_log["refused"].append({"id": x["id"], "code": "session_live"})
             raise ApiError(409, "session_live", "It's open in a terminal on the Mac: answer it there.")
@@ -1612,7 +1619,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True, "id": item["id"]})
         if path == "/__fake/inbox":
             # ``missing``: an older bridge without the inbox (every route 404); ``id`` + ``live`` / ``unread`` /
-            # ``status``: change a Claude Code or Codex session (a CLI opened or closed in a terminal, ...).
+            # ``unsure`` / ``status``: change a Claude Code or Codex session (a CLI opened or closed in a terminal,
+            # the Mac's process list not answering, ...).
             if method == "POST":
                 body = self.body()
                 with b.lock:
@@ -1621,7 +1629,7 @@ class Handler(BaseHTTPRequestHandler):
                     found = b.sessions.get(str(body.get("id") or ""))
                     if body.get("id") and found is None:
                         raise ApiError(404, "item_not_found", "No such session.")
-                    for key in ("live", "unread"):
+                    for key in ("live", "unread", "unsure"):
                         if found is not None and key in body:
                             found[key] = bool(body[key])
                     if found is not None and body.get("status"):

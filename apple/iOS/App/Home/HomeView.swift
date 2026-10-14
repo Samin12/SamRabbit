@@ -100,7 +100,7 @@ struct OrbHeader: View {
         }
         // While the R1 is live the headline says so: what needs you (every agent's) still shows here.
         if summary.r1.live, model.needsYouCount > 0 {
-            parts.append("\(model.needsYouCount) need you")
+            parts.append(model.needsYouCount == 1 ? "1 needs you" : "\(model.needsYouCount) need you")
         }
         if summary.r1.live || model.needsYouCount > 0, model.workingCount > 0 {
             parts.append("\(model.workingCount) working")
@@ -284,9 +284,10 @@ struct NeedsYouSection: View {
     @Environment(AppModel.self) private var model
     static let shown = 4
 
-    /// The inbox's rows once a list loaded, else what the summary knew (its inbox items, else T3's threads).
+    /// The inbox's rows once a list loaded (not T3's last ones while it is down: those wait in Tasks, read-only),
+    /// else what the summary knew (its inbox items, else T3's threads).
     var items: [InboxItem] {
-        if model.threadsLoaded { return model.tasks.filter(\.needsYou) }
+        if model.threadsLoaded { return model.liveTasks.filter(\.needsYou) }
         if let inbox = model.summary?.inbox { return inbox.items.filter(\.needsYou) }
         return (model.summary?.t3.threads ?? []).filter(\.status.needsYou).map(InboxItem.init(thread:))
     }
@@ -299,7 +300,10 @@ struct NeedsYouSection: View {
                 if !items.isEmpty {
                     SectionHeader("Needs you", count: max(items.count, model.needsYouCount), symbol: "hand.raised.fill")
                 }
-                if let problem { TasksNotice(error: problem, showingLast: !items.isEmpty) }
+                if let problem {
+                    TasksNotice(error: problem, showingLast: !items.isEmpty && !model.t3Stale && !model.inboxFallback,
+                                fallback: model.inboxFallback)
+                }
                 ForEach(items.prefix(Self.shown)) { item in
                     InboxCard(item: item)
                 }
@@ -325,7 +329,7 @@ struct WorkingSection: View {
     @Environment(AppModel.self) private var model
 
     var items: [InboxItem] {
-        if model.threadsLoaded { return model.tasks.filter { $0.status == .working } }
+        if model.threadsLoaded { return model.liveTasks.filter { $0.status == .working } }
         if let inbox = model.summary?.inbox { return inbox.items.filter { $0.status == .working } }
         return (model.summary?.t3.threads ?? []).filter { $0.status == .working }.map(InboxItem.init(thread:))
     }

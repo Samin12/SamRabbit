@@ -13,6 +13,8 @@ private let log = Logger(subsystem: "com.samrabbit.mobile", category: "system")
 /// finishes is announced once.
 final class NotificationController: Sendable {
     private let tracker = TaskTracker.shared
+    /// The icon badge as last set (nil: not yet), so a check that changes nothing doesn't ask the system.
+    private let badge = OSAllocatedUnfairLock<Int?>(initialState: nil)
 
     func requestAuthorization() async {
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
@@ -25,14 +27,18 @@ final class NotificationController: Sendable {
         }
     }
 
-    /// Plans and posts what changed since the last check. `agents`: the inbox's Claude Code and Codex items;
-    /// `needsYou`: the app icon's badge (every agent that needs you, from the inbox; T3's waiting threads without it).
+    /// Plans and posts what changed since the last check, and keeps the icon's badge on what needs you (it drops
+    /// after a Mark seen or an answer, and counts what posts no alert: finished and unseen, failed). `agents`: the
+    /// inbox's Claude Code and Codex items; `needsYou`: the badge (every agent that needs you, from the inbox; T3's
+    /// waiting threads without it).
     func check(threads: [TaskThread], agents: [InboxItem] = [], needsYou: Int? = nil) async {
         let plan = AlertPlanner.plan(threads: threads, agents: agents, announced: tracker.announced,
                                      tracked: tracker.tasks)
         tracker.setAnnounced(plan.announced)
         tracker.update(plan.tracked)
-        guard !plan.alerts.isEmpty, await authorized else { return }
+        let count = needsYou ?? threads.filter(\.status.needsYou).count
+        let badgeMoved = badge.withLock { $0 != count }
+        guard !plan.alerts.isEmpty || badgeMoved, await authorized else { return }
         for alert in plan.alerts {
             let content = UNMutableNotificationContent()
             content.title = alert.title
@@ -40,11 +46,14 @@ final class NotificationController: Sendable {
             content.sound = Self.alertSound
             content.threadIdentifier = "samrabbit.tasks"
             content.userInfo = ["url": alert.link]
-            content.interruptionLevel = alert.kind == .needsYou ? .timeSensitive : .active
+            // What can be answered right here breaks through a Focus; a prompt only the Mac answers doesn't.
+            content.interruptionLevel = alert.kind == .needsYou && !alert.onlyOnMac ? .timeSensitive : .active
             let request = UNNotificationRequest(identifier: alert.id, content: content, trigger: nil)
             try? await UNUserNotificationCenter.current().add(request)
         }
-        try? await UNUserNotificationCenter.current().setBadgeCount(needsYou ?? threads.filter(\.status.needsYou).count)
+        if (try? await UNUserNotificationCenter.current().setBadgeCount(count)) != nil {
+            badge.withLock { $0 = count }
+        }
     }
 
     /// Talk's rule: the simulator plays nothing out loud unless `-SamRabbitAudioOut on`, so its alerts come silent
@@ -126,9 +135,10 @@ enum BackgroundRefresh {
             for task in TaskTracker.shared.tasks where !known.contains(task.threadId) {
                 if let detail = try? await client.thread(task.threadId) { threads.append(detail.thread) }
             }
-            if complete {
-                await NotificationController().check(threads: threads, agents: agents, needsYou: summary.inbox?.needsYou)
-            }
+            // Without the list T3's waiting threads aren't announced (nothing to key them on); the Claude Code and
+            // Codex prompts, finished tasks and the badge still are.
+            await NotificationController().check(threads: complete ? threads : threads.filter { !$0.status.needsYou },
+                                                 agents: agents, needsYou: summary.inbox?.needsYou)
             await LiveActivityController().update(with: threads)
         } catch {
             log.notice("background refresh failed")

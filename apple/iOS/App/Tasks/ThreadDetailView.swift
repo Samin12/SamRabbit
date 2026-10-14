@@ -1,7 +1,9 @@
 import SamRabbitKit
 import SwiftUI
 
-/// One T3 Code thread: its messages (Markdown), what it waits for, a composer and Stop.
+/// One T3 Code thread: its messages (Markdown), what it waits for, a composer and Stop. Opening a finished or failed
+/// one is seeing it: it is marked seen through the inbox (here and on the Mac's dock), and Mark seen stays at hand
+/// should that fail. While T3 Code isn't answering it shows its last state, read-only.
 struct ThreadDetailView: View {
     @Environment(AppModel.self) private var model
     let threadId: String
@@ -12,6 +14,15 @@ struct ThreadDetailView: View {
     @FocusState private var composerFocused: Bool
 
     var thread: TaskThread? { detail?.thread ?? model.threads.first { $0.threadId == threadId } }
+
+    /// The thread's inbox row (unread, `seen`), when the bridge has the inbox.
+    var listed: InboxItem? { model.tasks.first { $0.id == "t3:\(threadId)" } }
+
+    /// T3 Code isn't answering: what shows is the last state, and nothing can be sent.
+    var stale: Bool { model.t3Stale && listed != nil }
+
+    /// What says the screen should read the thread again: its own state in the list moved on.
+    var listedMark: String? { model.threads.first { $0.threadId == threadId }.map { InboxItem(thread: $0).changeMark } }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -32,8 +43,11 @@ struct ThreadDetailView: View {
                             .id("working")
                         }
                     } else if let error {
-                        ContentUnavailableView(error.shortDescription, systemImage: "wifi.exclamationmark",
-                                               description: Text(error.errorDescription ?? ""))
+                        // While T3 Code is down the header and the note below say it all.
+                        if !stale {
+                            ContentUnavailableView(error.shortDescription, systemImage: "wifi.exclamationmark",
+                                                   description: Text(error.errorDescription ?? ""))
+                        }
                     } else {
                         ProgressView().frame(maxWidth: .infinity).padding(.top, 40)
                     }
@@ -48,7 +62,9 @@ struct ThreadDetailView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 10) {
-                    if let thread, let pending = detail?.pending ?? thread.pending, thread.status.needsYou {
+                    if stale, let problem = model.tasksError {
+                        TasksNotice(error: problem, lastNote: "This is how the task last looked.")
+                    } else if let thread, let pending = detail?.pending ?? thread.pending, thread.status.needsYou {
                         VStack(alignment: .leading, spacing: 10) {
                             Label(pending.kind == .approval ? "Waiting for your approval" : "Question for you",
                                   systemImage: pending.kind == .approval ? "hand.raised.fill" : "questionmark.bubble.fill")
@@ -59,8 +75,11 @@ struct ThreadDetailView: View {
                         }
                         .glassCard(radius: 22, tint: StatusStyle(thread.status).color, padding: 14)
                     }
-                    Composer(text: $draft, placeholder: "Reply to this task", sending: sending, focused: $composerFocused) {
-                        send()
+                    if !stale {
+                        Composer(text: $draft, placeholder: "Reply to this task", sending: sending,
+                                 focused: $composerFocused) {
+                            send()
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -77,7 +96,7 @@ struct ThreadDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .toolbar {
-            if thread?.status == .working {
+            if thread?.status == .working, !stale {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(role: .destructive) {
                         Task {
@@ -90,6 +109,17 @@ struct ThreadDetailView: View {
                     .tint(SamTheme.red)
                 }
             }
+            if let listed, listed.supports(.seen), !stale {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await model.markSeen(listed) }
+                    } label: {
+                        Label("Mark seen", systemImage: "checkmark")
+                    }
+                    .disabled(model.busyItems.contains(listed.id))
+                    .accessibilityIdentifier("thread-detail-seen")
+                }
+            }
         }
         .task(id: threadId) {
             while !Task.isCancelled {
@@ -97,7 +127,10 @@ struct ThreadDetailView: View {
                 try? await Task.sleep(for: .seconds(detail?.thread.status == .working ? 3 : 8))
             }
         }
-        .onChange(of: model.threads) { _, _ in Task { await load() } }
+        // Seen once per state while it is on screen.
+        .task(id: listed?.seenMark) { await model.sawItem("t3:\(threadId)") }
+        // Read again when this thread moved on, not on every change of any thread.
+        .onChange(of: listedMark) { _, _ in Task { await load() } }
     }
 
     func load() async {

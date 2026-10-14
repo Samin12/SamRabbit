@@ -64,8 +64,13 @@ final class AppModel {
     /// notifications and Live Activities know them, or the thread list of an older bridge.
     var threads: [TaskThread] = []
     /// What Tasks and Home list: every agent's item on the Mac (T3 Code, Claude Code, Codex) from the inbox, in its
-    /// order; T3's from the last list that had them while T3 Code is down. An older bridge: T3's threads only.
+    /// order; T3's from the last list that had them while T3 Code is down (`t3Stale`). An older bridge: T3's threads
+    /// only.
     var tasks: [InboxItem] = []
+    /// The T3 rows in `tasks` are the last ones, kept while T3 Code isn't answering: shown read-only, counted nowhere.
+    var t3Stale = false
+    /// The inbox failed while the Mac answered: T3's rows come from its own thread list, the others' are the last.
+    var inboxFallback = false
     /// The inbox as it last loaded (`revision` for the long-poll; counts beyond the item cap).
     var inbox: InboxSnapshot?
     /// The bridge has no inbox (an older one): Tasks lists T3's threads (`/t3/threads`) as before.
@@ -96,6 +101,8 @@ final class AppModel {
     /// `unpair()` is waiting for the Mac.
     var unpairing = false
 
+    /// Items whose screen marked them seen, by `seenMark` (once per state).
+    private var seenMarks: Set<String> = []
     private var refreshLoop: Task<Void, Never>?
     private var inboxFeed: Task<Void, Never>?
     private var routeObserver: (any NSObjectProtocol)?
@@ -152,15 +159,22 @@ final class AppModel {
     /// is unreachable: `lastError` says so already).
     var tasksProblem: BridgeError? { lastError == nil ? tasksError : nil }
 
+    /// The rows that can be acted on and count: `tasks` without T3's last ones while T3 Code is down.
+    var liveTasks: [InboxItem] { InboxRows(items: tasks, t3Stale: t3Stale).live }
+
+    /// T3's last rows while T3 Code isn't answering (Tasks shows them apart, read-only).
+    var staleTasks: [InboxItem] { InboxRows(items: tasks, t3Stale: t3Stale).stale }
+
     /// What needs Samin across every agent: the rows' own count once a list loaded (so the badge, the headline and
-    /// the sections agree), else what the summary says (the inbox's counts in it, else T3's).
+    /// the sections agree; T3's last rows while it is down don't count, as on the Mac and in the widgets), else what
+    /// the summary says (the inbox's counts in it, else T3's).
     var needsYouCount: Int {
-        threadsLoaded ? tasks.filter(\.needsYou).count + overflow.needsYou : (summary?.needsYouCount ?? 0)
+        threadsLoaded ? liveTasks.filter(\.needsYou).count + overflow.needsYou : (summary?.needsYouCount ?? 0)
     }
 
     /// What is working across every agent (see `needsYouCount`).
     var workingCount: Int {
-        threadsLoaded ? tasks.filter { $0.status == .working }.count + overflow.working : (summary?.workingCount ?? 0)
+        threadsLoaded ? liveTasks.filter { $0.status == .working }.count + overflow.working : (summary?.workingCount ?? 0)
     }
 
     /// What the inbox counts beyond the 60 items it sends.
@@ -181,8 +195,10 @@ final class AppModel {
     ///
     /// The two fail on their own: while T3 Code is not running the inbox still answers (without T3's items,
     /// `sources.t3.connected: false`), and so does the summary, so the orb, the calendar, the R1, the widgets and
-    /// the Claude Code and Codex rows stay fresh and only the T3 rows say "T3 not connected" (with the last list).
-    /// An older bridge without the inbox (404) gets the T3 thread list instead, as before.
+    /// the Claude Code and Codex rows stay fresh and only the T3 rows say "T3 not connected" (with the last list,
+    /// read-only). An older bridge without the inbox (404) gets the T3 thread list instead, as before; so does an
+    /// inbox that fails while the Mac answers (a server error, a timeout on its first scan), beside the other
+    /// agents' last rows.
     func refresh(quiet: Bool = true) async {
         guard isPaired, let client else { return }
         refreshing = true
@@ -211,50 +227,59 @@ final class AppModel {
             await refreshThreadList(client)
         case .failure(let error):
             if error == .cancelled { return }
-            tasksError = error
-            // Only the task areas say so (no toast). Notifications wait for a real list (summary
-            // threads carry no requests: they would announce again what was announced); Live
-            // Activities can move on with the summary.
-            if lastError == nil, let summary { await liveActivities.update(with: summary.t3.threads) }
+            guard lastError == nil, error != .unauthorized else {
+                tasksError = error
+                return
+            }
+            // The Mac answered, its inbox didn't: T3's own list (what Tasks read before the inbox), the others'
+            // last rows; only the task areas say so (no toast).
+            await refreshThreadList(client, inboxError: error)
         }
     }
 
-    /// An older bridge without the inbox: T3's thread list, as the only rows.
-    private func refreshThreadList(_ client: BridgeClient) async {
+    /// T3's thread list: the only rows on an older bridge without the inbox; beside the other agents' last rows
+    /// when the inbox failed (`inboxError`, which the task areas then show).
+    private func refreshThreadList(_ client: BridgeClient, inboxError: BridgeError? = nil) async {
         switch await BridgeError.capture({ try await client.threads() }) {
         case .success(let list):
             threads = list
-            tasks = InboxSnapshot.fromThreads(list).items
+            let rows = inboxError == nil ? InboxRows(items: InboxSnapshot.fromThreads(list).items)
+                : InboxRows(threads: list, keeping: tasks)
+            if rows.items != tasks { withAnimation(.smooth) { tasks = rows.items } }
+            t3Stale = false
+            inboxFallback = inboxError != nil
             threadsLoaded = true
-            tasksError = nil
-            await notifications.check(threads: list, needsYou: needsYouCount)
+            tasksError = inboxError
+            await notifications.check(threads: list, agents: tasks.filter { $0.source != .t3 }, needsYou: needsYouCount)
             await liveActivities.update(with: list)
         case .failure(let error):
             if error == .cancelled { return }
-            tasksError = error
+            tasksError = inboxError ?? error
+            // Notifications wait for a real list (summary threads carry no requests: they would announce
+            // again what was announced); Live Activities can move on with the summary.
             if lastError == nil, let summary { await liveActivities.update(with: summary.t3.threads) }
         }
     }
 
     /// Shows an inbox that loaded: its agents' rows, T3's as `threads` for the T3 screens. While T3 Code isn't
-    /// answering the last T3 rows stay, under "T3 not connected", and nothing is announced from them.
-    func apply(_ snapshot: InboxSnapshot) async {
+    /// answering the last T3 rows stay, read-only under "T3 not connected", and nothing is announced from them.
+    /// A list no newer than the shown one (`isNewer`) changes nothing unless `force`d (a Mark seen that failed:
+    /// back to what the Mac said).
+    func apply(_ snapshot: InboxSnapshot, force: Bool = false) async {
+        guard force || inboxMissing || inboxFallback || snapshot.isNewer(than: inbox) else { return }
         inboxMissing = false
+        inboxFallback = false
         inbox = snapshot
-        var rows = snapshot.agentItems
-        if let problem = snapshot.t3Problem {
-            rows = InboxSnapshot.ordered(rows + tasks.filter { $0.source == .t3 })
-            tasksError = problem
-        } else {
-            tasksError = nil
-        }
-        if rows != tasks { withAnimation(.smooth) { tasks = rows } }
-        let t3 = rows.compactMap(\.taskThread)
+        let rows = InboxRows(snapshot, previous: tasks)
+        tasksError = snapshot.t3Problem
+        t3Stale = rows.t3Stale
+        if rows.items != tasks { withAnimation(.smooth) { tasks = rows.items } }
+        let t3 = rows.items.compactMap(\.taskThread)
         if t3 != threads { threads = t3 }
         threadsLoaded = true
-        let agents = rows.filter { $0.source != .t3 }
+        let agents = rows.items.filter { $0.source != .t3 }
         // While T3 Code is down its rows are the last ones: nothing new is announced from them.
-        await notifications.check(threads: snapshot.t3Connected ? t3 : [], agents: agents, needsYou: needsYouCount)
+        await notifications.check(threads: rows.t3Stale ? [] : t3, agents: agents, needsYou: needsYouCount)
         await liveActivities.update(with: t3)
     }
 
@@ -297,7 +322,7 @@ final class AppModel {
                 case .success(let snapshot):
                     failures = 0
                     // Revisions only grow: the same one (or one the 20 s refresh already passed) changes nothing.
-                    guard snapshot.revision > self.inbox?.revision ?? .min else {
+                    guard snapshot.isNewer(than: self.inbox) else {
                         // The same list at once (a bridge that doesn't wait): ask again a little later, not in a loop.
                         if Date.now.timeIntervalSince(asked) < 2 { try? await Task.sleep(for: .seconds(5)) }
                         continue
@@ -305,6 +330,8 @@ final class AppModel {
                     await self.apply(snapshot)
                     if let summary = self.summary {
                         self.summary = summary.with(inbox: snapshot)
+                        // Reloads the widgets only when what they draw changed (a working agent's every line
+                        // moves the revision, not their faces).
                         if let merged = self.summary { SummaryCache.shared.publish(merged) }
                     }
                 case .failure(let error):
@@ -381,6 +408,9 @@ final class AppModel {
         summary = nil
         threads = []
         tasks = []
+        t3Stale = false
+        inboxFallback = false
+        seenMarks = []
         inbox = nil
         inboxMissing = false
         targets = nil
@@ -562,6 +592,11 @@ final class AppModel {
             show(.info, "It's open in Terminal on your Mac", detail: "Answer it there.")
             await refresh()
             return false
+        } catch let error as BridgeError where error.isSessionCheckFailed {
+            Haptics.error()
+            show(.info, "Your Mac can't tell if it's open", detail: "Nothing was started. Try again in a moment.")
+            await refresh()
+            return false
         } catch {
             fail(error)
             await refresh()
@@ -569,26 +604,39 @@ final class AppModel {
         }
     }
 
-    /// Marks an item seen (`/inbox/items/<id>/seen`): it leaves Needs you here and on the Mac's dock.
-    func markSeen(_ item: InboxItem) async {
-        guard let client else { return }
+    /// Marks an item seen (`/inbox/items/<id>/seen`): it leaves Needs you here and on the Mac's dock. At once
+    /// here; the Mac's answer follows with the next list. `quiet` (its screen opened it): no haptic, no toast and
+    /// no refresh (the long-poll brings the Mac's list); a failure puts the row back as the Mac last said it.
+    @discardableResult
+    func markSeen(_ item: InboxItem, quiet: Bool = false) async -> Bool {
+        guard let client else { return false }
         busyItems.insert(item.id)
         defer { busyItems.remove(item.id) }
-        // At once here; the Mac's answer follows with the next list.
+        let seen = (tasks.first { $0.id == item.id } ?? item).markedSeen
         if let index = tasks.firstIndex(where: { $0.id == item.id }) {
-            var seen = tasks[index]
-            seen.unread = false
-            seen.can.removeAll { $0 == InboxCapability.seen.rawValue }
-            if seen.status == .error, seen.source != .t3 { seen.status = .idle }
             withAnimation(.smooth) { tasks[index] = seen }
         }
+        var marked = true
         do {
             try await client.inboxSeen(item.id)
-            Haptics.tap()
+            if !quiet { Haptics.tap() }
         } catch {
-            fail(error)
+            marked = false
+            if !quiet { fail(error) }
+            // Back to what the Mac said, unless a newer list replaced the row meanwhile.
+            if tasks.first(where: { $0.id == item.id }) == seen, let inbox { await apply(inbox, force: true) }
         }
-        await refresh()
+        if !quiet { await refresh() }
+        return marked
+    }
+
+    /// Its screen shows this item: unread and able to be marked seen, it is marked seen, quietly, once per state
+    /// (`seenMark`; a session that finishes again while its screen is open is marked again). Opening a finished
+    /// or failed task is seeing it, as on the Mac; T3's last rows while T3 Code is down are left alone.
+    func sawItem(_ id: String) async {
+        guard let item = tasks.first(where: { $0.id == id }), let mark = item.seenMark,
+              !(t3Stale && item.source == .t3), seenMarks.insert(mark).inserted else { return }
+        if !(await markSeen(item, quiet: true)) { seenMarks.remove(mark) } // the next look tries again
     }
 
     func reply(to threadId: String, _ text: String) async -> Bool {

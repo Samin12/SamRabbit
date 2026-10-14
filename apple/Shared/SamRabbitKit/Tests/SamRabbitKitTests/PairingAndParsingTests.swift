@@ -247,6 +247,46 @@ struct WidgetReloadTests {
         #expect(reloads == 5)
     }
 
+    /// The inbox's long-poll moves on with every line a working agent writes (its row's time and last words): the
+    /// widgets reload for what they draw (a state, a title, the counts) at once, for times and words at most every
+    /// five minutes, and each reload makes every widget fetch from the Mac again.
+    @Test func aWorkingAgentDoesNotReloadTheWidgetsEveryFewSeconds() throws {
+        let cache = SummaryCache(container: .temporary())
+        var reloads = 0
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let item = InboxItem(id: "claude:a", source: .claude, agent: "claude", title: "Refactor the relay",
+                             project: "jackrabbit-src", cwd: "/Users/sam/jackrabbit-src", status: .working,
+                             statusLabel: "Working", summary: "Reading Relay.swift", updatedAt: start, live: true)
+        func summary(_ item: InboxItem) -> MobileSummary {
+            var value = self.summary(needsYou: 0, at: start)
+            value.inbox = InboxOverview(needsYou: item.needsYou ? 1 : 0, working: item.status == .working ? 1 : 0,
+                                        total: 1, items: [item])
+            return value
+        }
+        #expect(cache.publish(summary(item), at: start) { reloads += 1 })
+        // Two minutes of writing: every revision a new time and new last words, no reload.
+        for step in 1...60 {
+            var wrote = item
+            wrote.updatedAt = start.addingTimeInterval(TimeInterval(step * 2))
+            wrote.summary = "Editing file \(step)"
+            #expect(!cache.publish(summary(wrote), at: start.addingTimeInterval(TimeInterval(step * 2))) { reloads += 1 })
+            #expect(cache.load()?.summary.inbox?.items.first?.summary == "Editing file \(step)") // saved all the same
+        }
+        #expect(reloads == 1)
+        // Five minutes on: the faces' times catch up once.
+        var later = item
+        later.updatedAt = start.addingTimeInterval(301)
+        #expect(cache.publish(summary(later), at: start.addingTimeInterval(301)) { reloads += 1 })
+        #expect(!cache.publish(summary(later), at: start.addingTimeInterval(320)) { reloads += 1 })
+        // It finished: what the faces draw changed, at once.
+        var finished = later
+        finished.status = .done
+        finished.unread = true
+        finished.statusLabel = "Finished"
+        #expect(cache.publish(summary(finished), at: start.addingTimeInterval(330)) { reloads += 1 })
+        #expect(reloads == 3)
+    }
+
     /// Dates finer than a millisecond (the bridge sends microseconds) don't survive a save; the cache
     /// compares what it saved as bytes, so the same summary is still "the same" after a round trip.
     @Test func subMillisecondDatesDoNotReloadEveryTime() throws {

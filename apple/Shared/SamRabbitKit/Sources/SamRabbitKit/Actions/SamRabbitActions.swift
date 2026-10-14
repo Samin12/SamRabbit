@@ -188,6 +188,9 @@ public struct PlannedAlert: Sendable, Equatable, Identifiable {
     public var threadId: String
     /// A Claude Code or Codex item's inbox id (`claude:<id>`): the alert opens that item, not a T3 thread.
     public var itemId: String? = nil
+    /// Only the Mac can answer it (a prompt in a terminal or the Codex app): it comes as a normal alert, never
+    /// time-sensitive through a Focus (Samin is usually at that Mac).
+    public var onlyOnMac = false
 
     /// What tapping it opens: the T3 thread, or the inbox item.
     public var link: String {
@@ -208,7 +211,10 @@ public struct PlannedAlert: Sendable, Equatable, Identifiable {
 ///
 /// Claude Code and Codex sessions (the inbox's `agents`) are announced the same way when they wait for a prompt in
 /// their terminal or app (`<itemId>|<requestId>`, the tool call it waits on); only the Mac can answer those, so the
-/// alert says where.
+/// alert says where and isn't time-sensitive. A prompt the bridge only guesses at ("May be waiting for you …": a
+/// quiet Codex tool call, which a long build is too) is not announced; one whose tool call the bridge doesn't know
+/// (its stand-in ids `terminal` / `codex`) is keyed with the time it started waiting, so the session's next prompt
+/// is announced too.
 public enum AlertPlanner {
     public struct Plan: Sendable, Equatable {
         public var alerts: [PlannedAlert]
@@ -239,14 +245,15 @@ public enum AlertPlanner {
                                        body: Formatting.clip(detail, 160), threadId: thread.threadId))
         }
         for item in agents where item.source == .claude || item.source == .codex {
-            guard item.status == .needsApproval || item.status == .needsInput, let key = needsYouKey(item),
-                  seen.insert(key).inserted, keys[key] == nil else { continue }
+            guard item.status == .needsApproval || item.status == .needsInput, !item.isGuess,
+                  let key = needsYouKey(item), seen.insert(key).inserted, keys[key] == nil else { continue }
             keys[key] = now
             let place = item.heldOnMac?.headline(item) ?? item.statusLabel
             let detail = InboxPending.detail(item.pending) ?? item.summary
             let body = [place, detail].filter { !$0.isEmpty }.joined(separator: ": ")
             alerts.append(PlannedAlert(id: "needs:\(key)", kind: .needsYou, title: item.title,
-                                       body: Formatting.clip(body, 160), threadId: item.id, itemId: item.id))
+                                       body: Formatting.clip(body, 160), threadId: item.id, itemId: item.id,
+                                       onlyOnMac: item.heldOnMac != nil))
         }
         if keys.count > maxAnnounced {
             keys = Dictionary(uniqueKeysWithValues: keys.sorted { $0.value > $1.value }.prefix(maxAnnounced).map { ($0.key, $0.value) })
@@ -279,9 +286,14 @@ public enum AlertPlanner {
         return "\(thread.threadId)|\(requestId)"
     }
 
-    /// `claude:<sessionId>|<requestId>`, or nil without a request.
+    /// `claude:<sessionId>|<requestId>`, or nil without a request. The bridge's stand-ins for a tool call it doesn't
+    /// know (`terminal`: a prompt only Claude Code's own registry reports; `codex`) would be the same for every prompt
+    /// of the session: those add the time it started waiting (`…|terminal@<ms>`).
     static func needsYouKey(_ item: InboxItem) -> String? {
         guard let requestId = item.pendingRequestId, !requestId.isEmpty else { return nil }
+        if standInRequests.contains(requestId) { return "\(item.id)|\(requestId)@\(InboxItem.stamp(item.updatedAt))" }
         return "\(item.id)|\(requestId)"
     }
+
+    static let standInRequests: Set<String> = ["terminal", "codex"]
 }

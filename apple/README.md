@@ -92,13 +92,14 @@ answer | reply | stop | seen`. Like the real bridge the phone's items never list
 `unsupported_action`); a reply to a Claude Code or Codex CLI session nobody runs "continues in a new Terminal window
 on the Mac" (`202 {how: "terminal", message}`; it is then live there and finishes six seconds later), a live one
 answers 409 `session_live`, a Codex Desktop thread 409 `unsupported_action`. `POST /__fake/inbox {missing?, id?, live?,
-unread?, status?, clear?}` / `GET /__fake/inbox` (`missing`: an older bridge without the inbox, every route 404;
-change one session; what arrived: replies, seen, new tasks, refusals).
+unread?, unsure?, status?, clear?}` / `GET /__fake/inbox` (`missing`: an older bridge without the inbox, every route 404;
+change one session; `unsure`: the Mac's process list didn't answer, so neither `live` nor `reply` and a reply gets 503
+`session_check_failed`; what arrived: replies, seen, new tasks, refusals).
 
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 216 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 223 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
@@ -127,13 +128,19 @@ badge) and shows a Claude Code card beside T3's; Tasks lists T3, Claude Code and
 you / Working / Recent, filters by source, Mark seen on a failed Codex run (the Mac is told, the badge drops) and
 Approve on a T3 card exactly as before; a finished Claude Code session takes a reply (it continues in a Terminal
 window on the Mac, then shows live there with no reply field, then its answer), one waiting for a permission in its
-terminal says so with what it asks and offers no reply, a Codex Desktop thread says the app runs it; T3 Code down keeps
-the Claude Code and Codex rows with "T3 not connected" over T3's last ones; an older bridge without the inbox gets T3's
-thread list as before; New task goes with Codex and its model to `/inbox/new`.
+terminal says so with what it asks and offers no reply, a Codex Desktop thread says the app runs it; opening a
+finished task is seeing it (a Claude Code session, again when it finishes while open; a T3 thread that finished
+leaves Needs you and the badge drops; a T3 failure is marked seen and stays); a session the Mac couldn't check says
+"Can't tell if it's open on your Mac" and offers no reply; T3 Code down keeps the Claude Code and
+Codex rows with "T3 not connected", T3's last rows at the end, read-only and out of the badge; an older bridge without
+the inbox gets T3's thread list as before; New task goes with Codex and its model to `/inbox/new`.
 `InboxTests` / `InboxBridgeTests` (SamRabbitKit): decoding and the contract's order, where each item waits (`can`
 without `open`, `live`, the bridge's words), T3 items as their threads, the counts past the 60-item cap, the summary
-overlay (a hiccup keeps the last counts, an older bridge leaves T3's), the widgets' cache, "what needs me", the
-alerts for Claude Code and Codex prompts, 32-bit safety, and the client against the fake bridge: the long-poll waking
+overlay (a hiccup keeps the last counts, an older bridge leaves T3's), the widgets' cache and reloads (a working
+agent's every line doesn't reload them), "what needs me", the alerts for Claude Code and Codex prompts (not
+time-sensitive, guesses skipped, stand-in request ids), seeing an item (`seenMark`, `markedSeen`), when a screen reads
+its item again (`changeMark`), a session the Mac couldn't check, T3's last rows while it is down and the T3-list
+fallback (`InboxRows`), older lists (`isNewer`), 32-bit safety, and the client against the fake bridge: the long-poll waking
 up, reply / `session_live`, seen, T3 through the inbox, targets and new tasks, T3 down, an older bridge.
 
 `TalkUITests` (iPhone, real taps, the made-up voice instead of the microphone, the simulator muted): Home's Talk button
@@ -224,8 +231,8 @@ the SamRabbit control) and `WatchActionButtonTests` (Apple Watch Ultra simulator
 
 | Area | Types |
 |---|---|
-| Models (lenient decoding, ISO-8601 or epoch-ms dates) | `MobileSummary`, `TaskThread`, `ThreadStatus`, `PendingAction`, `ThreadDetail`, `ConversationSummary`, `SyncEvent`, `CalendarEvent`, `Agenda`, `MacState`, `GeneratedArtifact`, `JSONValue`, `MobileSummary.sample()`; the inbox: `InboxSnapshot`, `InboxItem` (`heldOnMac`: `InboxHold`), `InboxSource`, `InboxPending`, `InboxItemDetail`, `InboxTargets`, `InboxReplyResult`, `CreatedInboxTask`, `InboxOverview` (`summary.inbox`, `needsYouCount` / `workingCount`) |
-| Client | `BridgeClient` (every mobile route, multi-host failover, `stream(after:)` SSE, `raw(_:)`; the inbox: `inbox(after:wait:)`, `inboxItem`, `inboxReply`, `inboxSeen`, `inboxApprove`, `inboxAnswer`, `inboxStop`, `inboxTargets`, `inboxNew`), `BridgeError` (`isRouteMissing`, `isSessionLive`), `LiveSyncFeed` (reconnecting SSE), `ServerSentEventParser` |
+| Models (lenient decoding, ISO-8601 or epoch-ms dates) | `MobileSummary`, `TaskThread`, `ThreadStatus`, `PendingAction`, `ThreadDetail`, `ConversationSummary`, `SyncEvent`, `CalendarEvent`, `Agenda`, `MacState`, `GeneratedArtifact`, `JSONValue`, `MobileSummary.sample()`; the inbox: `InboxSnapshot`, `InboxItem` (`heldOnMac`: `InboxHold`; `seenMark`, `markedSeen`, `changeMark`), `InboxRows` (what Tasks lists; T3's last rows while it is down), `InboxSource`, `InboxPending`, `InboxItemDetail`, `InboxTargets`, `InboxReplyResult`, `CreatedInboxTask`, `InboxOverview` (`summary.inbox`, `needsYouCount` / `workingCount`) |
+| Client | `BridgeClient` (every mobile route, multi-host failover, `stream(after:)` SSE, `raw(_:)`; the inbox: `inbox(after:wait:)`, `inboxItem`, `inboxReply`, `inboxSeen`, `inboxApprove`, `inboxAnswer`, `inboxStop`, `inboxTargets`, `inboxNew`), `BridgeError` (`isRouteMissing`, `isSessionLive`, `isSessionCheckFailed`), `LiveSyncFeed` (reconnecting SSE), `ServerSentEventParser` |
 | Pairing and links | `PairLink` (`samrabbit://pair?h=&c=&n=`), `AppLink` / `LinkAction` (every `samrabbit://` link; the ones that write become `.confirm`), `BridgeHost`, `PairingCode`, `Pairer` (tries hosts in order), `PairResponse` |
 | Storage | `BridgeAccount` (pairing in the App Group, token in the Keychain, one cached `BridgeClient` per pairing, `unpair()` tells the bridge, the watch's child token and `performRelayed`), `KeychainStore`, `SharedContainer`, `SummaryCache` (`publish`: reloads widgets only on change), `TaskTracker` |
 | Shared behaviour | `SamRabbitActions` (ask, block, note, open on Mac, approve, answer, refresh + widget reload with the inbox's counts on the iPhone (`includesInbox`), spoken "what needs me"), `AlertPlanner` (keyed by thread + request id; Claude Code / Codex prompts by item + tool call), `SpokenSummary`, `Formatting` |
@@ -272,7 +279,9 @@ Talk (Lock Screen circular + rectangular: opens Talk), the "Ask SamRabbit" and "
 "Task running" and Talk Live Activities (Lock Screen + Dynamic Island). The timeline
 provider reads the summary the app saved in the App Group and fetches a fresh one itself (8 s budget), every
 15 minutes. The app, the background refresh and the actions hand fresh summaries to `SummaryCache.publish`, which
-reloads the timelines only when the summary changed (`generatedAt` aside) or the last reload is 30 minutes old.
+reloads the timelines only when what the faces draw changed (`generatedAt` aside; the inbox rows' last words and
+times move with every line a working agent writes, so those reload at most every 5 minutes) or the last reload is 30
+minutes old.
 The counts and the Tasks / Dashboard rows cover every agent: the app, the background refresh, the intents and the
 provider's own fetch read `/v1/mobile/inbox` beside the summary and put its counts and first five agents' items into
 it (`summary.inbox`); without it (an older bridge, or the watch) they are T3's. A Claude Code or Codex row opens
@@ -325,8 +334,11 @@ tasks started from the phone that finish. Needs-you alerts are keyed by thread i
 the App Group), never by the pending text or the list they came from, so the foreground and background agree and a
 request is announced once; a thread whose request id is not known yet (summary threads) waits for one. A Claude
 Code or Codex session waiting for a prompt in its terminal (or the Codex app) is announced the same way, keyed by
-its item id + the tool call it waits on ("Waiting for you in the terminal: Bash: …"), and opens that item. The icon's
-badge counts every agent that needs you. On the simulator the alerts are silent unless `-SamRabbitAudioOut on`
+its item id + the tool call it waits on ("Waiting for you in the terminal: Bash: …"), and opens that item; only
+the Mac answers those, so they are normal alerts, not time-sensitive. A prompt the bridge only guesses at ("May be
+waiting for you …": a Codex tool call that went quiet, which a long build is too) is not announced; one whose tool
+call the bridge doesn't know (its stand-ins `terminal` / `codex`) is keyed with the time it started waiting. The
+icon's badge counts every agent that needs you and follows every check (it drops after Mark seen or an answer). On the simulator the alerts are silent unless `-SamRabbitAudioOut on`
 (Talk's rule: nothing out loud).
 
 **Pairing again** while paired with the same Mac (an address in common) retires the old device there: once the
@@ -400,21 +412,32 @@ Claude · Codex, with counts) sits on top. The badge, Home's line, the orb, Siri
 count every agent.
 
 - **T3 items** act as before, through the T3 routes and with the request id the inbox showed: Approve / Deny and the
-  answers on the card, the thread's own screen (`ThreadDetailView`) with reply and Stop, Mark seen for a finished or
-  failed one.
+  answers on the card, the thread's own screen (`ThreadDetailView`) with reply, Stop and Mark seen.
 - **Claude Code / Codex** (`InboxItemView`: the last messages, project, folder, where it is): a session no terminal
   owns takes a reply; the Mac continues it in a new Terminal window (`claude --resume` / `codex resume` with the
   words), so its own permission prompts stay on the Mac, and the app says so ("Sent to your Mac"). A session open in a
   terminal (`live`) says "Open in a terminal on your Mac" (the Mac refuses a reply with 409 `session_live`, said as
   "It's open in Terminal on your Mac"); one waiting for a permission or a question in its terminal says "Waiting for
   you in the terminal" with what it asks (the command, the question and its choices) and has no reply field; a Codex
-  Desktop thread says the app runs it. Mark seen (finished or failed and unseen) clears it here and on the dock.
-  Opening things on the Mac's screen is the Mac's own: the phone's items never list `open`.
+  Desktop thread says the app runs it. A Claude Code session the Mac couldn't check (its process list didn't
+  answer: neither `live` nor `reply`) says "Can't tell if it's open on your Mac" (a reply would be refused with 503
+  `session_check_failed`); a Codex CLI session in that state reads as the app's, since nothing in the item tells the
+  two apart. Opening things on the Mac's screen is the Mac's own: the phone's items never list `open`.
+- **Seen**: "Needs you" is the dock's (approvals, questions, failures, finished and unseen). Opening a finished or
+  failed item (either screen) is seeing it: it is marked seen quietly, once per state (`seenMark`: a session that
+  finishes again while its screen is open is marked again), here and on the dock; Mark seen on the cards and screens
+  does the same. A Claude Code or Codex failure then settles; a T3 one stays an error (and in Needs you) until T3
+  settles it, as on the Mac.
 - **Live**: besides the 20 s refresh, the app follows the inbox's long-poll (`?after=<revision>&wait=25`) while it is
-  in front, so a prompt answered on the Mac or a session that finished shows within a moment.
+  in front, so a prompt answered on the Mac or a session that finished shows within a moment. Only later revisions
+  apply (a refresh that lands after the long-poll changes nothing, nor undoes a Mark seen on its way); a screen reads
+  its item again when that item moved on (`changeMark`), not on every revision; the widgets reload for what they draw.
 - **T3 Code down**: the inbox still answers without T3's items (`sources.t3.connected: false`); the Claude Code and
-  Codex rows stay fresh and T3's last rows stay under "T3 not connected". **An older bridge** (404 on `/inbox`): Tasks
-  is T3's thread list, as before.
+  Codex rows stay fresh, and T3's last rows stay at the end ("Last from T3 Code"), dimmed and read-only (their screens
+  show the last state with no Approve or reply), counted nowhere, like the bridge's counts and the widgets. **The
+  inbox failing** while the Mac answers (a server error, a timeout on its first scan): T3's own thread list stands in
+  beside the other agents' last rows ("Claude Code and Codex didn't update"). **An older bridge** (404 on `/inbox`):
+  Tasks is T3's thread list, as before.
 - **New task**: the "+" sheet offers the agents and models T3 has (`/inbox/targets`: Automatic, Claude, Codex, and
   the model, defaulting to the one the Mac used last for that agent) and the project; with an agent it goes to
   `/inbox/new`, without one to `/t3/threads` (automatic placement) as before.

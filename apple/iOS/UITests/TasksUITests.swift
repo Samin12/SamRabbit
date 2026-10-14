@@ -112,8 +112,9 @@ final class TasksUITests: XCTestCase {
     // MARK: - Claude Code
 
     /// A Claude Code session that no terminal owns takes a reply: the Mac resumes it in a new Terminal window
-    /// (`how: "terminal"`), and it shows live and working, then finished. One waiting for a permission in its
-    /// terminal says so, with what it asks, and has no reply field.
+    /// (`how: "terminal"`), and it shows live and working, then finished. Opening it is seeing it (the Mac is told,
+    /// again when it finishes while open). One waiting for a permission in its terminal says so, with what it asks,
+    /// and has no reply field.
     func testClaudeSessionReplyAndWaiting() throws {
         try launch()
         openTasks()
@@ -127,7 +128,10 @@ final class TasksUITests: XCTestCase {
         let field = app.textFields["Reply to Claude Code"].exists ? app.textFields["Reply to Claude Code"]
             : app.textViews["Reply to Claude Code"]
         XCTAssertTrue(field.waitForExistence(timeout: 5), "the reply field")
-        XCTAssertTrue(app.descendants(matching: .any)["inbox-detail-seen"].exists, "Mark seen")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.seenCount(Self.changelog) == 1 },
+                      "opening a finished session is seeing it: the Mac was told")
+        XCTAssertTrue(waitUntil(timeout: 5) { !self.app.descendants(matching: .any)["inbox-detail-seen"].exists },
+                      "so Mark seen goes")
         snap("phone-claude-item")
 
         field.tap()
@@ -147,6 +151,8 @@ final class TasksUITests: XCTestCase {
         snap("phone-claude-replied")
         let finished = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'I followed your note'")).firstMatch
         XCTAssertTrue(finished.waitForExistence(timeout: 20), "and its answer once it finished")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.seenCount(Self.changelog) == 2 },
+                      "finished again while its screen is open: seen again, once")
 
         // The one waiting for a permission in its terminal.
         app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -171,10 +177,64 @@ final class TasksUITests: XCTestCase {
         snap("phone-codex-app")
     }
 
+    /// The Mac's process list didn't answer: a Claude Code session arrives with neither `live` nor `reply`. It says
+    /// the Mac can't tell (not that a terminal owns it) and offers no reply that could start a second CLI.
+    func testWhenTheMacCantTellWhoRunsIt() throws {
+        fake("inbox", ["id": Self.changelog, "unsure": true])
+        try launch()
+        openTasks()
+        let unsure = card(Self.changelog)
+        XCTAssertTrue(unsure.waitForExistence(timeout: 15))
+        scrollTo(unsure.descendants(matching: .any)["inbox-hold"])
+        let hold = unsure.descendants(matching: .any)["inbox-hold"]
+        XCTAssertTrue(hold.exists && hold.label.contains("Can't tell if it's open on your Mac"), hold.label)
+        XCTAssertFalse(unsure.buttons["inbox-reply-\(Self.changelog)"].exists, "no reply from here")
+        XCTAssertTrue(unsure.buttons["inbox-seen-\(Self.changelog)"].exists, "it can still be marked seen")
+        snap("phone-claude-unsure")
+    }
+
+    // MARK: - Seen
+
+    /// Opening a finished or failed task is seeing it, as on the Mac: a T3 thread that finished leaves Needs you once
+    /// its screen opened (the Mac is told, the badge drops); a T3 failure is marked seen but stays until T3 settles it.
+    func testOpeningATaskIsSeeingIt() throws {
+        try launch()
+        openTasks()
+        let deploy = card("t3:t_deploy24")
+        XCTAssertTrue(deploy.waitForExistence(timeout: 15))
+        deploy.buttons["Approve"].tap()
+        XCTAssertTrue(waitUntil(timeout: 10) { !self.card("t3:t_deploy24").exists }, "approved: it works")
+        XCTAssertTrue(card("t3:t_deploy24").waitForExistence(timeout: 30), "then finished and unseen: it needs you")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.badge("7") }, "seven again")
+        scrollTo(card("t3:t_deploy24").buttons["Deploy release 2.4 to staging"])
+        snap("phone-tasks-t3-finished")
+        card("t3:t_deploy24").buttons["Deploy release 2.4 to staging"].tap()
+        XCTAssertTrue(waitUntil(timeout: 10) { self.seenCount("t3:t_deploy24") == 1 },
+                      "opening the thread told the Mac it was seen")
+        XCTAssertTrue(waitUntil(timeout: 5) { !self.app.buttons["thread-detail-seen"].exists }, "no Mark seen left")
+        snap("phone-thread-seen")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(waitUntil(timeout: 10) { !self.card("t3:t_deploy24").exists }, "it left Needs you")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.badge("6") }, "and the badge")
+        scrollTo(row("t3:t_deploy24"))
+        XCTAssertTrue(row("t3:t_deploy24").exists, "now under Recent")
+
+        // A T3 failure: seen, but T3 keeps it as an error until it settles (the Mac's dock says the same).
+        app.swipeDown()
+        app.swipeDown()
+        let backup = card("t3:t_backup")
+        XCTAssertTrue(backup.waitForExistence(timeout: 10))
+        backup.buttons["Nightly backup check"].tap()
+        XCTAssertTrue(waitUntil(timeout: 10) { self.seenCount("t3:t_backup") == 1 }, "marked seen")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(card("t3:t_backup").waitForExistence(timeout: 10), "still needs you")
+        XCTAssertFalse(card("t3:t_backup").buttons["inbox-seen-t3:t_backup"].exists, "with nothing left to mark")
+    }
+
     // MARK: - T3 Code down, an older bridge, a new task
 
-    /// T3 Code stops answering: the Claude Code and Codex rows stay fresh, the T3 rows stay as they were under
-    /// "T3 not connected".
+    /// T3 Code stops answering: the Claude Code and Codex rows stay fresh; T3's last rows stay apart at the end,
+    /// read-only (no Approve, no reply) and counted nowhere, like the Mac's own counts and the widgets.
     func testT3DownKeepsTheOthers() throws {
         try launch()
         openTasks()
@@ -182,9 +242,22 @@ final class TasksUITests: XCTestCase {
         fake("t3", ["available": false])
         app.swipeDown() // pull to refresh
         XCTAssertTrue(app.staticTexts["T3 not connected"].waitForExistence(timeout: 15), "only the T3 part says so")
-        XCTAssertTrue(card("t3:t_deploy24").exists, "the last T3 rows stay")
+        XCTAssertTrue(waitUntil(timeout: 5) { !self.card("t3:t_deploy24").exists }, "no card to act on")
         XCTAssertTrue(card(Self.flaky).exists, "Claude Code is still there")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.badge("4") }, "the badge counts what can be answered: 4")
         snap("phone-tasks-t3-down")
+        let stale = row("t3:t_deploy24")
+        scrollTo(stale)
+        XCTAssertTrue(stale.exists && app.descendants(matching: .any)["tasks-stale"].exists,
+                      "T3's last rows under Last from T3 Code")
+        snap("phone-tasks-t3-down-2")
+        stale.tap()
+        let note = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'T3 not connected'")).firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 10), "its last state, and why")
+        XCTAssertFalse(app.buttons["Approve"].exists, "read-only: no Approve")
+        XCTAssertFalse(app.textViews["Reply to this task"].exists || app.textFields["Reply to this task"].exists,
+                       "and no reply")
+        snap("phone-thread-t3-down")
     }
 
     /// A bridge without the inbox (before Wave 7): Tasks is T3's thread list, as before.
@@ -237,6 +310,17 @@ final class TasksUITests: XCTestCase {
     }
 
     private func card(_ id: String) -> XCUIElement { app.descendants(matching: .any)["inbox-card-\(id)"] }
+
+    /// The Tasks tab's badge says `count`.
+    private func badge(_ count: String) -> Bool {
+        let tab = app.tabBars.buttons["Tasks"]
+        return tab.label.contains(count) || (tab.value as? String)?.contains(count) == true
+    }
+
+    /// How often the fake bridge was told this item was seen.
+    nonisolated private func seenCount(_ id: String) -> Int {
+        (fakeGet("inbox")["seen"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == id }.count
+    }
 
     private func row(_ id: String) -> XCUIElement { app.descendants(matching: .any)["inbox-row-\(id)"] }
 

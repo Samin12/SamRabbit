@@ -2,13 +2,15 @@ import SamRabbitKit
 import SwiftUI
 
 /// Tasks: every agent on the Mac — T3 Code threads, Claude Code and Codex sessions (the inbox) — in three
-/// sections: Needs you, Working, Recent; filtered by source when there are several.
+/// sections: Needs you, Working, Recent; filtered by source when there are several. While T3 Code isn't answering
+/// its last rows sit apart at the end, read-only.
 struct TasksView: View {
     @Environment(AppModel.self) private var model
     @State private var filter: InboxSource?
 
     var body: some View {
-        let rows = model.tasks.filter { filter == nil || $0.source == filter }
+        let rows = model.liveTasks.filter { filter == nil || $0.source == filter }
+        let stale = model.staleTasks.filter { filter == nil || $0.source == filter }
         let needs = rows.filter(\.needsYou)
         let working = rows.filter { !$0.needsYou && $0.status == .working }
         let recent = rows.filter { !$0.needsYou && $0.status != .working }
@@ -22,11 +24,12 @@ struct TasksView: View {
                         SourceFilterBar(selection: $filter, items: model.tasks)
                     }
                     if let problem = model.tasksProblem {
-                        TasksNotice(error: problem, showingLast: !model.threads.isEmpty)
+                        TasksNotice(error: problem, showingLast: !model.threads.isEmpty, fallback: model.inboxFallback,
+                                    lastNote: model.staleTasks.isEmpty ? nil : "Its last tasks are at the end, read-only.")
                     }
                     if model.tasks.isEmpty, model.tasksProblem == nil {
                         EmptyTasks(loading: !model.threadsLoaded && (model.refreshing || model.lastError == nil))
-                    } else if rows.isEmpty, let filter {
+                    } else if rows.isEmpty, stale.isEmpty, let filter {
                         Text("Nothing from \(filter.label) right now.")
                             .font(.system(size: 14))
                             .foregroundStyle(SamTheme.muted)
@@ -42,6 +45,7 @@ struct TasksView: View {
                 }
                 InboxSection(title: "Working", symbol: "circle.dotted.circle", items: working)
                 InboxSection(title: "Recent", symbol: "clock", items: recent)
+                InboxSection(title: "Last from T3 Code", symbol: "bolt.horizontal.circle", items: stale, stale: true)
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
@@ -89,10 +93,14 @@ struct EmptyTasks: View {
 }
 
 /// "T3 not connected": the Mac answers but T3 Code on it does not, so only the task areas are out
-/// of date (the last list stays visible underneath).
+/// of date (the last list stays visible underneath). `fallback`: the inbox failed and T3's own list
+/// stood in, so only Claude Code and Codex are out of date. `lastNote`: where the last rows are, in
+/// place of "Showing the last tasks."
 struct TasksNotice: View {
     let error: BridgeError
     var showingLast = false
+    var fallback = false
+    var lastNote: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -100,7 +108,7 @@ struct TasksNotice: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(SamTheme.amber)
             VStack(alignment: .leading, spacing: 3) {
-                Text(error.isTaskServiceDown ? "T3 not connected" : "Tasks didn't update")
+                Text(title)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(SamTheme.ink)
                 Text(detail)
@@ -114,10 +122,17 @@ struct TasksNotice: View {
         .accessibilityElement(children: .combine)
     }
 
+    var title: String {
+        if fallback { return "Claude Code and Codex didn't update" }
+        return error.isTaskServiceDown ? "T3 not connected" : "Tasks didn't update"
+    }
+
     var detail: String {
         let reason = error.isTaskServiceDown
             ? (error.errorDescription.flatMap { $0.isEmpty ? nil : $0 } ?? "T3 Code on your Mac isn't answering.")
             : (error.errorDescription ?? "")
+        if fallback { return reason + " T3 Code's tasks are current; the others show how they last were." }
+        if let lastNote { return reason + " " + lastNote }
         return showingLast ? reason + " Showing the last tasks." : reason
     }
 }

@@ -223,11 +223,13 @@ struct InboxLink<Label: View>: View {
     }
 }
 
-/// A titled glass list of rows (Working, Recent).
+/// A titled glass list of rows (Working, Recent). `stale`: T3's last rows while T3 Code isn't answering, dimmed (they
+/// open their thread's last state, read-only).
 struct InboxSection: View {
     let title: String
     let symbol: String
     let items: [InboxItem]
+    var stale = false
 
     var body: some View {
         if !items.isEmpty {
@@ -239,8 +241,12 @@ struct InboxSection: View {
                         InboxLink(item: item) { InboxRow(item: item) }
                     }
                 }
+                .opacity(stale ? 0.55 : 1)
+                .saturation(stale ? 0.3 : 1)
                 .glassCard(padding: 6)
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(stale ? "tasks-stale" : "tasks-section-\(title)")
         }
     }
 }

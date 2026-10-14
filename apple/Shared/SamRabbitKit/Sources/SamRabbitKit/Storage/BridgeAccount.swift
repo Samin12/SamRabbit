@@ -271,19 +271,22 @@ public enum Pairer {
 /// The last summary, shared with the widgets (`summary.json` in the App Group).
 ///
 /// `publish` is how the apps hand a fresh summary to the widgets and complications: it reloads
-/// their timelines only when what they show changed (WidgetKit budgets reloads; the iPhone
-/// refreshes every 20 s and the watch every 30 s, mostly with nothing new).
+/// their timelines only when what they show changed (WidgetKit budgets reloads, and every reload
+/// makes each widget fetch from the Mac; the iPhone refreshes every 20 s and follows the inbox's
+/// long-poll, which moves on with every line a working agent writes; the watch every 30 s).
 public final class SummaryCache: Sendable {
     public struct Entry: Codable, Sendable, Equatable {
         public var summary: MobileSummary
         public var savedAt: Date
     }
 
-    /// What the widgets were last reloaded for: the summary's encoded bytes (`generatedAt` cleared).
-    /// Compared as bytes, never as a decoded summary: dates keep only milliseconds through a save, so a
-    /// decoded copy can differ from the fresh one in memory while saying the same thing.
+    /// What the widgets were last reloaded for: the summary's encoded bytes (`generatedAt` cleared),
+    /// as the faces draw it (`content`) and whole (`detail`). Compared as bytes, never as a decoded
+    /// summary: dates keep only milliseconds through a save, so a decoded copy can differ from the
+    /// fresh one in memory while saying the same thing.
     struct Reload: Codable, Sendable, Equatable {
         var content: Data
+        var detail: Data?
         var at: Date
     }
 
@@ -294,6 +297,8 @@ public final class SummaryCache: Sendable {
     /// Reload anyway after this long, so the faces never say "As of …" (45 min) while the app is
     /// fetching fresh copies of the same summary.
     static let refreshFacesAfter: TimeInterval = 30 * 60
+    /// Only the inbox rows' times or last words changed: reload for that at most this often.
+    static let refreshTimesAfter: TimeInterval = 5 * 60
 
     public init(container: SharedContainer = .shared) { self.container = container }
 
@@ -304,19 +309,21 @@ public final class SummaryCache: Sendable {
         container.save(Entry(summary: summary, savedAt: date), as: Self.file)
     }
 
-    /// Saves a fresh summary and reloads the widget timelines when what it says differs from what
-    /// they were last reloaded for (`generatedAt` does not count), or that was a while ago.
-    /// Returns true when it reloaded.
+    /// Saves a fresh summary and reloads the widget timelines when what the faces draw differs from
+    /// what they were last reloaded for (`generatedAt` does not count), when only the inbox rows'
+    /// times or last words moved and the last reload is `refreshTimesAfter` old, or after
+    /// `refreshFacesAfter` either way. Returns true when it reloaded.
     @discardableResult
     public func publish(_ summary: MobileSummary, at date: Date = .now,
                         reload: () -> Void = SamRabbitActions.reloadWidgets) -> Bool {
         save(summary, at: date)
         let content = Self.content(of: summary)
-        if let last = container.load(Reload.self, from: Self.reloadFile), last.content == content,
-           date.timeIntervalSince(last.at) < Self.refreshFacesAfter {
-            return false
+        let detail = Self.detail(of: summary)
+        if let last = container.load(Reload.self, from: Self.reloadFile), last.content == content {
+            let age = date.timeIntervalSince(last.at)
+            if age < Self.refreshFacesAfter, last.detail == detail || age < Self.refreshTimesAfter { return false }
         }
-        container.save(Reload(content: content, at: date), as: Self.reloadFile)
+        container.save(Reload(content: content, detail: detail, at: date), as: Self.reloadFile)
         reload()
         return true
     }
@@ -326,10 +333,39 @@ public final class SummaryCache: Sendable {
         container.remove(Self.reloadFile)
     }
 
-    /// What a summary says, as bytes: encoded with sorted keys, without `generatedAt`.
+    /// What the faces draw of a summary, as bytes: encoded with sorted keys, without `generatedAt`,
+    /// and the inbox's rows without their last words, requests, folders and times (a working agent
+    /// moves those with every line it writes; the faces' "2 min ago" follows within
+    /// `refreshTimesAfter`).
     static func content(of summary: MobileSummary) -> Data {
         var content = summary
         content.generatedAt = nil
+        if var inbox = content.inbox {
+            inbox.items = inbox.items.map(\.face)
+            content.inbox = inbox
+        }
         return (try? BridgeJSON.encoder().encode(content)) ?? Data()
+    }
+
+    /// Everything a summary says, as bytes (`generatedAt` aside).
+    static func detail(of summary: MobileSummary) -> Data {
+        var content = summary
+        content.generatedAt = nil
+        return (try? BridgeJSON.encoder().encode(content)) ?? Data()
+    }
+}
+
+extension InboxItem {
+    /// What a widget row draws of it: its source, title, project and state (no last words, request, folder,
+    /// progress or time).
+    var face: InboxItem {
+        var face = self
+        face.summary = ""
+        face.updatedAt = nil
+        face.pending = InboxPending()
+        face.cwd = nil
+        face.progress = nil
+        face.phase = nil
+        return face
     }
 }
