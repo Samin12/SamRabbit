@@ -15,6 +15,9 @@ struct SamRabbitWidgetsBundle: WidgetBundle {
         NextEventLockWidget()
         AskControl()
         TaskLiveActivity()
+        TalkControl()
+        TalkLockWidget()
+        TalkLiveActivity()
     }
 }
 

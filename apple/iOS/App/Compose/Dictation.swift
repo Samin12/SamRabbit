@@ -26,8 +26,22 @@ final class SpeechDictation {
     /// restarted without the on-device model) arrive late and are ignored, so they never write into the
     /// text or stop the new session.
     private var generation = 0
+    /// This dictation activated the audio session and hasn't given it back. Only then does `stop()` give it back,
+    /// through `AudioSessionUse` (never under a conversation using it): every mic button stops when its screen goes,
+    /// and deactivating the app's one session would stop Talk's engine without telling it.
+    private var holdsSession = false
 
     var isListening: Bool { state == .listening }
+
+    /// Runs just before dictation takes the microphone: a live conversation (Talk) ends first, one microphone.
+    static var willStart: (@MainActor () -> Void)?
+    /// The dictation that listens now, if any.
+    private static weak var listening: SpeechDictation?
+
+    /// Stops the dictation that is listening, if any (Talk starting: one microphone).
+    static func stopListening() {
+        listening?.stop()
+    }
 
     func toggle(_ text: Binding<String>) {
         if isListening { stop() } else { Task { await start(text) } }
@@ -46,6 +60,8 @@ final class SpeechDictation {
             return
         }
         guard !isListening else { return }
+        Self.willStart?()
+        if let other = Self.listening, other !== self { other.stop() }
         guard let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
               recognizer.isAvailable else {
             state = .unavailable("Dictation isn't available right now.")
@@ -55,6 +71,8 @@ final class SpeechDictation {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.record, mode: .measurement, options: .duckOthers)
             try session.setActive(true, options: .notifyOthersOnDeactivation)
+            holdsSession = true
+            AudioSessionUse.claim(.dictation)
             let engine = AVAudioEngine()
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true
@@ -70,6 +88,7 @@ final class SpeechDictation {
             prefix = base.isEmpty ? "" : base + " "
             heard = false
             state = .listening
+            Self.listening = self
             generation += 1
             let current = generation
             task = Self.recognize(request, with: recognizer) { [weak self] transcript, done, failure in
@@ -131,15 +150,23 @@ final class SpeechDictation {
         }
     }
 
+    /// Stops listening. A dictation that never started (its mic button leaving the screen) touches nothing, and the
+    /// audio session goes back only when this one activated it and nobody else (Talk) uses it.
     func stop() {
-        engine?.stop()
-        engine?.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
-        task?.finish()
-        engine = nil
-        request = nil
-        task = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if Self.listening === self { Self.listening = nil }
+        if engine != nil || request != nil || task != nil {
+            engine?.stop()
+            engine?.inputNode.removeTap(onBus: 0)
+            request?.endAudio()
+            task?.finish()
+            engine = nil
+            request = nil
+            task = nil
+        }
+        if holdsSession {
+            holdsSession = false
+            AudioSessionUse.release(.dictation)
+        }
         if state == .listening { state = .idle }
     }
 }

@@ -41,6 +41,9 @@ targets:
       - path: iOS/WidgetViews
       - path: Shared/Intents
       - path: iOS/Resources
+      # Talk (the live conversation) runs the watch's conversation engine: the same files, with #if os(...) where
+      # the platforms differ (the audio session, voice processing, haptics).
+      - path: watchOS/App/Assistant
     dependencies:
       - package: SamRabbitKit
       - target: SamRabbitWidgets
@@ -80,8 +83,11 @@ targets:
         UIApplicationSupportsIndirectInputEvents: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # audio: a conversation (Talk) keeps its one audio session (microphone and replies) running with the screen
+        # locked or the app in the background. It is started in front and kept going between turns.
         UIBackgroundModes:
           - fetch
+          - audio
         BGTaskSchedulerPermittedIdentifiers:
           - com.samrabbit.mobile.refresh
         NSSupportsLiveActivities: true
@@ -93,7 +99,7 @@ targets:
           NSAllowsLocalNetworking: true
         NSLocalNetworkUsageDescription: SamRabbit talks to the SamRabbit bridge on your Mac over your local network.
         NSCameraUsageDescription: Scan the pairing QR code shown by SamRabbit on your Mac.
-        NSMicrophoneUsageDescription: Dictate tasks, replies and journal notes.
+        NSMicrophoneUsageDescription: Talk to SamRabbit, and dictate tasks, replies and journal notes. While a conversation is open your iPhone listens, and your Mac turns what you say into words.
         NSSpeechRecognitionUsageDescription: Turn what you say into text on this iPhone.
         NSUserActivityTypes:
           - AskSamRabbitIntent

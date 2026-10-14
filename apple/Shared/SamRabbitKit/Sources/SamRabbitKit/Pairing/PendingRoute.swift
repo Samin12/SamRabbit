@@ -21,6 +21,10 @@ public enum PendingRoute {
     /// Ask, with dictation already listening (the Action Button, the Ask controls and buttons).
     public static let askListening = "samrabbit://ask?listen=1"
 
+    /// Talk: the live conversation with SamRabbit (the "Talk to SamRabbit" intent: Siri, Shortcuts, the Action
+    /// Button, the Talk control).
+    public static let talk = "samrabbit://talk"
+
     /// Leaves `url` for the app and tells it.
     public static func set(_ url: String, in defaults: UserDefaults, now: Date = .now) {
         defaults.set(["url": url, "at": now.timeIntervalSince1970], forKey: key)

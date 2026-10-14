@@ -12,12 +12,13 @@ apple/
   Config/Signing.xcconfig   the one place for signing (DEVELOPMENT_TEAM)
   Shared/SamRabbitKit/   Swift package used by every target (models, client, storage, orb, theme, ...)
   Shared/Intents/        App Intents compiled into the app and the widget extension
-  iOS/App/               the iPhone app (SamRabbit, com.samrabbit.mobile)
+  iOS/App/               the iPhone app (SamRabbit, com.samrabbit.mobile); iOS/App/Talk: the live conversation
   iOS/Widgets/           widget extension (com.samrabbit.mobile.widgets): widgets, control, Live Activity
   iOS/WidgetViews/       widget faces, shared by the extension and the app (gallery, render harness)
   iOS/UITests/           the iPhone's Action Button test (opt-in, presses the simulator's button)
   iOS/Resources/         asset catalog (AppIcon from the orb, accent and launch colours)
-  watchOS/App/           the Apple Watch app (SamRabbitWatch, com.samrabbit.mobile.watchkitapp), embedded in the iPhone app
+  watchOS/App/           the Apple Watch app (SamRabbitWatch, com.samrabbit.mobile.watchkitapp), embedded in the iPhone app;
+                         watchOS/App/Assistant (the conversation engine) is compiled into the iPhone app too
   watchOS/Widgets/       complications and the Ask control (com.samrabbit.mobile.watchkitapp.widgets)
   watchOS/Intents/       the watch's App Intents (the Ask control's), compiled into the watch app and its extension
   watchOS/ComplicationViews/  complication faces, shared by the complications and the watch app's preview renderer
@@ -76,13 +77,16 @@ stream quiet after `heard` (a long tool call) with a `{"type":"ping"}` every `pi
 409 for that long from the first one, `code` is the `error` mode's code (then `done`, like the real bridge); modes
 `ok`, `noaudio`, `noise`, `end`, `error`, `slow`, `busy`, `unavailable`, `drop` (no answer at all),
 `buffered`, `buffered_clip` (an AAC clip, like the Claude fallback's MP3) and `missing` (an older bridge).
+A turn that hears "task", "draft", "notes" or "start" reports the task it started (`t3.started`, thread
+`t_relnotes`) and that thread then exists (working), so the iPhone's Talk can open it in Tasks; "calendar", "next"
+or "meeting" brings an "Up next" card. Text turns (`{text}`, the iPhone's keyboard in Talk) are answered the same way.
 Pending approvals and questions carry `requestId` (questions also `questionId`) and `respond` refuses a stale id
 with 409 `t3_request_not_pending`, exactly like the real bridge.
 
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 180 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 194 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
@@ -96,7 +100,23 @@ xcodebuild -project apple/SamRabbit.xcodeproj -scheme SamRabbitWatch \
   -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test
 # just the voice input: -only-testing:SamRabbitWatchUITests/WatchVoiceTests
 # the conversation:    -only-testing:SamRabbitWatchUITests/WatchConversationTests
+# the iPhone's Talk (opt-in: the address of this branch's fake bridge; pairs the app with it when unpaired, or always
+# with TEST_RUNNER_SAMRABBIT_FAKE_PAIR=1; screenshots also go to TEST_RUNNER_SAMRABBIT_SHOTS, and
+# TEST_RUNNER_SAMRABBIT_ANIMATED=1 keeps the orb moving for them):
+TEST_RUNNER_SAMRABBIT_FAKE_BRIDGE=127.0.0.1:3799 xcodebuild -project apple/SamRabbit.xcodeproj -scheme SamRabbit \
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro' test -only-testing:SamRabbitUITests/TalkUITests
 ```
+
+`TalkUITests` (iPhone, real taps, the made-up voice instead of the microphone, the simulator muted): Home's Talk button
+opens Talk listening; the voice is heard, the reply streams in as the caption with the task it started, and it listens
+again; a typed turn (`{text}`) with its card; mute and unmute; Stop during a long reply (the Mac is told to cancel); the
+bar over the tab bar and back; the transcript, and its task opened in Tasks while the conversation goes on; End from
+the bar (the Mac is told). Typing while a reply plays: while the Mac still sends it, the reply is cancelled there and
+the typed turn is answered in full (never stopped by that cancel); once the Mac has sent all of it, no cancel goes at
+all. `samrabbit://talk` opens straight into a conversation and End closes it; a Mac that drops
+the turn is said and shown with what to do. The conversation goes on in the background (the second utterance is
+heard and answered behind the Home Screen), the Dynamic Island and the Lock Screen show the Live Activity, and its End
+(`EndTalkIntent`, run by the app) ends the conversation and the activity.
 
 **32-bit watch hardware.** The watch's arm64_32 slice has a 32-bit `Int`, while every simulator is 64-bit: epoch
 milliseconds (`at`, `lastAt`, `nextBefore`, ...), cursors, sequence numbers and millisecond durations are `Int64` in
@@ -183,8 +203,8 @@ the SamRabbit control) and `WatchActionButtonTests` (Apple Watch Ultra simulator
 | Conversations | `ConversationTimeline` (port of the desktop `store.js`), `TimelineItem`, `GenCard` |
 | Look | `SamTheme` (colours, `glassCard()`, `samScreen()`, `StatusChip`, `PulseDot`, `SectionHeader`), `OrbView(mood:)`, `OrbRenderer`, `OrbMood` |
 | Watch link | `WatchContext` (applicationContext), `WatchRelay` (sendMessage relay), `BridgeRelay` (the client's second route) |
-| Assistant | `ConversationMachine` (the conversation's rules), `SpeechDetector` + `NoiseFloor`, `AssistantStream` / `AssistantStreamParser` (frames), `AssistantEvent`, `AssistantReply` (buffered), `AssistantTurnRequest` / `AssistantTurnResponse`, `BridgeClient.assistantTurn` / `assistantSession` / `assistantCancel` / `assistantEnd` / `assistantAnnouncements`, `TurnRelay` + `TurnRelayHost` (turns through the iPhone), `WAV`, `PCM16`, `AssistantStatus` (`summary.assistant`) |
-| Live Activity | `TaskActivityAttributes` (iOS) |
+| Assistant | `ConversationMachine` (the conversation's rules; the iPhone adds `typed` turns and `muted`), `SpeechDetector` + `NoiseFloor`, `AssistantStream` / `AssistantStreamParser` (frames), `AssistantEvent`, `AssistantReply` (buffered), `AssistantTurnRequest` / `AssistantTurnResponse`, `BridgeClient.assistantTurn` / `assistantSession` / `assistantCancel` / `assistantEnd` / `assistantAnnouncements`, `TurnRelay` + `TurnRelayHost` (turns through the iPhone), `WAV`, `PCM16`, `AssistantStatus` (`summary.assistant`), `AudioSessionClaims` (who holds the app's audio session: Talk, dictation) |
+| Live Activity | `TaskActivityAttributes` (iOS); Talk's `TalkActivityAttributes` (iOS), `TalkActivityState` and `TalkPhase` (what Talk shows in a word, the Live Activity's line and when it updates) |
 
 **The orb** is the desktop `OrbRenderer.swift` math, unchanged, evaluated on the CPU: `OrbRenderer.field`
 renders only the surface at about one sample per point (soft gradients, bilinear upscaling), and `OrbView`
@@ -208,7 +228,8 @@ another queue).
 
 **Deep links** (`AppLink`): `samrabbit://pair?…`, `ask[?text=]`, `note[?text=]`, `generate[?text=]`,
 `block[?minutes=&title=]`, `mac/open?app=|url=`, `thread/<id>`, `conversation/<id>`,
-`tab/<home|chats|tasks|mac|settings>`, `mac/screenshot`. A link can come from any web page or message, so the ones
+`tab/<home|chats|tasks|mac|settings>`, `mac/screenshot`, `talk` (also `voice`, `assistant`: Talk, started at once,
+like the watch's complications; the link writes nothing itself). A link can come from any web page or message, so the ones
 that write (`block`, and `ask`/`note`/`generate`/`mac/open` with content) never act on their own: they open a
 confirmation sheet ("A link wants to Block 45 minutes on your calendar", now until when, Confirm / Cancel, and Edit
 first for text). Without content they only open the empty composer. App Intents (Siri, Shortcuts, the widgets'
@@ -216,13 +237,15 @@ buttons, the control) still run directly: the person started them.
 
 **Widgets** (`SamRabbitWidgets`): Status (small), Tasks (medium), Up Next (medium, interactive Block 30m),
 Dashboard (large, Ask + Block), Needs You (Lock Screen circular + inline), Next Up (Lock Screen rectangular),
-the "Ask SamRabbit" control, and the "Task running" Live Activity (Lock Screen + Dynamic Island). The timeline
+Talk (Lock Screen circular + rectangular: opens Talk), the "Ask SamRabbit" and "Talk to SamRabbit" controls, and the
+"Task running" and Talk Live Activities (Lock Screen + Dynamic Island). The timeline
 provider reads the summary the app saved in the App Group and fetches a fresh one itself (8 s budget), every
 15 minutes. The app, the background refresh and the actions hand fresh summaries to `SummaryCache.publish`, which
 reloads the timelines only when the summary changed (`generatedAt` aside) or the last reload is 30 minutes old.
 
-**App Intents** (Siri and Shortcuts, phrases in `AppShortcuts.swift`): Ask SamRabbit, Ask by Voice ("Talk to
-SamRabbit": opens Ask listening), Block Time ("Block 30 minutes with SamRabbit"), Add Journal Note, What Needs Me
+**App Intents** (Siri and Shortcuts, phrases in `AppShortcuts.swift`): Talk to SamRabbit ("Talk to SamRabbit",
+"Chat with SamRabbit": a live conversation, `TalkToSamRabbitIntent`), Ask SamRabbit, Ask by Voice ("Dictate to
+SamRabbit", "Ask SamRabbit by voice": opens Ask listening), Block Time ("Block 30 minutes with SamRabbit"), Add Journal Note, What Needs Me
 (spoken), Open on Mac, Screenshot My Mac. The two that open the app use `supportedModes = .foreground(.immediate)`
 (iOS 26's replacement for `openAppWhenRun`).
 
@@ -230,7 +253,10 @@ SamRabbit": opens Ask listening), Block Time ("Block 30 minutes with SamRabbit")
 
 Apps can't read the button or assign it; the person picks an action in Settings. SamRabbit offers:
 
-- **iPhone 15 Pro and later**: the "Ask SamRabbit" control (`AskControl`, `OpenAskIntent`), which iOS offers for the
+- **iPhone 15 Pro and later, Talk**: the "Talk to SamRabbit" control (`TalkControl`, `TalkToSamRabbitIntent`), or
+  the "Talk" App Shortcut under Shortcut. Press and hold: SamRabbit opens in a live conversation; pressed again while
+  talking it acts like a tap on the orb (send now, or interrupt). Settings > Action Button in the app has the steps.
+- **iPhone 15 Pro and later, Ask**: the "Ask SamRabbit" control (`AskControl`, `OpenAskIntent`), which iOS offers for the
   Action Button as well as Control Center and the Lock Screen, and the "Ask by Voice" App Shortcut (the same intent)
   in the button's Shortcut list. Settings > Action Button > **Controls** > Choose a Control… > SamRabbit > **Ask
   SamRabbit** (or **Shortcut** > Choose a Shortcut… > SamRabbit > **Ask by Voice**). Press and hold: "Hold to Ask
@@ -275,6 +301,54 @@ or expired pairing code (401 `invalid_code`) says "That code is wrong or expired
 many tries (429) says to wait; neither is confused with a token the Mac stopped accepting. The Simulator has no `BGTaskScheduler` ("not available on this
 platform"), so the background part only runs on a device; to try it there from the debugger:
 `e -l objc -- (void)[[BGTaskScheduler sharedScheduler] _simulateLaunchForTaskWithIdentifier:@"com.samrabbit.mobile.refresh"]`.
+
+## Talk: the live conversation on the iPhone
+
+Like talking to the R1 or ChatGPT Voice (CONTRACTS-WAVE6 D). **Entry points**: the big Talk button on Home (and the
+Home orb), `samrabbit://talk`, Siri and Shortcuts ("Talk to SamRabbit"), the Action Button (the Talk control or the
+Talk shortcut), the Control Center control and the Lock Screen widget. The intents leave `samrabbit://talk` as a
+`PendingRoute` like Ask does.
+
+**The engine is the watch's**: `watchOS/App/Assistant` (`ConversationEngine`, `AudioGraph`, `ConversationFixture`) is
+compiled into the iPhone app as well, with `#if os(...)` where they differ, and the rules stay SamRabbitKit's
+`ConversationMachine`. On the iPhone the session is `.playAndRecord` / `.voiceChat` with `.defaultToSpeaker`,
+`.allowBluetoothHFP`, `.allowBluetoothA2DP`, and the microphone goes through voice processing (echo cancellation);
+voice processing is switched on while the engine is new, before anything is connected (it changes the formats);
+AirPods coming or going restart the engine's input (the watch's route handling). A call pauses it; when the call is
+over and iOS says the audio may go on (`onResumable`, only for the interruption that stopped this conversation) it goes
+on within three minutes, at once with SamRabbit in front, else when SamRabbit is in front again (the microphone never
+comes back on behind the Lock Screen with no Live Activity to stop it). End or Close on the paused screen means it:
+nothing goes on afterwards. Turns go straight to the Mac with the iPhone's own
+token, streamed (`/v1/mobile/assistant/*`): warm-up, live caption, barge-in, announcements every ~20 s, listening
+again after each reply, and the end about two minutes after the last words, on "bye" (`endConversation`) or on End.
+`UIBackgroundModes: audio` keeps it going with the app in the background or the screen locked. Haptics are the
+iPhone's own (soft start, light click, error).
+
+**The Talk screen** (`iOS/App/Talk`, full screen): the fluid orb (it follows your voice and pulses with the reply;
+tap it to send now or to interrupt), a state pill (Listening… / Hearing you… / Thinking… / Speaking… / Muted), the
+line it heard and the reply as it streams in, the tasks it started (tap: the thread in Tasks; Talk steps aside and
+the conversation goes on) and the cards it showed, and Type (a `{text}` turn; it interrupts a reply: a reply the Mac
+is still sending is cancelled there first and the typed turn goes once the cancel is through, since the Mac cancels
+whatever turn holds the conversation; a reply that only still plays here needs no cancel; words that can't go yet wait
+for the conversation to listen, or come back in the field), Mute (the microphone is muted in voice processing too; the
+quiet end comes after five minutes instead of two, announcements still play but don't keep it open, and the mute
+stays across a call), Stop (the reply: cancel on the Mac, listen at once) and End. The top left minimizes it: the
+conversation goes on in a bar over the tab bar (`tabViewBottomAccessory`: mute, end, tap for Talk). The top right
+shows the transcript (the last twelve exchanges). One microphone: dictation in a composer ends a conversation first, and Talk stops a dictation that listens. The audio
+session is the app's: `AudioSessionClaims` (SamRabbitKit) records who activated it, and only the last holder gives it
+back, so a mic button that never listened (every composer's, when its screen goes) never deactivates it under Talk.
+
+**The Live Activity** (`TalkActivityAttributes`, `TalkLiveActivity`): while a conversation runs, the Dynamic Island
+(orb + "Listening" / "Speaking", expanded with the last line and End) and the Lock Screen (orb, state, the last line,
+a timer and End). End runs `EndTalkIntent`, a `LiveActivityIntent` the app performs. It is updated when the phase
+changes and at most every 1.5 s while a reply streams in, and ended with the conversation (leftovers from a closed
+app at launch). A request iOS refused (the app wasn't in front yet) is tried again when SamRabbit is in front.
+
+**Debug launch arguments** (iPhone): `-SamRabbitTalk start` (Talk opens at launch), and the watch's
+`-SamRabbitVoiceFixture speech|hold|quiet`, `-SamRabbitFixtureTurns`, `-SamRabbitFixtureLead`,
+`-SamRabbitFixtureLength`, `-SamRabbitIdleSeconds`, `-SamRabbitStillOrb`, `-SamRabbitAudioOut` work the same. The
+simulator never listens through the Mac's microphone (no fixture: silence) and plays nothing out loud unless
+`-SamRabbitAudioOut on`.
 
 ## What the app expects where the contract leaves room
 
@@ -438,6 +512,10 @@ context requests and relays with the watch's token; the logic is in the Kit (`Br
 `performRelayed`) so `swift test` covers it.
 
 ## Screenshots
+
+Talk on the iPhone (wave 6): `~/jr-scratch/w6-shots/phone-*.png` (listening, speaking with the caption, the task
+card, a card from a typed turn, muted, minimized over the tab bar, the transcript, the Dynamic Island, the Live
+Activity on the Lock Screen, a Mac out of reach, Home with the Talk button).
 
 `~/Movies/SamRabbit-tests/wave4/ios-*.png` (each tab, thread detail, chats with a generated UI, pairing,
 Home Screen and Lock Screen widgets added in the simulator, Live Activity) and `widget-renders/` (the
