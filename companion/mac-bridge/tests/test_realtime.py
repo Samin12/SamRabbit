@@ -20,6 +20,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import struct
@@ -1178,9 +1179,8 @@ class ChatGPTAuthTest(unittest.TestCase):
         installed = chatgpt.make_auth(installed=True)
         self.assertEqual(os.path.expanduser("~/.config/samrabbit/chatgpt-auth.json"), installed.path)
         source = (ROOT / "samrabbit_chatgpt.py").read_text()
-        self.assertNotIn(".codex", source.replace("~/.codex (never read or written here)", "")
-                         .replace("``~/.codex`` (never read or written here)", ""),
-                         "never reads or writes ~/.codex")
+        # Codex's login is borrowed read-only (test_codex_login): auth.json is the only ~/.codex file named.
+        self.assertEqual(set(re.findall(r"\.codex[/\w.]*", source)), {".codex", ".codex/auth.json"})
 
 
 class ChatGPTRouteTest(RealtimeBase):
