@@ -271,9 +271,10 @@ struct CaptureBridgeTests {
         #expect(brief.footer == "Read 105 emails · 14 worth a look")
 
         // Remind me, then Draft reply: a Gmail draft (never sent), with its link in the right account.
-        let reminded = try await client.briefingAct("bi_dana", action: "remind")
+        let reminded = try await client.briefingAct("bi_dana", action: "remind", options: ["in": .string("tomorrow")])
         #expect(reminded.state == .snoozed)
-        #expect(reminded.message?.hasPrefix("I'll remind you at") == true)
+        #expect(reminded.message == "I'll remind you at 9:00 AM.")
+        #expect(reminded.until.map { Calendar.current.component(.hour, from: $0) } == 9)
         let drafted = try await client.briefingAct("bi_dana", action: "draft_reply")
         #expect(drafted.state == .drafted)
         #expect(drafted.url?.host == "mail.google.com")
@@ -306,6 +307,7 @@ struct CaptureBridgeTests {
         let taps = try await fakeGet(bridge, "briefing")["acts"].array ?? []
         #expect(taps.compactMap { $0["action"].string } == ["remind", "draft_reply", "draft_reply", "make_task", "dismiss",
                                                             "block_time", "open"])
+        #expect(taps.first?["in"].string == "tomorrow", "when, as he chose it")
 
         // Refresh: a new revision, picked up by the long-poll; another right away is too soon (one every 5 min).
         try await client.refreshBriefing()

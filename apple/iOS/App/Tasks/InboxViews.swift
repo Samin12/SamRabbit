@@ -23,7 +23,7 @@ struct InboxCard: View {
                     .foregroundStyle(SamTheme.muted)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                StatusChip(item.status)
+                if item.source == .note { NoteChip(item: item) } else { StatusChip(item.status) }
             }
             Button {
                 model.openItem(item)
@@ -312,8 +312,10 @@ enum InboxText {
             .joined(separator: " · ")
     }
 
-    /// What a card shows in its box: the request it waits on, else its last words.
+    /// What a card shows in its box: the request it waits on, else its last words (a voice note: what it suggests,
+    /// its words being the title).
     static func body(_ item: InboxItem) -> String? {
+        if item.source == .note { return NoteText.body(item) }
         if let detail = InboxPending.detail(item.pending) { return detail }
         if let pending = item.taskThread?.pending?.text, !pending.isEmpty { return pending }
         return item.summary.isEmpty ? nil : item.summary

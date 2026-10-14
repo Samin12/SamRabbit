@@ -80,9 +80,10 @@ final class WatchWalkthroughTests: XCTestCase {
         snap("watch-2-needs-you-answered")
     }
 
-    /// `POST 127.0.0.1:3799/__fake/<name>` (the fake bridge's loopback helpers).
+    /// `POST <fake bridge>/__fake/<name>` (the fake bridge's loopback helpers; `TEST_RUNNER_SAMRABBIT_FAKE_BRIDGE`,
+    /// default 127.0.0.1:3799).
     private func fake(_ name: String, _ body: [String: Any] = [:]) async throws -> [String: Any] {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:3799/__fake/\(name)")!)
+        var request = URLRequest(url: URL(string: "http://\(WatchConversationTests.bridge)/__fake/\(name)")!)
         request.httpMethod = "POST"
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, _) = try await URLSession.shared.data(for: request)
@@ -188,14 +189,14 @@ final class WatchWalkthroughTests: XCTestCase {
     /// an async test with `continueAfterFailure = false` can hang the run).
     @discardableResult
     private func fakeSync(_ name: String, _ body: [String: Any]) -> [String: Any] {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:3799/__fake/\(name)")!)
+        var request = URLRequest(url: URL(string: "http://\(WatchConversationTests.bridge)/__fake/\(name)")!)
         request.httpMethod = "POST"
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return exchange(request)
     }
 
     private func fakeGet(_ name: String) -> [String: Any] {
-        exchange(URLRequest(url: URL(string: "http://127.0.0.1:3799/__fake/\(name)")!))
+        exchange(URLRequest(url: URL(string: "http://\(WatchConversationTests.bridge)/__fake/\(name)")!))
     }
 
     private func exchange(_ request: URLRequest) -> [String: Any] {

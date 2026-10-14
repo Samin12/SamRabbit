@@ -403,7 +403,7 @@ final class CaptureActivityController {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         do {
             let attributes = CaptureActivityAttributes(captureId: meta.captureId, startedAt: meta.capturedAt)
-            let activity = try Activity.request(attributes: attributes, content: ActivityContent(state: state, staleDate: nil))
+            let activity = try Activity.request(attributes: attributes, content: Self.content(state))
             activityId = activity.id
             pending = nil
         } catch {
@@ -445,14 +445,20 @@ final class CaptureActivityController {
         Task { await end(leftovers, final: nil, after: 0) }
     }
 
+    /// A voice note being recorded is what the Dynamic Island and the top of the Lock Screen show, over a task's
+    /// activity (`relevanceScore`): its Stop must be at hand.
+    nonisolated private static func content(_ state: CaptureActivityState) -> ActivityContent<CaptureActivityState> {
+        ActivityContent(state: state, staleDate: nil, relevanceScore: 100)
+    }
+
     nonisolated private static func update(_ id: String, to state: CaptureActivityState) async {
         guard let activity = Activity<CaptureActivityAttributes>.activities.first(where: { $0.id == id }) else { return }
-        await activity.update(ActivityContent(state: state, staleDate: nil))
+        await activity.update(content(state))
     }
 
     nonisolated private static func end(_ ids: [String], final: CaptureActivityState?, after seconds: TimeInterval) async {
         for activity in Activity<CaptureActivityAttributes>.activities where ids.contains(activity.id) {
-            let content = final.map { ActivityContent(state: $0, staleDate: nil) }
+            let content = final.map { Self.content($0) }
             await activity.end(content, dismissalPolicy: seconds > 0 ? .after(.now.addingTimeInterval(seconds)) : .immediate)
         }
     }

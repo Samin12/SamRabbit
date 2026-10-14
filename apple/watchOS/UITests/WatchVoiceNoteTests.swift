@@ -88,7 +88,12 @@ final class WatchVoiceNoteTests: XCTestCase {
         if let intent { app.launchArguments += ["-SamRabbitIntent", intent] }
         if let route { app.launchArguments += ["-SamRabbitRoute", route] }
         app.launch()
-        if app.staticTexts["Pair on your iPhone"].waitForExistence(timeout: 3) {
+        // The intent records the moment the app is up (and a short note sends itself a few seconds later): look for
+        // the recorder at once rather than wait the pairing screen's three seconds out.
+        let unpaired = app.staticTexts["Pair on your iPhone"]
+        let recorder = any(app, "voice-listening")
+        _ = waitUntil(timeout: 3) { unpaired.exists || (intent != nil && recorder.exists) }
+        if unpaired.exists {
             throw XCTSkip("The watch isn't paired (pair the iPhone simulator with the fake bridge first).")
         }
         return app

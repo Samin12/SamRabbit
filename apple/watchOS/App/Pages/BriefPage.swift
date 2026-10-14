@@ -97,7 +97,7 @@ struct BriefCard: View {
                 }
             }
             HStack(spacing: 6) {
-                if item.state == .open, let verb = item.verbs.first(where: { $0.kind != .open }) {
+                if item.state == .open || item.state == .snoozed, let verb = item.verbs.first(where: { $0.kind != .open }) {
                     Button {
                         Task { await model.briefAct(item, verb.kind) }
                     } label: {
@@ -109,7 +109,7 @@ struct BriefCard: View {
                     .accessibilityIdentifier("brief-verb-\(item.id)")
                 }
                 if item.allows(.done) {
-                    let beside = item.state == .open && item.verbs.contains { $0.kind != .open }
+                    let beside = (item.state == .open || item.state == .snoozed) && item.verbs.contains { $0.kind != .open }
                     Button {
                         Task { await model.briefAct(item, .done) }
                     } label: {

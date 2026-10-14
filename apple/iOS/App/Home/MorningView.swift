@@ -237,7 +237,8 @@ struct BriefItemCard: View {
                 }
             }
             HStack(spacing: 8) {
-                if !handled {
+                // A reminder only puts it off: its verbs stay.
+                if !handled || item.state == .snoozed {
                     ForEach(Array(item.verbs.enumerated()), id: \.element.id) { index, verb in
                         BriefVerbButton(item: item, verb: verb, prominent: index == 0)
                     }
@@ -290,18 +291,39 @@ struct BriefVerbButton: View {
         }
     }
 
-    private var button: some View {
-        Button {
-            Haptics.tap()
-            Task { await model.act(on: item, verb) }
-        } label: {
-            Label(verb.label, systemImage: verb.symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(1)
-                .fixedSize()
+    @ViewBuilder private var button: some View {
+        if verb.kind == .remind {
+            // Remind me: when (the Mac puts a short reminder on the calendar then).
+            Menu {
+                ForEach(BriefingRemindTime.allCases, id: \.self) { time in
+                    Button(time.label) {
+                        Haptics.tap()
+                        Task { await model.act(on: item, verb, options: ["in": .string(time.rawValue)]) }
+                    }
+                    .accessibilityIdentifier("brief-remind-\(time.rawValue)")
+                }
+            } label: {
+                label
+            }
+            .controlSize(.regular)
+            .accessibilityIdentifier("brief-\(verb.kind.wire)-\(item.id)")
+        } else {
+            Button {
+                Haptics.tap()
+                Task { await model.act(on: item, verb) }
+            } label: {
+                label
+            }
+            .controlSize(.regular)
+            .accessibilityIdentifier("brief-\(verb.kind.wire)-\(item.id)")
         }
-        .controlSize(.regular)
-        .accessibilityIdentifier("brief-\(verb.kind.wire)-\(item.id)")
+    }
+
+    private var label: some View {
+        Label(verb.label, systemImage: verb.symbol)
+            .font(.system(size: 14, weight: .semibold))
+            .lineLimit(1)
+            .fixedSize()
     }
 }
 

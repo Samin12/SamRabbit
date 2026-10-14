@@ -28,6 +28,8 @@ struct VoiceCaptureView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: capture.phase)
+        // Every face fills the screen (a voice note's result is a scroll view of its own width otherwise).
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             ZStack {
                 SamTheme.night

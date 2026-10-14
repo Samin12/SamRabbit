@@ -276,12 +276,12 @@ final class AppModel {
         }
     }
 
-    /// The brief as it loaded (a later revision or another day replaces the shown one), or none for an older bridge.
+    /// The brief as it loaded (whatever differs from the shown one replaces it), or none for an older bridge.
     private func apply(briefing result: Result<Briefing, BridgeError>) {
         switch result {
         case .success(let fresh):
             briefingMissing = false
-            if fresh.isNewer(than: briefing) || fresh.available != briefing?.available {
+            if fresh != briefing {
                 withAnimation(.smooth) { briefing = fresh }
             }
             if fresh.status != .building { briefingRefreshing = false }
@@ -311,7 +311,7 @@ final class AppModel {
     /// One of a brief item's verbs, by his tap. Draft reply makes a Gmail draft (never sent) and opens it; Make task
     /// starts a T3 task; Block time and Remind me go on the calendar; Done and Dismiss take it off; Open opens its
     /// Gmail thread (with the right account). The item changes at once; the Mac's next brief confirms.
-    func act(on item: BriefingItem, _ action: BriefingAction) async {
+    func act(on item: BriefingItem, _ action: BriefingAction, options: [String: JSONValue] = [:]) async {
         if action.kind == .open, let url = action.url ?? item.openURL {
             UIApplicationOpener.open(url)
             return
@@ -326,7 +326,7 @@ final class AppModel {
         defer { busyBriefItems.remove(item.id) }
         do {
             let fallback = Self.state(after: action.kind)
-            let result = try await actions.briefingAct(item.id, action: action.action, state: fallback)
+            let result = try await actions.briefingAct(item.id, action: action.action, options: options, state: fallback)
             let state = result.state ?? fallback ?? item.state
             withAnimation(.smooth) {
                 briefing = briefing?.with(item.id, state: state, draftUrl: action.kind == .draftReply ? result.url : nil,

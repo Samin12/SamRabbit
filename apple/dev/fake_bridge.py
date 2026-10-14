@@ -1659,7 +1659,8 @@ class FakeBridge:
 
     def _seed_briefing(self, now: float) -> None:
         self.briefing_mode = "ready"
-        self.briefing_revision = 1
+        # Like the real bridge: epoch milliseconds to start with, so it only grows (also across a restart or a reset).
+        self.briefing_revision = max(int(getattr(self, "briefing_revision", 0)) + 1, int(now * 1000))
         self.briefing_built = now - 3 * 3600
         self.briefing_building = False
         self.briefing_refreshed = -1e12  # the last refresh's start (one every five minutes)
@@ -1792,7 +1793,8 @@ class FakeBridge:
                 raise ApiError(404, "item_not_found", "That is not in today's brief.")
             if action not in item["can"]:
                 raise ApiError(409, "unsupported_action", "That item can't do that.")
-            self.briefing_log["acts"].append({"itemId": item_id, "action": action})
+            self.briefing_log["acts"].append(dict({"itemId": item_id, "action": action},
+                                                  **({"in": str(body["in"])} if body.get("in") else {})))
             if action == "open":
                 if not item.get("url") and not item.get("itemId"):
                     raise ApiError(409, "unsupported_action", "There is nothing to open for it.")
@@ -2326,9 +2328,7 @@ class Handler(BaseHTTPRequestHandler):
                     if mode not in BRIEFING_MODES:
                         raise ApiError(400, "invalid_mode", "mode must be one of " + ", ".join(BRIEFING_MODES))
                     if body.get("reset"):
-                        revision = b.briefing_revision
                         b._seed_briefing(time.time())
-                        b.briefing_revision = revision
                     b.briefing_mode = mode
                     b.briefing_revision += 1
                     if body.get("clear"):

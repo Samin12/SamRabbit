@@ -170,11 +170,15 @@ extension BridgeClient {
         try await send(.post("/v1/\(api.rawValue)/briefing/refresh", body: [:], timeout: 15))
     }
 
-    /// `POST /v1/mobile/briefing/items/<id>/act {action}`: one of the item's buttons, by his tap. A draft reply
-    /// becomes a Gmail draft (never sent) and comes back with its link.
-    public func briefingAct(_ itemId: String, action: String) async throws -> BriefingActResult {
+    /// `POST /v1/mobile/briefing/items/<id>/act {action, …}`: one of the item's buttons, by his tap. A draft reply
+    /// becomes a Gmail draft (never sent) and comes back with its link. `options`: the verb's own words (Remind me's
+    /// `in`: `1h`, `2pm`, `tonight`, `tomorrow`; Block's `minutes`).
+    public func briefingAct(_ itemId: String, action: String, options: [String: JSONValue] = [:]) async throws
+        -> BriefingActResult {
+        var fields = options
+        fields["action"] = .string(action)
         let body = try await data(.post("/v1/\(api.rawValue)/briefing/items/\(Self.segment(itemId))/act",
-                                        body: ["action": .string(action)], timeout: 45))
+                                        body: fields, timeout: 45))
         return (try? BridgeJSON.decode(BriefingActResult.self, from: body)) ?? BriefingActResult()
     }
 }

@@ -45,6 +45,17 @@ final class BriefingUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Reply to Dana about the SOW"].exists)
         snap("phone-brief-0-home")
 
+        // Remind me, at 2 PM: a reminder on the calendar; the item keeps its verbs.
+        app.buttons["brief-remind-bi_dana"].tap()
+        let at2 = app.buttons["brief-remind-2pm"]
+        XCTAssertTrue(at2.waitForExistence(timeout: 5), "when")
+        snap("phone-brief-0b-remind-menu")
+        at2.tap()
+        XCTAssertTrue(app.staticTexts["I'll bring it back"].waitForExistence(timeout: 10))
+        XCTAssertEqual(lastTap(), ["itemId": "bi_dana", "action": "remind", "in": "2pm"])
+        XCTAssertTrue(app.staticTexts["brief-result-bi_dana"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["brief-result-bi_dana"].label.hasPrefix("I'll remind you at"))
+
         // Draft reply: a Gmail draft, nothing sent.
         app.buttons["brief-draft_reply-bi_dana"].tap()
         XCTAssertTrue(app.staticTexts["Draft saved in Gmail"].waitForExistence(timeout: 10), "said so")

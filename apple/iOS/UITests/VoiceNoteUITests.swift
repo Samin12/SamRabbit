@@ -65,6 +65,7 @@ final class VoiceNoteUITests: XCTestCase {
         let line = app.descendants(matching: .any)["home-voice-notes"]
         XCTAssertTrue(waitUntil(timeout: 15) { line.exists && line.label.contains("Added to your journal") },
                       "Home's voice-notes line")
+        snap("phone-note-2b-home-line")
 
         let upload = try XCTUnwrap((fakeGet("capture")["uploads"] as? [[String: Any]])?.last)
         XCTAssertEqual(upload["source"] as? String, "iphone")
@@ -96,8 +97,12 @@ final class VoiceNoteUITests: XCTestCase {
         app.tabBars.buttons["Tasks"].tap()
         let start = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'note-act-'")).firstMatch
         XCTAssertTrue(start.waitForExistence(timeout: 15), "the note under Needs you, with its suggestion")
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'pricing page tonight'")).firstMatch
-            .waitForExistence(timeout: 5), "what he said")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'pricing page tonight'"))
+            .firstMatch.waitForExistence(timeout: 5), "what he said, as its title")
+        XCTAssertTrue(app.staticTexts["Start it as a T3 task?"].exists, "what it suggests")
+        for _ in 0..<6 where !(start.isHittable && start.frame.maxY < app.frame.maxY - 140) {
+            app.swipeUp(velocity: .slow)
+        }
         snap("phone-note-4-tasks")
         start.tap()
         XCTAssertTrue(app.staticTexts["Started a T3 task"].waitForExistence(timeout: 10), "the Mac started it")
@@ -202,6 +207,44 @@ final class VoiceNoteUITests: XCTestCase {
         snap("phone-note-10-lock-screen-sent", settle: 0.5)
         springboard.swipeUp()
         app.activate()
+    }
+
+    /// Settings > Action Button explains Talk and Voice Note (and what a note does), and "Try a voice note here" records
+    /// like the button does; the widget gallery shows the Dashboard's Talk and Voice note, the brief's widgets and the
+    /// voice note's Lock Screen faces and Live Activity.
+    func testTheActionButtonHelpAndTheWidgetGallery() throws {
+        try launch(voice: "hold")
+        app.tabBars.buttons["Settings"].tap()
+        let help = app.buttons["action-button-help"]
+        for _ in 0..<6 where !(help.exists && help.isHittable) { app.swipeUp() }
+        help.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Voice Note'")).firstMatch
+            .waitForExistence(timeout: 5), "both choices")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Put this in my journal'")).firstMatch.exists,
+                      "what a note does")
+        snap("phone-help-1-action-button")
+        let tryNote = app.buttons["help-try-note"]
+        for _ in 0..<6 where !(tryNote.exists && tryNote.isHittable) { app.swipeUp() }
+        snap("phone-help-2-try-and-experiment")
+        tryNote.tap()
+        XCTAssertTrue(app.staticTexts["capture-timer"].waitForExistence(timeout: 8), "it records, like the button")
+        app.buttons["capture-close"].tap() // Cancel: nothing is sent
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+
+        let gallery = app.buttons["Widget gallery"]
+        for _ in 0..<6 where !(gallery.exists && gallery.isHittable) { app.swipeUp() }
+        gallery.tap()
+        for (title, name) in [("Large · Dashboard", "phone-gallery-1-dashboard"),
+                              ("Medium · Morning brief", "phone-gallery-2-brief-medium"),
+                              ("Large · Morning brief", "phone-gallery-3-brief-large"),
+                              ("Voice note · Lock Screen and Live Activity", "phone-gallery-4-voice-note")] {
+            let heading = app.staticTexts[title.uppercased()] // the gallery's eyebrows
+            for _ in 0..<12 where !(heading.exists && heading.frame.minY < 420) {
+                app.swipeUp(velocity: .slow)
+            }
+            XCTAssertTrue(heading.exists, title)
+            snap(name)
+        }
     }
 
     // MARK: - Helpers

@@ -131,6 +131,20 @@ public struct BriefingAction: Codable, Sendable, Equatable, Hashable, Identifiab
     }
 }
 
+/// When Remind me brings an item back (the bridge's `in`).
+public enum BriefingRemindTime: String, CaseIterable, Sendable {
+    case hour = "1h", afternoon = "2pm", tonight, tomorrow
+
+    public var label: String {
+        switch self {
+        case .hour: "In an hour"
+        case .afternoon: "At 2 PM"
+        case .tonight: "Tonight at 6"
+        case .tomorrow: "Tomorrow at 9"
+        }
+    }
+}
+
 extension BriefingAction.Kind {
     /// The contract's word for it (what is sent when the brief named the verb some other way).
     public var wire: String {

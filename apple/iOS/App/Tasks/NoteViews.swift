@@ -5,6 +5,36 @@ import SwiftUI
 // waits under Needs you with what it suggests ("Start it as a T3 task?"). Its buttons: the suggestion (done by the
 // Mac, `POST /captures/<id>/act`), Keep as note (seen) and Dismiss (it leaves the list).
 
+/// A note's chip: it suggests something, it couldn't be heard, or it is just kept.
+struct NoteChip: View {
+    let item: InboxItem
+
+    var body: some View {
+        let (word, symbol, tint): (String, String, Color) = switch item.status {
+        case .error: ("Couldn't hear it", "exclamationmark.triangle.fill", SamTheme.red)
+        case .needsInput, .needsApproval: ("Suggestion", "lightbulb.fill", SamTheme.amber)
+        default: ("Saved", "note.text", SamTheme.mint)
+        }
+        Label(word, systemImage: symbol)
+            .font(.system(size: 11.5, weight: .semibold))
+            .labelStyle(.titleAndIcon)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(tint.opacity(0.14)))
+            .overlay(Capsule().strokeBorder(tint.opacity(0.25), lineWidth: 0.5))
+    }
+}
+
+enum NoteText {
+    /// The card's box: the suggestion ("Start it as a T3 task?"), else what the title doesn't say already (the rest of
+    /// a long note, why it failed), else nothing (the title is his words).
+    static func body(_ item: InboxItem) -> String? {
+        if let suggestion = item.suggestion, item.status.needsYou { return suggestion.label }
+        return item.summary.isEmpty || item.summary == item.title ? nil : item.summary
+    }
+}
+
 /// What a saved voice note's card offers.
 struct NoteActions: View {
     @Environment(AppModel.self) private var model
@@ -23,13 +53,14 @@ struct NoteActions: View {
                 .tint(SamTheme.orb)
                 .accessibilityIdentifier("note-act-\(item.id)")
             }
-            if item.supports(.seen) {
+            if item.supports(.seen), item.unread {
                 Button {
                     Task { await model.markSeen(item) }
                 } label: {
-                    Label("Keep as note", systemImage: "note.text").lineLimit(1).frame(maxWidth: .infinity)
+                    Text("Keep").lineLimit(1).fixedSize()
                 }
                 .buttonStyle(.glass)
+                .accessibilityLabel("Keep as note")
                 .accessibilityIdentifier("note-keep-\(item.id)")
             }
             if item.supports(.dismiss) {
