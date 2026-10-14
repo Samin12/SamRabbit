@@ -1,962 +1,255 @@
-// SamRabbit desktop: mirrors every R1 voice conversation live (CONTRACTS-WAVE3 hop 3).
+// SamRabbit on the Mac: the whole app in one window (CONTRACTS-WAVE7 §B). A sidebar with the orb, Talk and the views
+// (Home, Tasks, Chats, Calendar, Settings), live data from the bridge (the agent inbox long poll, the conversation
+// sync stream, the summary, the agenda) and the native voice through the shell. ⌘1–⌘5 switch views.
 
-import { ApiError, SyncStream, api, pageHasMore } from './api.js';
-import { tickTimers } from './cards.js';
+import { AgentInbox } from './agents.js';
+import { desktop } from './api.js';
+import { createCalendar } from './calendar.js';
+import { chats } from './chats.js';
 import { h } from './dom.js';
-import { clip, dayLabel, plural, relativeTime, shortWhen, stamp, toMs } from './format.js';
+import { createHome } from './home.js';
 import { icon } from './icons.js';
+import { keyName } from './inbox.js';
+import { nativeState, onNative, params, postNative, receiveNative } from './native.js';
 import { createOrb } from './orb.js';
-import { ConversationStore } from './store.js';
-import { TimelineView } from './timeline.js';
+import { Resource } from './resource.js';
+import { createSettings } from './settings.js';
+import { createTalk } from './talk.js';
+import { createTasks } from './tasks.js';
+import { closeOverlay, closePopover, overlayOpen, reportDragExclusions, toast } from './ui.js';
+import { normalizeEvents } from './agenda.js';
 
-const PAGE = 100;
-const T3_URL = 'http://127.0.0.1:3773/';
-const FOLLOW_IDLE_MS = 90 * 1000;
-const RETRY_MS = [2000, 4000, 8000, 15000];
-
-// ---------------------------------------------------------------------------- native shell
-
-const nativeHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.samrabbit;
-const nativeInfo = window.SAMRABBIT_NATIVE || null;
-const params = new URLSearchParams(location.search);
-
-function postNative(message) {
-  if (!nativeHandler) return false;
-  try {
-    nativeHandler.postMessage(message);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const root = document.documentElement;
-if (nativeHandler || nativeInfo || params.has('chrome')) root.classList.add('in-app');
-if (params.has('chrome')) root.classList.add('fake-chrome');
-if (nativeInfo && nativeInfo.trafficLights) {
-  const { right, centerY } = nativeInfo.trafficLights;
-  if (Number.isFinite(right)) root.style.setProperty('--traffic-right', `${Math.round(right)}px`);
-  if (Number.isFinite(centerY)) root.style.setProperty('--titlebar-h', `${Math.max(32, Math.round(centerY * 2))}px`);
-}
-
-// ---------------------------------------------------------------------------- state
+const VIEWS = [
+  { id: 'home', label: 'Home', icon: 'home', key: '1' },
+  { id: 'tasks', label: 'Tasks', icon: 'task', key: '2' },
+  { id: 'chats', label: 'Chats', icon: 'bubble', key: '3' },
+  { id: 'calendar', label: 'Calendar', icon: 'calendar', key: '4' },
+  { id: 'settings', label: 'Settings', icon: 'gear', key: '5' },
+];
+const VIEW_IDS = VIEWS.map((v) => v.id);
 
 const $ = (id) => document.getElementById(id);
-const els = {
-  list: $('conversation-list'), search: $('search'), searchIcon: $('search-icon'), status: $('sync-status'),
-  head: $('main-head'), scroller: $('scroller'), timeline: $('timeline'), state: $('state'), jump: $('jump'),
-  foot: $('main-foot'), overlays: $('overlay-root'), toasts: $('toast-root'),
-};
-els.searchIcon.append(icon('search', { size: 14 }));
 
-// "Pair iPhone…" (native window with the QR code); only inside the desktop app.
-const pairButton = $('pair-phone');
-if (pairButton && nativeHandler) {
-  pairButton.hidden = false;
-  pairButton.append(icon('phone', { size: 15 }));
-  pairButton.addEventListener('click', () => postNative({ type: 'pairPhone' }));
-}
+// ---------------------------------------------------------------------------- shared data
 
-const store = new ConversationStore();
-const state = {
-  selectedId: null,
-  query: '',
-  searchIds: null,
-  listStatus: 'loading',
-  listError: null,
-  listAttempt: 0,
-  streamState: 'connecting',
-  lastInteraction: 0,
-  hasMore: false,
-  loadingMore: false,
-  pageBefore: null, // lastAt (ms) where the next page of older conversations starts
-  frameHeights: new Map(),
-  openTools: new Set(),
-  initialSelectionDone: false,
-};
+const agents = new AgentInbox(desktop);
+const summary = new Resource(() => desktop.summary(), { every: 60_000 });
+const agenda = new Resource(async () => {
+  const body = await desktop.agenda(7);
+  return { ...body, events: normalizeEvents(body && body.events) };
+}, { every: 5 * 60_000 });
 
 const ctx = {
-  openTools: state.openTools,
-  frameHeight: (id) => state.frameHeights.get(id) || 380,
-  registerFrame: () => {},
-  openImage,
-  openArtifact,
-  copyHtml,
-  openT3,
+  api: desktop,
+  agents,
+  chats,
+  summary,
+  agenda,
+  show,
+  current: () => current,
+  toast,
 };
-const view = new TimelineView(els.timeline, ctx);
 
-// ---------------------------------------------------------------------------- render scheduling
+// ---------------------------------------------------------------------------- views
 
-const dirty = new Set();
-let frame = 0;
-let fallback = 0;
+let current = null;
+const views = {};
+const talk = createTalk(ctx);
+ctx.talk = talk;
+views.home = createHome(ctx, $('view-home'));
+views.tasks = createTasks(ctx, $('view-tasks'));
+views.chats = {
+  el: $('view-chats'),
+  shown: () => chats.shown(),
+  hidden: () => chats.hidden(),
+  handleKey: (event) => chats.handleKey(event),
+};
+views.calendar = createCalendar(ctx, $('view-calendar'));
+views.settings = createSettings(ctx, $('view-settings'));
+chats.show = () => show('chats');
 
-// requestAnimationFrame pauses while the window is closed, occluded or the display sleeps; a timer
-// fallback keeps the DOM current so everything is already there when the window comes back.
-function schedule(...parts) {
-  for (const part of parts) dirty.add(part);
-  if (!frame) frame = requestAnimationFrame(flush);
-  if (!fallback) fallback = setTimeout(flush, 250);
-}
-
-function flush() {
-  if (frame) cancelAnimationFrame(frame);
-  clearTimeout(fallback);
-  frame = 0;
-  fallback = 0;
-  if (!dirty.size) return;
-  const parts = new Set(dirty);
-  dirty.clear();
-  if (parts.has('list')) renderList();
-  if (parts.has('status')) renderStatus();
-  if (parts.has('head')) renderHead();
-  if (parts.has('main')) renderMain();
-  else if (parts.has('timeline')) renderTimeline();
-  if (parts.has('foot')) renderFoot();
-}
-
-// ---------------------------------------------------------------------------- sidebar
-
-function visibleConversations() {
-  const all = store.list();
-  if (!state.query) return all;
-  const query = state.query.toLowerCase();
-  const server = new Set(state.searchIds || []);
-  return all.filter((c) => server.has(c.conversationId) || `${c.title} ${c.preview}`.toLowerCase().includes(query));
-}
-
-function conversationButton(c, now) {
-  const selected = c.conversationId === state.selectedId;
-  return h('button', {
-    class: `conv${selected ? ' selected' : ''}${c.live ? ' live' : ''}`,
-    type: 'button',
-    dataset: { id: c.conversationId },
-    'aria-current': selected ? 'true' : null,
-    onclick: () => select(c.conversationId, { user: true }),
-  },
-  h('div', { class: 'conv-top' },
-    c.live ? h('span', { class: 'live-dot', title: 'Live on your R1' }) : null,
-    h('span', { class: 'conv-title', text: c.title || 'New conversation' }),
-    h('time', { class: `conv-time${c.live ? ' live' : ''}`, text: c.live ? 'Live' : shortWhen(c.lastAt, now) })),
-  c.preview ? h('div', { class: 'conv-preview', text: c.preview }) : null);
-}
-
-function skeletonList() {
-  return h('div', { class: 'conv-skeleton' }, [0, 1, 2, 3, 4].map(() => h('div', { class: 'sk-row' }, h('span'), h('span'))));
-}
-
-function renderList() {
-  const scrollTop = els.list.scrollTop;
-  const now = Date.now();
-  const children = [];
-  if (state.listStatus === 'loading' && !store.byId.size) {
-    children.push(skeletonList());
-  } else if (state.listStatus === 'ok' && !store.byId.size) {
-    children.push(h('div', { class: 'list-empty quiet', text: 'No conversations yet' }));
-  } else {
-    const conversations = visibleConversations();
-    if (state.query && !conversations.length) {
-      children.push(h('div', { class: 'list-empty' }, icon('search', { size: 18 }), h('div', { text: `Nothing matches “${clip(state.query, 40)}”` })));
+/** Brings a view to the front. `options` go to the view (e.g. {item} for Tasks, {compose: true}). */
+function show(id, options = {}) {
+  if (!VIEW_IDS.includes(id)) return;
+  closePopover();
+  if (current !== id) {
+    if (current) {
+      views[current].el.hidden = true;
+      views[current].hidden?.();
     }
-    let group = null;
-    let groupEl = null;
-    for (const c of conversations) {
-      const label = c.live ? 'Live now' : dayLabel(c.lastAt, now);
-      if (label !== group) {
-        group = label;
-        groupEl = h('section', { class: 'conv-group' }, h('h2', { class: `conv-group-title${c.live ? ' live' : ''}`, text: label }));
-        children.push(groupEl);
-      }
-      groupEl.append(conversationButton(c, now));
-    }
-    if (!state.query && state.hasMore) {
-      children.push(h('button', { class: 'load-more', type: 'button', onclick: loadMore, disabled: state.loadingMore },
-        state.loadingMore ? 'Loading…' : 'Show older conversations'));
-    }
-  }
-  els.list.replaceChildren(...children);
-  els.list.scrollTop = scrollTop;
-}
-
-function lastSeenAt() {
-  let latest = 0;
-  for (const c of store.byId.values()) latest = Math.max(latest, c.lastAt || 0);
-  return latest;
-}
-
-function renderStatus() {
-  const now = Date.now();
-  const live = store.list().some((c) => c.live);
-  const seen = lastSeenAt();
-  let tone;
-  let line;
-  if (state.listStatus === 'error') {
-    const error = state.listError;
-    tone = error && error.syncMissing ? 'warn' : 'error';
-    line = error && error.status === 0 ? 'Bridge not reachable' : error && error.syncMissing ? 'Sync not on yet' : 'Sync unavailable';
-  } else if (state.streamState !== 'live') {
-    tone = 'warn';
-    line = state.streamState === 'connecting' ? 'Connecting…' : 'Reconnecting…';
-  } else if (live) {
-    tone = 'live';
-    line = 'Live conversation';
-  } else {
-    tone = 'ok';
-    line = 'Synced with your R1';
-  }
-  els.status.replaceChildren(
-    h('span', { class: `status-dot tone-${tone}` }),
-    h('div', { class: 'status-text' },
-      h('div', { class: 'status-line', text: line }),
-      h('div', { class: 'status-sub', text: seen ? `R1 last seen ${relativeTime(seen, now)}` : 'Waiting for your R1' })));
-}
-
-// ---------------------------------------------------------------------------- main header / footer
-
-function selectedSummary() {
-  return state.selectedId ? store.get(state.selectedId) : null;
-}
-
-function reportDragExclusions() {
-  if (!nativeHandler) return;
-  const rects = [];
-  for (const el of document.querySelectorAll('.titlebar button, .titlebar a, .titlebar input, .titlebar [data-nodrag]')) {
-    const box = el.getBoundingClientRect();
-    if (box.width && box.height) rects.push([Math.round(box.left), Math.round(box.top), Math.round(box.width), Math.round(box.height)]);
-  }
-  const key = JSON.stringify(rects);
-  if (key !== reportDragExclusions.last) {
-    reportDragExclusions.last = key;
-    postNative({ type: 'noDrag', rects });
-  }
-}
-
-function renderHead() {
-  const c = selectedSummary();
-  if (!c) {
-    els.head.replaceChildren();
-    reportDragExclusions();
-    return;
-  }
-  const timeline = store.timelines.get(c.conversationId);
-  const metaBits = [stamp(c.startedAt)];
-  if (c.messageCount) metaBits.push(plural(c.messageCount, 'message'));
-  els.head.replaceChildren(
-    h('div', { class: 'head-titles' },
-      h('h1', { class: 'head-title', text: c.title || 'New conversation' }),
-      c.live ? h('span', { class: 'live-badge' }, h('span', { class: 'live-dot' }), 'Live') : null,
-      h('span', { class: 'head-meta', text: metaBits.join(' · ') })),
-    h('div', { class: 'head-actions' },
-      h('button', {
-        class: 'icon-btn', type: 'button', title: 'Copy transcript',
-        disabled: !(timeline && timeline.loaded),
-        onclick: async () => {
-          const ok = await copyText(timeline.transcript(c.title));
-          toast(ok ? 'Transcript copied' : 'Could not copy');
-        },
-      }, icon('copy', { size: 15 }))));
-  reportDragExclusions();
-}
-
-let footOrb = null;
-
-function renderFoot() {
-  const c = selectedSummary();
-  if (!c || state.listStatus === 'error') {
-    els.foot.replaceChildren();
-    els.foot.hidden = true;
-    return;
-  }
-  els.foot.hidden = false;
-  const timeline = store.timelines.get(c.conversationId);
-  const streaming = timeline ? view.hasStreaming(timeline, c.live) : false;
-  if (c.live) {
-    if (!footOrb) footOrb = createOrb({ size: 46, energy: 0.2, speed: 1.2, glow: 0.9, className: 'foot-orb' });
-    footOrb.orb.set({ energy: streaming ? 0.55 : 0.2, speed: streaming ? 2.0 : 1.1 });
-    els.foot.replaceChildren(h('div', { class: 'foot live' }, footOrb,
-      h('div', null, h('div', { class: 'foot-title', text: streaming ? 'Your R1 is answering…' : 'Live on your R1' }),
-        h('div', { class: 'foot-sub', text: 'Everything you say shows up here as it happens.' }))));
-  } else {
-    els.foot.replaceChildren(h('div', { class: 'foot' }, h('span', { class: 'foot-icon' }, icon('mic', { size: 14 })),
-      h('div', { class: 'foot-sub', text: 'To continue, just talk to your R1. New messages appear here live.' })));
-  }
-}
-
-// ---------------------------------------------------------------------------- main states
-
-let heroOrb = null;
-
-function heroState({ title, text, tone = '', actions = [], chips = [], code = '' }) {
-  if (!heroOrb) heroOrb = createOrb({ size: 220, energy: 0.12, speed: 0.8, className: 'hero-orb' });
-  heroOrb.orb.set({ glow: tone === 'error' ? 0.35 : 1, energy: tone === 'error' ? 0 : 0.12, speed: tone === 'error' ? 0.25 : 0.8 });
-  return h('div', { class: `hero ${tone}` }, heroOrb,
-    h('h2', { class: 'hero-title', text: title }),
-    h('p', { class: 'hero-text', text }),
-    code ? h('code', { class: 'hero-code', text: code }) : null,
-    chips.length ? h('div', { class: 'hero-chips' }, chips.map(([glyph, label]) => h('span', { class: 'chip' }, icon(glyph, { size: 13 }), label))) : null,
-    actions.length ? h('div', { class: 'hero-actions' }, actions) : null);
-}
-
-function errorCopy(error) {
-  if (!error || error.status === 0) {
-    return ['Waiting for the SamRabbit bridge…', 'The bridge on this Mac isn’t answering yet. SamRabbit keeps trying in the background.', ''];
-  }
-  if (error.syncMissing) {
-    return ['Conversation sync isn’t on yet', 'This bridge doesn’t serve conversations yet. SamRabbit keeps checking; updating the bridge turns it on:', 'companion/mac-bridge/install.sh'];
-  }
-  if (error.status === 401 || error.status === 403) {
-    return ['SamRabbit can’t sign in to the bridge', 'The desktop token was not accepted. Reinstall the desktop app, then reopen SamRabbit:', 'companion/desktop/install.sh'];
-  }
-  return ['Sync is having trouble', `The bridge answered with an error (HTTP ${error.status}). SamRabbit keeps retrying.`, ''];
-}
-
-function showState(node) {
-  if (!node) {
-    els.state.hidden = true;
-    els.state.replaceChildren();
-    els.timeline.hidden = false;
-    return;
-  }
-  els.timeline.hidden = true;
-  els.state.hidden = false;
-  els.state.replaceChildren(node);
-}
-
-function renderMain() {
-  if (state.listStatus === 'error' && !store.byId.size) {
-    const [title, text, code] = errorCopy(state.listError);
-    showState(heroState({
-      title, text, code, tone: 'error',
-      actions: [h('button', { class: 'btn', type: 'button', onclick: () => loadList({ manual: true }) }, icon('refresh', { size: 14 }), 'Retry now')],
-    }));
-    renderFoot();
-    return;
-  }
-  if (state.listStatus === 'loading' && !store.byId.size) {
-    showState(h('div', { class: 'loading-state' }, h('div', { class: 'spinner big' })));
-    return;
-  }
-  if (!store.byId.size) {
-    showState(heroState({
-      title: 'Your R1 conversations live here',
-      text: 'Talk to your Rabbit R1 and every conversation shows up here as it happens: what you said, the answers, cards, screenshots, photos and the UIs it builds on your Mac. Nothing gets lost.',
-      chips: [['mic', 'Live transcripts'], ['monitor', 'Screenshots & photos'], ['sparkles', 'Generated UIs'], ['code', 'T3 updates']],
-    }));
-    renderFoot();
-    return;
-  }
-  const c = selectedSummary();
-  if (!c) {
-    showState(h('div', { class: 'pick-state' }, icon('chevronRight', { size: 18 }), h('span', { text: 'Pick a conversation' })));
-    renderFoot();
-    return;
-  }
-  const timeline = store.timeline(c.conversationId);
-  if (!timeline.loaded) {
-    if (timeline.error) {
-      showState(h('div', { class: 'inline-error' }, icon('alert', { size: 16 }),
-        h('span', { text: 'This conversation could not be loaded.' }),
-        h('button', { class: 'btn small', type: 'button', onclick: () => openTimeline(c.conversationId) }, 'Try again')));
-    } else {
-      showState(h('div', { class: 'timeline-skeleton' },
-        h('div', { class: 'sk-bubble right' }), h('div', { class: 'sk-bubble' }), h('div', { class: 'sk-bubble wide' }),
-        h('div', { class: 'sk-bubble right short' })));
-    }
-    renderFoot();
-    return;
-  }
-  renderTimeline();
-  renderFoot();
-}
-
-function nearBottom() {
-  const s = els.scroller;
-  return s.scrollHeight - s.scrollTop - s.clientHeight < 160;
-}
-
-function stickToBottom(smooth = false) {
-  const s = els.scroller;
-  if (smooth) s.scrollTo({ top: s.scrollHeight, behavior: 'smooth' });
-  else s.scrollTop = s.scrollHeight;
-  els.jump.hidden = true;
-}
-
-let pendingScrollToBottom = false;
-
-function renderTimeline() {
-  const c = selectedSummary();
-  if (!c) return;
-  const timeline = store.timelines.get(c.conversationId);
-  if (!timeline || !timeline.loaded) return;
-  if (!timeline.sorted().length) {
-    showState(h('div', { class: 'pick-state' }, icon('mic', { size: 18 }),
-      h('span', { text: c.live ? 'Listening on your R1…' : 'Nothing was said in this conversation.' })));
-    return;
-  }
-  if (!els.state.hidden) showState(null);
-  const wasNear = nearBottom();
-  const before = els.timeline.childElementCount;
-  view.render(timeline, { live: c.live });
-  if (pendingScrollToBottom || wasNear) {
-    pendingScrollToBottom = false;
-    stickToBottom();
-  } else if (els.timeline.childElementCount > before) {
-    els.jump.hidden = false;
-  }
-}
-
-// ---------------------------------------------------------------------------- selection and loading
-
-function setHash(id) {
-  const hash = id ? `#c=${encodeURIComponent(id)}` : '';
-  if (location.hash !== hash) history.replaceState(null, '', `${location.pathname}${location.search}${hash}`);
-}
-
-function hashId() {
-  const match = /^#c=(.+)$/.exec(location.hash);
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
-/**
- * Applies every event after the timeline's cursor, page by page, until the bridge says there is no
- * more (each page must advance the cursor, so this always ends). Returns whether anything changed.
- */
-async function fetchEvents(timeline, id) {
-  let changed = false;
-  for (;;) {
-    const after = timeline.cursor;
-    const body = await api.events(id, after ?? undefined);
-    for (const event of (body && Array.isArray(body.events) ? body.events : [])) changed = timeline.apply(event) || changed;
-    if (body && body.cursor != null) timeline.cursor = body.cursor;
-    if (!pageHasMore(body, after)) return changed;
-  }
-}
-
-async function openTimeline(id) {
-  const timeline = store.timeline(id);
-  if (timeline.loading) return timeline.loading;
-  timeline.error = null;
-  schedule('main');
-  timeline.loading = (async () => {
+    current = id;
+    views[id].el.hidden = false;
     try {
-      await fetchEvents(timeline, id);
-      timeline.loaded = true;
-    } catch (error) {
-      timeline.error = error;
-    } finally {
-      timeline.loading = null;
+      localStorage.setItem('samrabbit.view', id);
+    } catch {
+      // private mode
     }
-    if (state.selectedId === id) {
-      pendingScrollToBottom = true;
-      schedule('main', 'head', 'foot');
-    }
-  })();
-  return timeline.loading;
+    renderNav();
+    views[id].shown?.(options);
+  } else if (Object.keys(options).length) {
+    views[id].shown?.(options);
+  }
+  requestAnimationFrame(() => reportDragExclusions());
 }
 
-function select(id, { user = false } = {}) {
-  if (user) state.lastInteraction = Date.now();
-  if (!id || !store.get(id)) return;
-  if (state.selectedId === id) {
-    if (user) stickToBottom(true);
-    return;
-  }
-  state.selectedId = id;
+function initialView() {
+  const asked = params.get('view');
+  if (VIEW_IDS.includes(asked)) return asked;
+  if (/^#c=/.test(location.hash)) return 'chats';
   try {
-    localStorage.setItem('samrabbit.selected', id);
+    const remembered = localStorage.getItem('samrabbit.view');
+    if (VIEW_IDS.includes(remembered)) return remembered;
   } catch {
     // private mode
   }
-  setHash(id);
-  view.reset();
-  els.jump.hidden = true;
-  pendingScrollToBottom = true;
-  const timeline = store.timeline(id);
-  if (!timeline.loaded) openTimeline(id);
-  else if (!timeline.loading) refreshTimeline(id);
-  schedule('list', 'head', 'main', 'foot');
+  return 'home';
 }
 
-/** Fetches anything after the timeline's cursor (after a stream gap). */
-async function refreshTimeline(id) {
-  const timeline = store.timelines.get(id);
-  if (!timeline || !timeline.loaded || timeline.loading || timeline.refreshing) return;
-  timeline.refreshing = true;
-  try {
-    const changed = await fetchEvents(timeline, id);
-    if (changed && state.selectedId === id) schedule('timeline', 'foot');
-  } catch {
-    // the next stream event or list refresh tries again
-  } finally {
-    timeline.refreshing = false;
-  }
+// ---------------------------------------------------------------------------- the sidebar
+
+const navOrb = createOrb({ size: 54, energy: 0.14, speed: 0.9, className: 'nav-orb' });
+$('nav-brand').append(navOrb, h('div', { class: 'nav-brand-text' },
+  h('div', { class: 'brand-name', text: 'SamRabbit' }),
+  h('div', { class: 'brand-sub', id: 'brand-sub', text: 'On your Mac' })));
+$('nav-talk').append(talk.button);
+
+const navButtons = new Map();
+for (const view of VIEWS) {
+  const badge = h('span', { class: 'nav-badge', hidden: true });
+  const button = h('button', {
+    class: 'nav-item', type: 'button', role: 'tab', dataset: { view: view.id },
+    title: `${view.label}  ⌘${view.key}`,
+    onclick: () => show(view.id),
+  }, h('span', { class: 'nav-icon' }, icon(view.icon, { size: 17 })), h('span', { class: 'nav-label', text: view.label }), badge,
+  h('kbd', { class: 'nav-kbd', text: `⌘${view.key}` }));
+  navButtons.set(view.id, { button, badge });
+  $('nav-items').append(button);
 }
 
-function chooseInitial() {
-  if (state.initialSelectionDone || !store.byId.size) return;
-  state.initialSelectionDone = true;
-  let remembered = null;
-  try {
-    remembered = localStorage.getItem('samrabbit.selected');
-  } catch {
-    remembered = null;
-  }
-  const live = store.list().find((c) => c.live);
-  const candidates = [hashId(), live && live.conversationId, remembered, store.list()[0].conversationId];
-  const id = candidates.find((candidate) => candidate && store.get(candidate));
-  if (id) select(id);
-}
-
-let listTimer = 0;
-
-async function loadList({ manual = false, quiet = false } = {}) {
-  clearTimeout(listTimer);
-  if (manual) {
-    state.listStatus = store.byId.size ? state.listStatus : 'loading';
-    schedule('main', 'status');
-  }
-  try {
-    const body = await api.conversations({ limit: PAGE });
-    const list = body && Array.isArray(body.conversations) ? body.conversations : [];
-    store.mergeList(list);
-    if (state.pageBefore == null) {
-      // The first page sets where "older" starts; later refreshes of the newest page never move it.
-      state.pageBefore = nextBefore(body, list);
-      state.hasMore = list.length >= PAGE;
-    }
-    const wasError = state.listStatus === 'error';
-    state.listStatus = 'ok';
-    state.listError = null;
-    state.listAttempt = 0;
-    postNative({ type: 'status', api: 'ok', conversations: store.byId.size, live: store.list().filter((c) => c.live).length });
-    chooseInitial();
-    if (wasError && state.selectedId) openTimeline(state.selectedId);
-    schedule('list', 'status', 'head', 'main', 'foot');
-  } catch (error) {
-    if (!(error instanceof ApiError)) throw error;
-    if (!quiet || !store.byId.size) {
-      state.listStatus = 'error';
-      state.listError = error;
-    }
-    postNative({ type: 'status', api: error.syncMissing ? 'sync-missing' : 'error', status: error.status, code: error.code || '' });
-    const delay = RETRY_MS[Math.min(state.listAttempt, RETRY_MS.length - 1)];
-    state.listAttempt += 1;
-    listTimer = setTimeout(() => loadList({ quiet: true }), delay);
-    schedule('list', 'status', 'main', 'foot');
-  }
-}
-
-/** Where the page after `body` starts: the bridge's nextBefore, else the last row's lastAt (ms). */
-function nextBefore(body, list) {
-  const last = list[list.length - 1];
-  const value = toMs(body && body.nextBefore) ?? (last ? toMs(last.lastAt) ?? toMs(last.startedAt) : null);
-  return value == null ? null : Math.floor(value); // the bridge takes whole epoch ms
-}
-
-async function loadMore() {
-  // Pages follow their own boundary, not the oldest conversation on screen: a search can bring in a
-  // much older one, and paging from it would skip everything in between.
-  if (state.loadingMore || state.pageBefore == null) return;
-  state.loadingMore = true;
-  schedule('list');
-  try {
-    const body = await api.conversations({ limit: PAGE, before: state.pageBefore });
-    const page = body && Array.isArray(body.conversations) ? body.conversations : [];
-    store.mergeList(page);
-    const next = nextBefore(body, page);
-    state.hasMore = page.length >= PAGE && next != null && next < state.pageBefore;
-    if (next != null) state.pageBefore = Math.min(state.pageBefore, next);
-  } catch {
-    toast('Could not load older conversations');
-  } finally {
-    state.loadingMore = false;
-    schedule('list');
-  }
-}
-
-let refreshListTimer = 0;
-function scheduleListRefresh(delay = 1500) {
-  clearTimeout(refreshListTimer);
-  refreshListTimer = setTimeout(() => loadList({ quiet: true }), delay);
-}
-
-// ---------------------------------------------------------------------------- live stream
-
-function onStreamEvent(event) {
-  const result = store.applyEvent(event);
-  if (!result) return;
-  const id = result.conversationId;
-  if (result.isNew || event.type === 'conversation.started' || event.type === 'conversation.ended') scheduleListRefresh();
-  if (result.summaryChanged) schedule('list', 'status');
-  if (id === state.selectedId) {
-    if (result.summaryChanged) schedule('head', 'foot');
-    if (result.timelineChanged) schedule('timeline', 'foot');
-  }
-  if (result.isNew || event.type === 'conversation.started') follow(id);
-  if (!state.initialSelectionDone) {
-    state.listStatus = state.listStatus === 'loading' ? 'ok' : state.listStatus;
-    chooseInitial();
-    schedule('main');
-  }
-}
-
-function follow(id) {
-  if (id === state.selectedId) return;
-  const current = selectedSummary();
-  const idle = Date.now() - state.lastInteraction > FOLLOW_IDLE_MS;
-  if (!current || (!current.live && idle)) {
-    select(id);
-    return;
-  }
-  toast('New conversation on your R1', { action: { label: 'View', run: () => select(id, { user: true }) }, timeout: 8000 });
-}
-
-const stream = new SyncStream({
-  onEvent: onStreamEvent,
-  onState: (value) => {
-    state.streamState = value;
-    schedule('status');
-  },
-  onResume: () => {
-    scheduleListRefresh(200);
-    if (state.selectedId) refreshTimeline(state.selectedId);
-  },
-});
-
-// ---------------------------------------------------------------------------- overlays
-
-function closeOverlay() {
-  const open = [...els.overlays.children].filter((el) => !el.classList.contains('closing'));
-  const top = open[open.length - 1];
-  if (!top) return false;
-  top.classList.add('closing');
-  setTimeout(() => top.remove(), 160);
-  return true;
-}
-
-function openImage(item) {
-  const src = api.blobUrl(item.blobId);
-  const image = h('img', { class: 'lightbox-img', src, alt: item.caption || 'Image' });
-  const label = item.source === 'camera' ? 'R1 camera' : item.source === 'mac_screenshot' ? 'Mac screenshot' : 'Image';
-  const overlay = h('div', { class: 'overlay lightbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': label },
-    h('div', { class: 'lightbox-stage' }, image),
-    h('div', { class: 'lightbox-bar' },
-      h('span', { text: label }),
-      item.width && item.height ? h('span', { class: 'dims', text: `${item.width}×${item.height}` }) : null,
-      h('span', { class: 'dims', text: stamp(item.at) })),
-    h('button', { class: 'overlay-close', type: 'button', title: 'Close (Esc)', onclick: closeOverlay }, icon('close', { size: 18 })));
-  overlay.addEventListener('click', (event) => {
-    if (event.target === image) {
-      overlay.classList.toggle('actual');
-      return;
-    }
-    if (!event.target.closest('.overlay-close')) closeOverlay();
-  });
-  els.overlays.append(overlay);
-}
-
-function openArtifact(item) {
-  const iframe = h('iframe', {
-    class: 'full-iframe', sandbox: 'allow-scripts', src: api.documentUrl(item.artifactId),
-    referrerpolicy: 'no-referrer', title: item.title || 'Generated UI',
-  });
-  iframe.dataset.artifactId = item.artifactId;
-  const known = state.frameHeights.get(item.artifactId);
-  if (known) iframe.style.height = `${known}px`;
-  const overlay = h('div', { class: 'overlay sheet', role: 'dialog', 'aria-modal': 'true' },
-    h('div', { class: 'sheet-panel' },
-      h('header', { class: 'sheet-head' },
-        h('div', { class: 'ui-icon' }, icon('sparkles', { size: 16 })),
-        h('div', { class: 'ui-titles' },
-          h('div', { class: 'ui-eyebrow', text: 'Generated UI' }),
-          h('h3', { class: 'ui-title', text: item.title || 'Untitled UI' }),
-          item.summary ? h('div', { class: 'ui-summary', text: item.summary }) : null),
-        h('div', { class: 'ui-actions' },
-          h('button', { class: 'btn-ghost', type: 'button', onclick: (event) => copyHtml(item, event.currentTarget) }, icon('copy', { size: 14 }), h('span', { text: 'Copy HTML' })),
-          h('button', { class: 'icon-btn', type: 'button', title: 'Close (Esc)', onclick: closeOverlay }, icon('close', { size: 16 })))),
-      h('div', { class: 'sheet-body' }, iframe)));
-  overlay.addEventListener('click', (event) => {
-    if (event.target === overlay) closeOverlay();
-  });
-  els.overlays.append(overlay);
-}
-
-// ---------------------------------------------------------------------------- actions
-
-function openExternal(url) {
-  let parsed;
-  try {
-    parsed = new URL(url, location.href);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-  if (!postNative({ type: 'open', url: parsed.href })) window.open(parsed.href, '_blank', 'noopener,noreferrer');
-}
-
-function openT3(item) {
-  const env = item && item.environmentId;
-  const thread = item && item.threadId;
-  openExternal(env && thread ? `${T3_URL}${encodeURIComponent(env)}/${encodeURIComponent(thread)}` : T3_URL);
-}
-
-async function copyText(text) {
-  if (postNative({ type: 'copy', text })) return true;
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    const area = h('textarea', { style: 'position:fixed;opacity:0;top:0;left:0' });
-    area.value = text;
-    document.body.append(area);
-    area.select();
-    let ok = false;
-    try {
-      ok = document.execCommand('copy');
-    } catch {
-      ok = false;
-    }
-    area.remove();
-    return ok;
-  }
-}
-
-async function copyHtml(item, button) {
-  try {
-    const html = await api.documentText(item.artifactId);
-    const ok = await copyText(html);
-    if (button) {
-      const label = button.querySelector('span');
-      if (label) {
-        const before = label.textContent;
-        label.textContent = ok ? 'Copied' : 'Failed';
-        setTimeout(() => {
-          label.textContent = before;
-        }, 1400);
-      }
-    }
-    toast(ok ? 'HTML copied to the clipboard' : 'Could not copy');
-  } catch {
-    toast('Could not fetch the UI document');
-  }
-}
-
-function toast(text, { action = null, timeout = 3200 } = {}) {
-  const node = h('div', { class: 'toast' }, h('span', { text }),
-    action ? h('button', {
-      class: 'toast-action', type: 'button',
-      onclick: () => {
-        action.run();
-        node.remove();
-      },
-    }, action.label) : null);
-  els.toasts.append(node);
-  while (els.toasts.childElementCount > 3) els.toasts.firstElementChild.remove();
-  setTimeout(() => {
-    node.classList.add('closing');
-    setTimeout(() => node.remove(), 200);
-  }, timeout);
-}
-
-// ---------------------------------------------------------------------------- diagnostics for the native log
-
-const diag = { images: 0, imagesFailed: 0, frames: new Set(), timer: 0 };
-function reportDiag() {
-  clearTimeout(diag.timer);
-  diag.timer = setTimeout(() => postNative({
-    type: 'diag', images: diag.images, imagesFailed: diag.imagesFailed, frames: diag.frames.size,
-  }), 800);
-}
-document.addEventListener('load', (event) => {
-  if (event.target && event.target.tagName === 'IMG' && event.target.closest('.shot, .lightbox')) {
-    diag.images += 1;
-    reportDiag();
-  }
-}, true);
-document.addEventListener('error', (event) => {
-  if (event.target && event.target.tagName === 'IMG') {
-    diag.imagesFailed += 1;
-    reportDiag();
-  }
-}, true);
-
-// ---------------------------------------------------------------------------- generated UI messages
-
-let lastLinkOpen = 0;
-const lastAsked = { href: '', at: 0 };
-
-/** A generated UI wants a link opened without a click we can vouch for: the user decides. */
-function askToOpen(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-  const now = Date.now();
-  if (lastAsked.href === parsed.href && now - lastAsked.at < 6000) return; // a widget retrying in a loop
-  lastAsked.href = parsed.href;
-  lastAsked.at = now;
-  toast(`This UI wants to open ${parsed.host}`, { action: { label: 'Open', run: () => openExternal(parsed.href) }, timeout: 6000 });
-}
-
-window.addEventListener('message', (event) => {
-  const data = event.data;
-  if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
-  let frameEl = null;
-  for (const candidate of document.querySelectorAll('iframe[data-artifact-id]')) {
-    if (candidate.contentWindow === event.source) {
-      frameEl = candidate;
-      break;
+function renderNav() {
+  for (const [id, { button, badge }] of navButtons) {
+    const selected = id === current;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (id === 'tasks') {
+      const { needsYou } = agents.counts();
+      badge.hidden = !needsYou;
+      badge.textContent = String(needsYou);
+      badge.className = 'nav-badge accent';
+    } else if (id === 'chats') {
+      const live = chats.store.list().some((c) => c.live);
+      badge.hidden = !live;
+      badge.textContent = '';
+      badge.className = 'nav-badge live-dot';
+      badge.title = live ? 'Live conversation' : '';
     }
   }
-  if (!frameEl) return;
-  if (data.type === 'widget-resize' || data.type === '__ogui_resize') {
-    const height = Math.max(60, Math.min(4000, Math.ceil(Number(data.height) || 0)));
-    const id = frameEl.dataset.artifactId;
-    if (Math.abs((state.frameHeights.get(id) || 0) - height) < 2 && frameEl.style.height === `${height}px`) return;
-    const wasNear = frameEl.classList.contains('ui-iframe') && nearBottom();
-    state.frameHeights.set(id, height);
-    frameEl.style.height = `${height}px`;
-    if (!diag.frames.has(id)) {
-      diag.frames.add(id);
-      reportDiag();
-    }
-    if (wasNear) stickToBottom();
-  } else if (data.type === 'open-link' && typeof data.url === 'string') {
-    // Only a click inside the generated UI (it then has focus) opens a link directly, at most once a
-    // second, and only while this window still has the focus: once a link opened, the browser has it,
-    // so a widget cannot keep opening tabs on a timer. Anything else has to be confirmed.
-    const now = Date.now();
-    if (document.hasFocus() && document.activeElement === frameEl && now - lastLinkOpen > 1000) {
-      lastLinkOpen = now;
-      openExternal(data.url);
-    } else {
-      askToOpen(data.url);
-    }
-  } else if (data.type === 'send-prompt' && typeof data.text === 'string') {
-    toast(`Ask your R1: “${clip(data.text, 90)}”`, { timeout: 5000 });
-  }
-});
-
-// ---------------------------------------------------------------------------- input
-
-let searchTimer = 0;
-els.search.addEventListener('input', () => {
-  state.query = els.search.value.trim();
-  state.lastInteraction = Date.now();
-  clearTimeout(searchTimer);
-  if (!state.query) {
-    state.searchIds = null;
-    schedule('list');
-    return;
-  }
-  schedule('list');
-  const query = state.query;
-  searchTimer = setTimeout(async () => {
-    try {
-      const body = await api.conversations({ q: query, limit: 50 });
-      if (state.query !== query) return;
-      const list = body && Array.isArray(body.conversations) ? body.conversations : [];
-      store.mergeList(list);
-      state.searchIds = list.map((c) => c.conversationId || c.id).filter(Boolean);
-      schedule('list');
-    } catch {
-      // local filtering still works
-    }
-  }, 220);
-});
-
-function moveSelection(step) {
-  const ids = visibleConversations().map((c) => c.conversationId);
-  if (!ids.length) return;
-  const index = ids.indexOf(state.selectedId);
-  const next = ids[Math.max(0, Math.min(ids.length - 1, index < 0 ? 0 : index + step))];
-  select(next, { user: true });
-  const button = els.list.querySelector(`[data-id="${CSS.escape(next)}"]`);
-  if (button) button.scrollIntoView({ block: 'nearest' });
+  const voice = nativeState().voice;
+  const active = voice && ['starting', 'listening', 'thinking', 'speaking'].includes(voice.state);
+  navOrb.orb.set(active
+    ? { energy: 0.25 + Math.min(1, Number(voice.level) || 0) * 0.6, speed: voice.state === 'speaking' ? 2.2 : 1.5 }
+    : { energy: agents.counts().working ? 0.2 : 0.12, speed: agents.counts().working ? 1.2 : 0.9 });
 }
+
+agents.on(() => renderNav());
+chats.onChange = () => {
+  renderNav();
+  views.home.chatsChanged?.();
+};
+onNative(() => renderNav());
+
+// ---------------------------------------------------------------------------- keys
 
 document.addEventListener('keydown', (event) => {
   const meta = event.metaKey || event.ctrlKey;
-  if (meta && (event.key === 'k' || event.key === 'f')) {
+  const typing = document.activeElement && (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)
+    || document.activeElement.isContentEditable);
+  if (meta && !event.shiftKey && !event.altKey && /^[1-5]$/.test(event.key)) {
     event.preventDefault();
-    els.search.focus();
-    els.search.select();
+    show(VIEWS[Number(event.key) - 1].id);
+    return;
+  }
+  if (meta && (event.key === 'k' || (event.key === 'f' && current === 'chats'))) {
+    event.preventDefault();
+    show('chats');
+    chats.focusSearch();
+    return;
+  }
+  if (meta && event.key === 'n') {
+    event.preventDefault();
+    show('tasks', { compose: true });
+    return;
+  }
+  if (meta && event.key === ',') {
+    event.preventDefault();
+    show('settings');
     return;
   }
   if (event.key === 'Escape') {
-    if (closeOverlay()) return;
-    if (document.activeElement === els.search && els.search.value) {
-      els.search.value = '';
-      els.search.dispatchEvent(new Event('input'));
-    } else {
-      els.search.blur();
-    }
+    if (closePopover() || closeOverlay()) return;
+  }
+  if (overlayOpen()) return;
+  if (views[current] && views[current].handleKey && views[current].handleKey(event)) return;
+  if (typing || meta || event.altKey) return;
+  if (event.key === 'Escape' && talk.visible()) {
+    talk.escape();
     return;
   }
-  const typing = document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName);
-  if (!typing && !els.overlays.childElementCount && (event.key === 'ArrowDown' || event.key === 'ArrowUp') && (event.altKey || meta)) {
+  // N anywhere (not typing): a new task, as in the dock.
+  if (keyName(event) === 'compose') {
     event.preventDefault();
-    moveSelection(event.key === 'ArrowDown' ? 1 : -1);
-  }
-  if (typing && document.activeElement === els.search && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-    event.preventDefault();
-    moveSelection(event.key === 'ArrowDown' ? 1 : -1);
+    show('tasks', { compose: true });
   }
 });
 
-els.scroller.addEventListener('scroll', () => {
-  if (nearBottom()) els.jump.hidden = true;
-}, { passive: true });
-els.jump.prepend(icon('arrowDown', { size: 13 }));
-els.jump.addEventListener('click', () => stickToBottom(true));
-window.addEventListener('hashchange', () => {
-  const id = hashId();
-  if (id && id !== state.selectedId) select(id, { user: true });
-});
 window.addEventListener('resize', () => reportDragExclusions());
 
 // ---------------------------------------------------------------------------- ticks
 
-setInterval(() => tickTimers(els.timeline), 1000);
-setInterval(() => schedule('list', 'status'), 30_000);
-setInterval(() => {
-  const c = selectedSummary();
-  const timeline = c && store.timelines.get(c.conversationId);
-  if (timeline && timeline.loaded) schedule('timeline', 'foot');
-}, 15_000);
-setInterval(() => {
-  if (state.listStatus === 'ok') loadList({ quiet: true });
-}, 60_000);
+setInterval(() => agents.tick(), 30_000);
+setInterval(() => renderNav(), 30_000);
 
-// ---------------------------------------------------------------------------- native API and boot
+// ---------------------------------------------------------------------------- the shell's API and boot
 
 window.SamRabbitApp = {
   openConversation(id) {
-    if (store.get(id)) select(id, { user: true });
-    else {
-      setHash(id);
-      scheduleListRefresh(0);
-      state.initialSelectionDone = false;
-    }
+    show('chats');
+    chats.openConversation(id);
   },
   refresh() {
-    loadList({ manual: true });
-    if (state.selectedId) refreshTimeline(state.selectedId);
+    chats.refresh();
+    agents.poller?.poke();
+    summary.refresh();
+    agenda.refresh();
   },
   summary() {
-    return { conversations: store.byId.size, selected: Boolean(state.selectedId), stream: state.streamState, list: state.listStatus };
+    return { ...chats.summary(), view: current, inbox: agents.connection, needsYou: agents.counts().needsYou };
   },
-  /** The native shell blocked a generated UI's own navigation to `url`; offer it instead. */
   confirmOpen(url) {
-    if (typeof url === 'string') askToOpen(url);
+    chats.confirmOpen(url);
+  },
+  /** ⌘1–⌘5 and Settings… from the app's menus: "home" | "tasks" | "chats" | "calendar" | "settings". */
+  show(view) {
+    show(view);
+  },
+  newTask() {
+    show('tasks', { compose: true });
+  },
+  focusSearch() {
+    show('chats');
+    chats.focusSearch();
+  },
+  /** The shell pushes MacVoice, the dock switch and the shortcuts here (MainWindowBridge.swift). */
+  native(patch) {
+    receiveNative(patch);
   },
 };
 
-schedule('list', 'status', 'main');
-stream.start();
-loadList();
+agents.start();
+summary.refresh();
+summary.start();
+agenda.refresh();
+agenda.start();
+show(initialView());
+renderNav();
 postNative({ type: 'ready' });
