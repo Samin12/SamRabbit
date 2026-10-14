@@ -88,6 +88,16 @@ final class DragStripView: NSView {
     }
 }
 
+/// The main window. `keepsOffscreen` is for the window snapshots only: AppKit moves a window that is off every display
+/// back onto one when it is ordered in, and that one must stay where nobody sees it.
+final class MainAppWindow: NSWindow {
+    var keepsOffscreen = false
+
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        keepsOffscreen ? frameRect : super.constrainFrameRect(frameRect, to: screen)
+    }
+}
+
 /// Forwards script messages without retaining the controller (WKUserContentController keeps handlers alive).
 final class ScriptMessageProxy: NSObject, WKScriptMessageHandler {
     weak var target: WKScriptMessageHandler?
@@ -112,16 +122,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
     private var loaded = false
     private var loading = false
     private var pendingConversation: String?
+    /// App calls (`window.SamRabbitApp.…`) asked for before the page loaded; run once it has.
+    private var pendingCalls: [String] = []
     private var lastBlockedLog = Date.distantPast
     var onPageStatus: (([String: Any]) -> Void)?
+    /// Talk and Settings: the page and MacVoice, the dock's switch, the native windows (MainWindowBridge.swift).
+    private(set) var bridge: MainWindowBridge!
 
-    init() {
+    /// `live: false` for `--render-window-snapshots` (the bridge then opens no other window and leaves the dock be).
+    init(live: Bool = true) {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.suppressesIncrementalRendering = false
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         webView = WKWebView(frame: .zero, configuration: configuration)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1220, height: 800),
+        let window = MainAppWindow(contentRect: NSRect(x: 0, y: 0, width: 1220, height: 800),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         super.init(window: window)
@@ -144,6 +159,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
         controller.addUserScript(WKUserScript(source: nativeInfoScript(), injectionTime: .atDocumentStart, forMainFrameOnly: true))
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        bridge = MainWindowBridge(webView: webView, live: live)
         webView.setValue(false, forKey: "drawsBackground")
         webView.underPageBackgroundColor = window.backgroundColor
         webView.allowsBackForwardNavigationGestures = false
@@ -213,7 +229,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
 
     func windowWillClose(_ notification: Notification) { Log.write("window closed (SamRabbit keeps running in the menu bar)") }
     func windowDidResize(_ notification: Notification) { layoutTrafficLights() }
-    func windowDidBecomeKey(_ notification: Notification) { layoutTrafficLights() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        layoutTrafficLights()
+        bridge.windowBecameKey()
+    }
     func windowDidResignKey(_ notification: Notification) { layoutTrafficLights() }
     func windowDidExitFullScreen(_ notification: Notification) { layoutTrafficLights() }
 
@@ -327,7 +346,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
     }
 
     func focusSearch() {
-        webView.evaluateJavaScript("(function(){var s=document.getElementById('search');if(s){s.focus();s.select();}})()")
+        call("focusSearch()")
+    }
+
+    /// ⌘1–⌘5 and Settings… from the menus: "home" | "tasks" | "chats" | "calendar" | "settings".
+    func showView(_ view: String) {
+        call("show(\(jsString(view)))")
+    }
+
+    /// New Task (⌘N): Tasks with the composer open.
+    func newTask() {
+        call("newTask()")
+    }
+
+    /// Runs `window.SamRabbitApp.<call>` now, or once the page has loaded.
+    private func call(_ call: String) {
+        let script = "window.SamRabbitApp && window.SamRabbitApp.\(call)"
+        if loaded {
+            webView.evaluateJavaScript(script)
+        } else if !pendingCalls.contains(script) {
+            pendingCalls.append(script)
+        }
     }
 
     // MARK: WKNavigationDelegate
@@ -381,10 +420,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
         waiting.retrying = false
         hosting.isHidden = true
         Log.write("page loaded")
+        let calls = pendingCalls
+        pendingCalls = []
+        for script in calls { webView.evaluateJavaScript(script) }
         if let id = pendingConversation {
             pendingConversation = nil
             openConversation(id)
         }
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // A new page (a reload, the bridge back after a restart): it says when it is ready for the native state.
+        bridge.pageGone()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -403,6 +450,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         Log.write("web content process ended; reloading")
+        bridge.pageGone()
         loaded = false
         attemptLoad()
     }
@@ -420,6 +468,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame, let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        if type == "ready" { onPageStatus?(body) }
+        if bridge.handle(body) { return }
         switch type {
         case "open":
             if let text = body["url"] as? String, let url = URL(string: text) { openExternal(url) }
@@ -435,7 +485,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
                               height: values[3].doubleValue)
             }
             dragStrip.passThrough = rects
-        case "status", "diag", "ready":
+        case "status", "diag":
             onPageStatus?(body)
         case "pairPhone":
             AppModel.shared.openPairing()
