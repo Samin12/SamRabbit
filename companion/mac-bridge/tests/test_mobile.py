@@ -531,7 +531,10 @@ class SummaryTest(MobileBase):
         status, value = self.call("GET", "/v1/mobile/summary", token=phone)
         self.assertEqual(200, status, value)
         self.assertEqual({"generatedAt", "mac", "r1", "t3", "calendar", "latestConversation", "journal", "transcribe",
-                          "assistant"}, set(value))
+                          "assistant", "captures", "briefing"}, set(value))
+        self.assertEqual({"available": True, "recent": [], "failed": 0, "pending": 0, "notes": 0}, value["captures"],
+                         "voice notes (none yet; test_capture.py has them)")
+        self.assertFalse(value["briefing"]["available"], "no brief on this test bridge (test_briefing.py has one)")
         self.assertEqual({"available": False, "reason": "assistant_missing"}, value["assistant"],
                          "no assistant on this test bridge (test_assistant.py has one)")
         self.assertEqual({"available": False, "reason": "helper_missing"}, value["transcribe"],

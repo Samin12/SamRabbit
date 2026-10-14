@@ -208,8 +208,13 @@ class CalendarRoutesTest(unittest.TestCase):
         self.assertEqual("primary", value["calendarId"])
         self.assertEqual("samin@aianswer.us", value["account"])
         [call] = self.calls()
-        self.assertEqual(["execute", "GOOGLECALENDAR_CREATE_EVENT", "-d", "-"], call["argv"],
-                         "the event never travels on argv")
+        self.assertEqual(["execute", "GOOGLECALENDAR_CREATE_EVENT", "-d", "-", "--account", gcal.DEFAULT_CONNECTION],
+                         call["argv"], "the event never travels on argv; the connection is always named")
+        self.assertEqual("googlecalendar_awest-hug", call["account"], "the samin@aianswer.us connection")
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(call["tmpdir"]),
+                         "the call's own private folder is its TMPDIR")
+        self.assertNotEqual(os.environ.get("TMPDIR"), call["tmpdir"])
+        self.assertFalse(os.path.exists(call["cwd"]), "and it is gone after the call")
         self.assertEqual({"calendar_id": "primary", "summary": TITLE, "start_datetime": "2026-10-08T10:33:00-04:00",
                           "end_datetime": "2026-10-08T11:03:00-04:00", "timezone": "America/New_York",
                           "description": DESCRIPTION, "location": "Home office", "create_meeting_room": False,

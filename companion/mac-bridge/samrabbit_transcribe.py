@@ -272,15 +272,16 @@ def audio_seconds(kind: str, data: bytes) -> Optional[float]:
         return None
 
 
-def check_audio(data: bytes, declared: str) -> Tuple[str, Optional[float]]:
-    """``(container, seconds)`` for a body; 415 when it is not audio we read, 413 when it is too long. A container
-    other than the declared one is accepted (an m4a sent as audio/aac is still an m4a); the bytes decide."""
+def check_audio(data: bytes, declared: str, *, max_seconds: int = MAX_AUDIO_SECONDS) -> Tuple[str, Optional[float]]:
+    """``(container, seconds)`` for a body; 415 when it is not audio we read, 413 when it is longer than
+    ``max_seconds`` (90 s; a voice note's capture allows 300). A container other than the declared one is accepted (an
+    m4a sent as audio/aac is still an m4a); the bytes decide."""
     kind = sniff(data)
     if kind is None:
         raise TranscribeError(415, "unsupported_audio", "The body is not an m4a, WAV or AAC recording.")
     seconds = audio_seconds(kind, data)
-    if seconds is not None and seconds > MAX_AUDIO_SECONDS + LENGTH_SLACK_SECONDS:
-        raise TranscribeError(413, "audio_too_long", _FAILURES["audio_too_long"][1])
+    if seconds is not None and seconds > max_seconds + LENGTH_SLACK_SECONDS:
+        raise TranscribeError(413, "audio_too_long", f"Recordings can be at most {max_seconds} seconds.")
     if declared != kind:
         _LOG.info("transcription body is %s, sent as %s", kind, declared)
     return kind, seconds
@@ -603,8 +604,12 @@ class Transcriber:
         _LOG.info("speech model download %s", outcome)
 
     # ------------------------------------------------------------------ the route
-    def transcribe(self, data: bytes, kind: str, language: str = DEFAULT_LANGUAGE) -> Dict[str, Any]:
-        """``{text, durationMs, engine, locale}`` for a checked body (``check_audio``); TranscribeError otherwise."""
+    def transcribe(self, data: bytes, kind: str, language: str = DEFAULT_LANGUAGE, *,
+                   max_seconds: int = MAX_AUDIO_SECONDS, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """``{text, durationMs, engine, locale}`` for a checked body (``check_audio``); TranscribeError otherwise.
+        ``max_seconds`` / ``timeout``: a longer recording's own limits (a voice note: up to 300 s, its timeout scaled
+        with its length); the defaults are the watch's and the phone's 90 s and 45 s."""
+        limit = self._timeout if timeout is None else max(1.0, float(timeout))
         if self.executable() is None:
             raise unavailable("helper_missing")
         if not self._slots.acquire(timeout=self._busy_wait):
@@ -624,11 +629,11 @@ class Transcriber:
                 except OSError:
                     raise _not_stored() from None
                 process = self._start(["--file", path, "--locale", language, "--max-seconds",
-                                       str(MAX_AUDIO_SECONDS), "--deadline", helper_deadline(self._timeout)], folder)
+                                       str(int(max_seconds)), "--deadline", helper_deadline(limit)], folder)
                 with self._lock:
                     self._running[folder] = process
                 try:
-                    answer = self._finish(process, self._timeout)
+                    answer = self._finish(process, limit)
                 except subprocess.TimeoutExpired:
                     raise TranscribeError(504, "transcribe_failed", "Transcribing took too long on the Mac.",
                                           retryable=True) from None

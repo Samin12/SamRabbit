@@ -237,6 +237,10 @@ install -m 0644 "$SOURCE_DIR/samrabbit_chatgpt.py" "$APP_DIR/samrabbit_chatgpt.p
 install -m 0644 "$SOURCE_DIR/samrabbit_realtime.py" "$APP_DIR/samrabbit_realtime.py"  # the realtime brain
 install -m 0644 "$SOURCE_DIR/samrabbit_realtime_profile.py" "$APP_DIR/samrabbit_realtime_profile.py"  # the R1's words
 install -m 0644 "$SOURCE_DIR/samrabbit_inbox.py" "$APP_DIR/samrabbit_inbox.py"  # the Agent Dock's inbox
+install -m 0644 "$SOURCE_DIR/samrabbit_composio.py" "$APP_DIR/samrabbit_composio.py"  # the Composio runner
+install -m 0644 "$SOURCE_DIR/samrabbit_claude.py" "$APP_DIR/samrabbit_claude.py"  # isolated claude -p answers
+install -m 0644 "$SOURCE_DIR/samrabbit_capture.py" "$APP_DIR/samrabbit_capture.py"  # quick voice notes
+install -m 0644 "$SOURCE_DIR/samrabbit_briefing.py" "$APP_DIR/samrabbit_briefing.py"  # the morning brief
 mkdir -p "$APP_DIR/realtime"
 install -m 0644 "$SOURCE_DIR/realtime/samrabbit_realtime_peer.py" "$APP_DIR/realtime/samrabbit_realtime_peer.py"
 install -m 0644 "$SOURCE_DIR/realtime/requirements.txt" "$APP_DIR/realtime/requirements.txt"
