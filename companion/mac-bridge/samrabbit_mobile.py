@@ -13,7 +13,9 @@ Routes (CONTRACTS-WAVE4 "Mobile API"):
   ``POST /v1/mobile/unpair`` (a device forgets itself).
 * ``GET /v1/mobile/summary``: the dashboard for widgets and complications, assembled from caches that a background
   worker keeps warm while a device is active (T3 every ~10 s, calendar every 120 s), including
-  ``transcribe: {available, reason?}`` (can the phone and the watch send recordings to the Mac?).
+  ``transcribe: {available, reason?}`` (can the phone and the watch send recordings to the Mac?), ``captures:
+  {recent, failed, pending, notes}`` (voice notes, ``samrabbit_capture``) and ``briefing: {available, date, status,
+  revision, headline, needsYou}`` (the morning brief, ``samrabbit_briefing``).
 * R1 conversations, reusing ``samrabbit_sync``'s desktop handlers: ``GET /v1/mobile/conversations``,
   ``/conversations/<id>[/events]``, ``/stream`` (SSE), ``/blobs/<sha256>``; generated UIs:
   ``GET /v1/mobile/ui/artifacts/<id>[/image|/document]`` and ``POST /v1/mobile/ui/generate {prompt, data?}``
@@ -929,6 +931,30 @@ class MobileService:
             return MobileError(403, "forbidden", "The assistant's tools cannot use this route.")
         return None
 
+    def caller(self, handler: Any, surface: str) -> Dict[str, Any]:
+        """Who calls a route another module serves under three prefixes (voice notes, the morning brief):
+        ``mobile`` (``/v1/mobile/…``: a paired phone or watch, ``device_denied``), ``desktop`` (``/v1/desktop/…``: the
+        Mac app, ``desktop_denied``) or ``r1`` (``/v1/…``: the bridge token from a private-LAN peer). Returns
+        ``{surface, source: iphone | watch | mac | r1, device}``; raises the error to answer otherwise."""
+        if surface == "r1":
+            check = getattr(self.server, "bridge_token_denied", None)
+            denied = check(handler) if callable(check) else MobileError(503, "unavailable", "Not set up on the bridge.")
+            if denied is not None:
+                raise denied
+            return {"surface": surface, "source": "r1", "device": "r1"}
+        if surface == "desktop":
+            denied = self.desktop_denied(handler)
+            if denied is not None:
+                raise denied
+            return {"surface": surface, "source": "mac", "device": "mac"}
+        denied = self.device_denied(handler)
+        if denied is not None:
+            raise denied
+        scheme, _, value = str(handler.headers.get("Authorization", "")).partition(" ")
+        device = self.devices.authenticate(value.strip()) if scheme.lower() == "bearer" else None
+        return {"surface": surface, "source": "watch" if (device or {}).get("platform") == "watchos" else "iphone",
+                "device": (device or {}).get("deviceId") or "phone"}
+
     def _authorize(self, handler: Any, auth: str) -> Optional[Dict[str, Any]]:
         if auth == PUBLIC:
             return None
@@ -1208,6 +1234,8 @@ class MobileService:
                            else {})},
             "transcribe": self._transcribe_part(parts["transcribe"]),
             "assistant": self._assistant_part(),
+            "captures": self._service_part("capture"),
+            "briefing": self._service_part("briefing"),
         }
         value["r1"], value["latestConversation"] = self._r1_part()
         with self._lock:
@@ -1233,6 +1261,23 @@ class MobileService:
         reason = value.get("reason")
         return {"available": available,
                 **({"reason": reason} if not available and isinstance(reason, str) and reason else {})}
+
+    def _service_part(self, name: str) -> Dict[str, Any]:
+        """``captures`` / ``briefing``: what the voice notes and the morning brief services say (cheap: their own
+        stored state, never a build or a network call)."""
+        service = getattr(self.server, name, None)
+        if service is None or not hasattr(service, "summary_part"):
+            return {"available": False}
+        try:
+            return dict(service.summary_part())
+        except Exception:  # noqa: BLE001 - never fails the summary
+            _LOG.warning("mobile summary: %s part failed", name)
+            return {"available": False, "reason": "check_failed"}
+
+    def summary_changed(self) -> None:
+        """Something the summary shows changed (a voice note finished, the brief was rebuilt): the next one is new."""
+        with self._lock:
+            self._summary = None
 
     def _assistant_part(self) -> Dict[str, Any]:
         """``{available, brain, reason?, model, chatgpt: {connected}}``: can the watch talk to the assistant?"""
@@ -1561,6 +1606,10 @@ class MobileService:
             self._agenda.clear()
             self._cache.pop("calendar", None)
             self._summary = None
+
+    def calendar_changed(self) -> None:
+        """Another module (a voice note, the morning brief) changed the calendar: the agenda is read again."""
+        self._calendar_changed()
 
     def _r_agenda(self, handler: Any, _params: Dict[str, str], _device: Any, _route: str) -> Tuple[int, Any]:
         """``?hours=`` (the phone; default 24, from now) or ``?days=`` (the SamRabbit window's agenda by day: today

@@ -26,6 +26,10 @@ Sources (each optional; one that fails never empties the others):
   "may be waiting" for Samin, unless the turn runs with approvals off (``approval_policy: never``).
 * **SamRabbit chats**: the sync store's 6 most recent conversations (R1, Watch, iPhone, Mac), ``working`` while a
   reply is being made.
+* **Voice notes** that were saved as notes (``samrabbit_capture``; the last 3 days, not dismissed): ``note:<captureId>``,
+  ``needs-input`` while their suggestion ("Start it as a T3 task?") is unseen, ``error`` when the Mac could not hear
+  them; ``can`` is ``act`` (do the suggestion, or ``{action}``), ``dismiss`` and ``seen``, all handled by the capture
+  service.
 
 Claude and Codex sessions count only when written in the last 3 days. ``live`` (an interactive CLI owns the session
 right now) comes from Claude Code's registry (its pids checked with ``ps -p`` at most every 5 s), else ``ps -ax`` (the
@@ -163,7 +167,7 @@ _MOBILE = {"needs_approval": NEEDS_APPROVAL, "needs_input": NEEDS_INPUT, "workin
 ACTIONS = ("approve", "answer", "reply", "stop", "seen", "open")
 AGENT_DRIVERS = {"claude": "claudeAgent", "codex": "codex"}
 AGENT_LABELS = {"claude": "Claude", "codex": "Codex"}
-_ITEM_ID = re.compile(r"^(t3|claude|codex|chat):([A-Za-z0-9][A-Za-z0-9._:\-]{0,190})$")
+_ITEM_ID = re.compile(r"^(t3|claude|codex|chat|note):([A-Za-z0-9][A-Za-z0-9._:\-]{0,190})$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _DAY = re.compile(r"^\d{1,4}$")
@@ -1395,7 +1399,7 @@ ROUTES: Tuple[_Route, ...] = tuple(
         _Route(prefix + "/new", prefix + "/new", {"POST": "new"}),
         _Route(prefix + "/items/" + _ID, prefix + "/items/{id}", {"GET": "item"}),
         # ``open`` matches on the phone's routes too, to say it is the Mac's (409 unsupported_action).
-        _Route(prefix + "/items/" + _ID + r"/(?P<action>approve|answer|reply|stop|seen|open)",
+        _Route(prefix + "/items/" + _ID + r"/(?P<action>approve|answer|reply|stop|seen|open|act|dismiss)",
                prefix + "/items/{id}/{action}", {"POST": "action"}),
     ))
 
@@ -1536,7 +1540,8 @@ class InboxService:
             items: List[Dict[str, Any]] = []
             sources: Dict[str, Any] = {}
             for name, reader in (("t3", self._t3_items), ("claude", self._claude_items),
-                                 ("codex", self._codex_items), ("samrabbit", self._chat_items)):
+                                 ("codex", self._codex_items), ("samrabbit", self._chat_items),
+                                 ("notes", self._note_items)):
                 try:
                     found, status = reader(now)
                 except Exception:  # noqa: BLE001 - one source never empties the others
@@ -1585,6 +1590,14 @@ class InboxService:
         with self._changed:
             self._state.built_at = -1e12
         self._wake.set()
+
+    def refresh_soon(self) -> None:
+        """Another module changed what a source shows (a voice note was saved): the next list is built fresh."""
+        self._changed_now()
+
+    def current_items(self) -> List[Dict[str, Any]]:
+        """The list as last built (never a refresh): for the morning brief's Agents section."""
+        return list(self._state.items)
 
     # ------------------------------------------------------------------ T3
     def _t3_items(self, now: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -1882,6 +1895,15 @@ class InboxService:
             })
         return items, {"available": True}
 
+    def _capture(self) -> Any:
+        return getattr(self.server, "capture", None)
+
+    def _note_items(self, now: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        service = self._capture()
+        if service is None:
+            return [], {"available": False}
+        return service.inbox_items(now), {"available": True}
+
     def _chat_messages(self, conversation_id: str) -> List[Dict[str, Any]]:
         store = self._store()
         if store is None:
@@ -2007,7 +2029,10 @@ class InboxService:
         item = self._find(source + ":" + key)
         if item is None:
             raise InboxError(404, "item_not_found", "That is not in the inbox.")
-        if source == "claude":
+        if source == "note":
+            service = self._capture()
+            messages = service.inbox_messages(key) if service is not None else []
+        elif source == "claude":
             record = self.claude.find(key)
             messages = self.claude.messages(record) if record is not None else []
         elif source == "codex":
@@ -2079,13 +2104,22 @@ class InboxService:
     def _r_action(self, handler: Any, params: Dict[str, str], mobile: bool) -> Tuple[int, Dict[str, Any]]:
         source, key = _parse_id(params["id"])
         action = params["action"]
-        body = _optional_body(handler) if action in ("stop", "seen", "open") else _json_body(handler)
+        body = _optional_body(handler) if action in ("stop", "seen", "open", "act", "dismiss") else _json_body(handler)
         item_id = source + ":" + key
         if action == "open" and mobile:
             # The phone never brings anything up on the Mac's screen: opening is the dock's and the window's.
             raise _unsupported("Open it on the Mac (the dock or the SamRabbit window).")
         if source == "t3":
             return self._t3_action(key, action, body)
+        if source == "note":  # a voice note: the capture service does what it says
+            service = self._capture()
+            if service is None or action not in ("act", "dismiss", "seen"):
+                raise _unsupported("A voice note can be acted on, dismissed or marked seen.")
+            status, value = service.inbox_action(key, action, body)
+            self._changed_now()
+            return status, value
+        if action in ("act", "dismiss"):
+            raise _unsupported("That item can't do that here.")
         item = self._find(item_id)
         if item is None:
             raise InboxError(404, "item_not_found", "That is not in the inbox.")

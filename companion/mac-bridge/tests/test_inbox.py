@@ -415,7 +415,7 @@ class ListTest(InboxBase):
         value = self.get_inbox()
         self.assertEqual({"revision", "updatedAt", "counts", "sources", "items"}, set(value))
         self.assertEqual({"t3": {"connected": True}, "claude": {"available": True}, "codex": {"available": True},
-                          "samrabbit": {"available": True}}, value["sources"])
+                          "samrabbit": {"available": True}, "notes": {"available": True}}, value["sources"])
         items = self.by_id(value)
         claude = {key: items.get("claude:" + IDS[key]) for key in IDS}
         codex = {key: items.get("codex:" + IDS[key]) for key in IDS}

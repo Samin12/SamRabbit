@@ -36,6 +36,13 @@ The iPhone gets the same inbox at ``/v1/mobile/inbox*`` (its mobile token; ``ope
 SamRabbit window the phone's summary, agenda, block time, journal note and device list at ``/v1/desktop/summary``,
 ``/v1/desktop/calendar/*``, ``/v1/desktop/journal`` and ``/v1/desktop/devices*`` (``samrabbit_mobile.py``).
 
+Quick voice notes (``samrabbit_capture.py``): ``POST /v1/capture`` (the R1, bridge token), ``/v1/mobile/capture`` (the
+phone and the watch) and ``/v1/desktop/capture`` (the Mac app): stored at once, then heard, routed (journal, T3 task,
+calendar, or a saved note) and recorded. The morning brief (``samrabbit_briefing.py``): ``GET /v1/briefing`` and its
+``/v1/mobile`` and ``/v1/desktop`` twins, built from Gmail (through Composio, drafts only: nothing is ever sent), the
+calendar and the inbox. Both share the Composio runner (``samrabbit_composio.py``) and the isolated ``claude -p``
+(``samrabbit_claude.py``).
+
 Every route needs ``Authorization: Bearer <token>`` (the token lives in
 ``~/.config/samrabbit/bridge-token``, mode 0600). Journal text and the token are
 never logged. Stdlib only; runs on the macOS system Python 3.9+.
@@ -110,6 +117,16 @@ try:  # the desktop app's Agent Dock (/v1/desktop/inbox*); optional so the bridg
     import samrabbit_inbox as inbox  # noqa: E402
 except Exception:  # noqa: BLE001  # pragma: no cover
     inbox = None  # type: ignore[assignment]
+
+try:  # quick voice notes (/v1/capture, /v1/{mobile,desktop}/capture*); optional so the bridge runs without it
+    import samrabbit_capture as capture  # noqa: E402
+except Exception:  # noqa: BLE001  # pragma: no cover
+    capture = None  # type: ignore[assignment]
+
+try:  # the morning brief (/v1/briefing, /v1/{mobile,desktop}/briefing*); optional so the bridge runs without it
+    import samrabbit_briefing as briefing  # noqa: E402
+except Exception:  # noqa: BLE001  # pragma: no cover
+    briefing = None  # type: ignore[assignment]
 
 VERSION = "1.2.0"
 SERVICE = "samrabbit-bridge"
@@ -539,7 +556,7 @@ class BridgeServer(ThreadingHTTPServer):
                  desktop_token_file: Optional[str] = None,
                  genui_service: Optional[genui.GenUiService] = None,
                  calendar_writer: Any = None, mobile_service: Any = None, installed_copy: bool = False,
-                 inbox_service: Any = None) -> None:
+                 inbox_service: Any = None, capture_service: Any = None, briefing_service: Any = None) -> None:
         self.token = token
         self.installed_copy = installed_copy  # the installed LaunchAgent copy (``is_installed_copy``), else a dev copy
         self.cli = cli
@@ -558,11 +575,16 @@ class BridgeServer(ThreadingHTTPServer):
             self.calendar = gcal.make_writer_or_unavailable() if installed_copy else _dev_calendar()
         self.mobile: Any = mobile_service  # samrabbit_mobile.MobileService (its worker starts in main() or tests)
         self.inbox: Any = inbox_service  # samrabbit_inbox.InboxService (its refresher starts in main() or tests)
+        self.capture: Any = capture_service  # samrabbit_capture.CaptureService (its worker starts in main() or tests)
+        self.briefing: Any = briefing_service  # samrabbit_briefing.BriefingService (its timer starts in main())
         super().__init__(address, BridgeHandler)
         if self.mobile is not None:
             self.mobile.attach(self)
         if self.inbox is not None:
             self.inbox.attach(self)
+        for service in (self.capture, self.briefing):
+            if service is not None:
+                service.attach(self)
         if sync is not None and sync_dir:
             try:
                 self.sync = sync.SyncService(sync_dir, desktop_token_file or sync.DEFAULT_DESKTOP_TOKEN_FILE,
@@ -582,6 +604,9 @@ class BridgeServer(ThreadingHTTPServer):
             self.mobile.close()
         if self.inbox is not None:
             self.inbox.close()
+        for service in (self.capture, self.briefing):
+            if service is not None:
+                service.close()
         self.genui.stop()
 
     def r1_heard(self, address: str) -> None:
@@ -593,6 +618,17 @@ class BridgeServer(ThreadingHTTPServer):
             self.mobile.r1_heard(str(address))
         except Exception:  # noqa: BLE001 - never fails the R1's request
             _LOG.warning("r1 presence not recorded")
+
+    def bridge_token_denied(self, handler: Any) -> Optional[BridgeError]:
+        """The R1's rule for routes other modules serve (a voice note, the morning brief): a private-LAN peer (even
+        with ``--allow-any-client``) with the bridge token. None when allowed (the R1 is then seen), else the error."""
+        if not client_allowed(str(handler.client_address[0])):
+            return BridgeError(403, "forbidden", "Only devices on the local network may use this bridge.")
+        scheme, _, value = str(handler.headers.get("Authorization", "")).partition(" ")
+        if scheme.lower() != "bearer" or not value.strip() or not self.token.matches(value.strip()):
+            return BridgeError(401, "unauthorized", "A valid bridge token is required.")
+        self.r1_heard(handler.client_address[0])
+        return None
 
     @property
     def dry_run(self) -> bool:
@@ -653,6 +689,13 @@ class BridgeServer(ThreadingHTTPServer):
             except Exception:  # the desktop inbox must never break the journal's health check
                 _LOG.warning("inbox health failed")
                 inbox_health = {"available": False}
+            extra: Dict[str, Any] = {}
+            for name, service in (("capture", self.capture), ("briefing", self.briefing)):
+                try:  # voice notes and the morning brief never break the journal's health check either
+                    extra[name] = service.health() if service is not None else {"available": False}
+                except Exception:  # noqa: BLE001
+                    _LOG.warning("%s health failed", name)
+                    extra[name] = {"available": False}
             value: Dict[str, Any] = {
                 "ok": True, "service": SERVICE, "version": VERSION,
                 "cli": {"available": version is not None, "version": version,
@@ -667,6 +710,7 @@ class BridgeServer(ThreadingHTTPServer):
                 "mobile": mobile_health,
                 "assistant": assistant_health,
                 "inbox": inbox_health,
+                **extra,
                 "checkedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             }
             self._health = (time.monotonic(), value)
@@ -746,6 +790,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             desktop_app.serve(self, method)  # its own auth (loopback + desktop token) and logging
             return
         status = 500
+        for service in (self.server.capture, self.server.briefing):
+            if service is not None and service.handles(route):
+                # Voice notes and the morning brief: their routes under /v1/, /v1/mobile/ and /v1/desktop/, each with
+                # its own auth (the bridge token, a phone's token, the desktop token), errors and logging.
+                status, code = service.serve(self, method, route)
+                _LOG.info("%s %s %s %dms%s", method, service.route_label(route), status,
+                          int((time.monotonic() - started) * 1000), f" {code}" if code else "")
+                return
         if self.server.inbox is not None and self.server.inbox.handles(route):
             # /v1/desktop/inbox*: the Agent Dock (loopback + desktop token), and its phone twin /v1/mobile/inbox*
             # (the mobile token); its own errors and logging. Before the mobile API, which owns the rest of /v1/mobile/.
@@ -954,7 +1006,9 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
                 chatgpt_auth_file: Optional[str] = None, chatgpt_issuer: Optional[str] = None,
                 realtime_python: Optional[str] = None, realtime_api: Optional[str] = None,
                 inbox_dir: Optional[str] = None, inbox_launch: bool = False,
-                inbox_service: Any = None) -> BridgeServer:
+                inbox_service: Any = None, capture_dir: Optional[str] = None, capture_service: Any = None,
+                briefing_dir: Optional[str] = None, briefing_settings_file: Optional[str] = None,
+                briefing_service: Any = None) -> BridgeServer:
     """Conversation sync runs only with a ``sync_dir`` (the command line passes the default one). ``cli`` is a
     path, ``auto`` or ``dry-run``; only the installed copy uses the real CLI without a path (``cli_for``). T3 for the
     mobile API: the installed copy pairs with T3 Code itself; any other copy (a checkout, a test, a copy in a temp
@@ -965,7 +1019,10 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
     copy runs it only with an explicit ``claude``, speaks with ElevenLabs only with an explicit ``elevenlabs_key_file``,
     and uses the realtime voice only with an explicit ``chatgpt_auth_file`` and ``realtime_python``. The desktop
     inbox (``samrabbit_inbox.make_service``): a dev copy keeps what was seen in memory unless given ``inbox_dir`` and
-    opens no app or Terminal window unless ``inbox_launch``."""
+    opens no app or Terminal window unless ``inbox_launch``. Voice notes (``samrabbit_capture.make_service``) and the
+    morning brief (``samrabbit_briefing.make_service``): a dev copy keeps them in a temp folder unless given
+    ``capture_dir`` / ``briefing_dir``, classifies and composes only with an explicit ``claude``, and reads Gmail only
+    with an explicit ``composio``."""
     installed_copy = is_installed_copy()  # decided once: the journal, T3 and the calendar agree
     if calendar_writer is None and gcal is not None and composio is None and not installed_copy:
         # A dev copy (a checkout, a test, a temp HOME) never changes the real Google Calendar unless given --composio.
@@ -997,6 +1054,20 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
             inbox_service = inbox.make_service(installed=installed_copy, state_dir=inbox_dir, launch=inbox_launch)
         except OSError:  # an unusable folder turns the dock's list off, never the bridge
             _LOG.warning("desktop inbox unavailable")
+    if capture_service is None and capture is not None:
+        try:
+            capture_service = capture.make_service(installed=installed_copy, folder=capture_dir, claude_path=claude,
+                                                   timezone_name=mobile_timezone)
+        except OSError:  # an unusable folder turns voice notes off, never the bridge
+            _LOG.warning("voice notes unavailable")
+    if briefing_service is None and briefing is not None:
+        try:
+            briefing_service = briefing.make_service(installed=installed_copy, folder=briefing_dir,
+                                                     composio=composio, claude_path=claude,
+                                                     settings_file=briefing_settings_file,
+                                                     timezone_name=mobile_timezone)
+        except OSError:  # an unusable folder turns the morning brief off, never the bridge
+            _LOG.warning("morning brief unavailable")
     return BridgeServer((host, port), token=TokenFile(token_file),
                         cli=cli_for(cli, installed=installed_copy),
                         cli_timeout=cli_timeout, allow_any_client=allow_any_client,
@@ -1006,7 +1077,8 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
                             artifacts_dir or genui.DEFAULT_ARTIFACTS_DIR, claude=claude,
                             agent_browser=agent_browser, model=genui_model),
                         calendar_writer=calendar_writer, mobile_service=mobile_service,
-                        installed_copy=installed_copy, inbox_service=inbox_service)
+                        installed_copy=installed_copy, inbox_service=inbox_service,
+                        capture_service=capture_service, briefing_service=briefing_service)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1088,6 +1160,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "Support/SamRabbit/inbox for the installed copy; any other copy keeps it in memory)")
     parser.add_argument("--inbox-launch", action="store_true",
                         help="let a copy that is not the installed one open apps and Terminal windows for the dock")
+    parser.add_argument("--capture-dir", default=os.environ.get("SAMRABBIT_CAPTURE_DIR") or None,
+                        help="where voice notes are kept (default ~/Library/Application Support/SamRabbit/capture for "
+                             "the installed copy; any other copy uses a temp folder)")
+    parser.add_argument("--briefing-dir", default=os.environ.get("SAMRABBIT_BRIEFING_DIR") or None,
+                        help="where morning briefs are kept (default ~/Library/Application Support/SamRabbit/briefing "
+                             "for the installed copy; any other copy uses a temp folder)")
+    parser.add_argument("--briefing-settings", default=os.environ.get("SAMRABBIT_BRIEFING_SETTINGS") or None,
+                        help="the morning brief's settings (default ~/.config/samrabbit/briefing.json)")
     options = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     try:
@@ -1106,7 +1186,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                              assistant_brain=options.assistant_brain, chatgpt_auth_file=options.chatgpt_auth_file,
                              chatgpt_issuer=options.chatgpt_issuer, realtime_python=options.realtime_python,
                              realtime_api=options.realtime_api_url, inbox_dir=options.inbox_dir,
-                             inbox_launch=options.inbox_launch)
+                             inbox_launch=options.inbox_launch, capture_dir=options.capture_dir,
+                             briefing_dir=options.briefing_dir, briefing_settings_file=options.briefing_settings)
     except (OSError, ValueError) as error:
         _LOG.error("cannot start: %s", error)
         return 2
@@ -1122,6 +1203,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         server.mobile.start()
     if server.inbox is not None:
         server.inbox.start()
+    for service in (server.capture, server.briefing):
+        if service is not None:
+            service.start()
     cli_path = server.cli.executable()
     if server.dry_run:
         _LOG.warning("heptabase CLI: dry-run, journal writes stay in this process and never reach Heptabase "
