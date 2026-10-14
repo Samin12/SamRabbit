@@ -44,14 +44,20 @@ final class ConversationEngine {
     /// The audio engine runs (the microphone is live). Debug builds show it to the UI tests.
     private(set) var audioRunning = false
     /// The microphone is muted (the iPhone's mute button): nothing is heard until it is unmuted; replies and
-    /// announcements still play, and the quiet end waits. A new conversation starts unmuted.
-    private(set) var micMuted = false
+    /// announcements still play, and the quiet end waits longer (`ConversationMachine.mutedTimeout`). Kept across a
+    /// pause (a call); a new conversation starts unmuted.
+    var micMuted: Bool { machine.micMuted }
 
     @ObservationIgnored private let account: BridgeAccount
     @ObservationIgnored private let graph: AudioGraph
     @ObservationIgnored private var detector = SpeechDetector()
     @ObservationIgnored private var micOpen = false
     @ObservationIgnored private var turnTask: Task<Void, Never>?
+    /// The last cancel sent to the Mac. The next turn waits for it: the Mac cancels whatever turn holds the
+    /// conversation, so a turn that got there before its cancel would be the one stopped.
+    @ObservationIgnored private var cancelling: Task<Void, Never>?
+    /// The iPhone: a call ended while SamRabbit wasn't in front; the paused conversation goes on once it is.
+    @ObservationIgnored private var resumeWhenActive = false
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var levelTask: Task<Void, Never>?
@@ -75,7 +81,7 @@ final class ConversationEngine {
         graph.onDrained = { [weak self] in self?.handle(.drained) }
         graph.onInterrupted = { [weak self] in self?.handle(.interrupted) }
         // The iPhone: a call ended and iOS says the audio may go on: the paused conversation continues.
-        graph.onResumable = { [weak self] in self?.resume() }
+        graph.onResumable = { [weak self] in self?.interruptionEnded() }
         graph.onRunning = { [weak self] in self?.audioRunning = $0 }
     }
 
@@ -115,48 +121,80 @@ final class ConversationEngine {
     /// The orb (or the Action Button while talking): talk, send now, or barge in.
     func tap() { handle(.tap) }
 
-    func stop() { handle(.stop) }
+    /// Ends the conversation; one that is paused (a call) no longer goes on by itself.
+    func stop() {
+        resumeWhenActive = false
+        graph.forgetInterruption()
+        handle(.stop)
+    }
 
     /// The wrist came up or the app came back to the front.
     func resume() { handle(.resume) }
+
+    /// The iPhone: the interruption that paused the conversation (a call) is over and iOS says the audio may go on.
+    /// With SamRabbit in front the conversation continues (within `ConversationMachine.resumeWindow`); behind the
+    /// Lock Screen or another app it waits until SamRabbit is in front again (`sceneActive`): the microphone never
+    /// comes back on by itself with nothing on screen to stop it (a Live Activity can't start in the background).
+    private func interruptionEnded() {
+        #if os(iOS)
+        guard UIApplication.shared.applicationState == .active else {
+            resumeWhenActive = true
+            return
+        }
+        #endif
+        resume()
+    }
+
+    /// The iPhone: SamRabbit is in front again. A conversation paused by a call that has ended goes on.
+    func sceneActive() {
+        guard resumeWhenActive else { return }
+        resumeWhenActive = false
+        resume()
+    }
 
     /// The app left the screen (the Digital Crown, another app): finish the reply, then pause. (The iPhone's
     /// conversation goes on in the background instead.)
     func leave() { handle(.background) }
 
-    /// Mutes or unmutes the microphone. Speech being heard when it mutes is dropped.
+    /// Mutes or unmutes the microphone (in voice processing too, on the iPhone). Speech being heard when it mutes is
+    /// dropped.
     func setMuted(_ on: Bool) {
         guard on != micMuted, active || !on else { return }
-        micMuted = on
         detector.reset()
         if on { level = 0 }
+        graph.setInputMuted(on)
         handle(.muted(on))
         if on, machine.phase == .hearing { handle(.discarded) }
     }
 
-    /// A typed turn (the iPhone's keyboard): sent as `{text}`; a reply on its way or playing is interrupted.
-    func send(text: String) { handle(.typed(text)) }
+    /// A typed turn (the iPhone's keyboard): sent as `{text}`; a reply on its way or playing is interrupted. Returns
+    /// whether it went (not while the conversation starts, nor while it says a failure before it ends).
+    @discardableResult
+    func send(text: String) -> Bool {
+        handle(.typed(text)).contains { effect in
+            if case .send = effect { true } else { false }
+        }
+    }
 
     // MARK: - The machine
 
-    private func handle(_ event: ConversationMachine.Event) {
+    @discardableResult
+    private func handle(_ event: ConversationMachine.Event) -> [ConversationMachine.Effect] {
         let before = machine.phase
         let effects = machine.handle(event)
         if machine.phase != before {
             conversationLog.info("\(before.rawValue, privacy: .public) -> \(self.machine.phase.rawValue, privacy: .public)")
         }
         for effect in effects { perform(effect) }
-        if micMuted, !machine.phase.inConversation {
-            // Over: the next conversation starts unmuted.
-            micMuted = false
-            _ = machine.handle(.muted(false))
-        }
         onUpdate?()
+        return effects
     }
 
     private func perform(_ effect: ConversationMachine.Effect) {
         switch effect {
         case .startAudio:
+            // A paused conversation goes on with its mute; a new one starts unmuted (the machine decided which).
+            graph.setInputMuted(micMuted)
             Task {
                 do {
                     try await graph.start()
@@ -200,11 +238,14 @@ final class ConversationEngine {
             send(request)
         case .cancel(let turnId, let conversationId):
             // The machine ignores the old turn from now on. Tell the Mac first (it ends the reply cleanly,
-            // `done{interrupted}`), then drop the stream; playback stopped already.
+            // `done{interrupted}`), then drop the stream; playback stopped already. A turn sent meanwhile (a typed
+            // one goes at once) waits for this: the Mac cancels whatever turn holds the conversation.
             let task = turnTask
             turnTask = nil
             if let conversationId, let client = account.client() {
-                Task {
+                let earlier = cancelling
+                cancelling = Task {
+                    await earlier?.value
                     _ = try? await client.assistantCancel(conversationId: conversationId, timeout: 3)
                     task?.cancel()
                 }
@@ -283,6 +324,8 @@ final class ConversationEngine {
         case .discarded: handle(.discarded)
         case .utterance(let samples):
             micOpen = false
+            // Numbers only, for tuning the detector on each device's input (the iPhone's is voice-processed).
+            conversationLog.info("utterance \(Double(samples.count) / Double(AssistantAudioFormat.sampleRate), format: .fixed(precision: 1), privacy: .public) s, noise floor \(self.detector.floor ?? -160, format: .fixed(precision: 0), privacy: .public) dBFS")
             handle(.utterance(WAV.encode(samples: samples)))
         }
     }
@@ -324,7 +367,14 @@ final class ConversationEngine {
         let turn = AssistantTurnRequest(turnId: id, conversationId: request.conversationId, input: request.input,
                                         language: VoiceFormat.languageTag(), deviceTime: .now, stream: true)
         level = 0
+        let cancelling = cancelling
         turnTask = Task { [weak self] in
+            if let cancelling {
+                // A cancel still on its way goes first (3 s per address at most), or it could stop this turn on
+                // the Mac.
+                await cancelling.value
+                if Task.isCancelled { return }
+            }
             do {
                 for try await item in client.assistantTurn(turn) {
                     if Task.isCancelled { return }

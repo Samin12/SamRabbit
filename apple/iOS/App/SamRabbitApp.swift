@@ -22,6 +22,7 @@ struct SamRabbitApp: App {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                model.talk.sceneActive()
                 model.consumePendingRoute()
                 model.startRefreshing()
             case .background:

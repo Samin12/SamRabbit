@@ -9,7 +9,6 @@ import SwiftUI
 struct TalkView: View {
     @Environment(AppModel.self) private var model
     @FocusState private var fieldFocused: Bool
-    @State private var draft = ""
     /// `-SamRabbitStillOrb YES` (UI tests): a still orb, so the app goes idle between frames and queries are quick.
     private let still = UserDefaults.standard.bool(forKey: "SamRabbitStillOrb")
 
@@ -41,10 +40,7 @@ struct TalkView: View {
         .preferredColorScheme(.dark)
         .tint(SamTheme.accent)
         .statusBarHidden(false)
-        .onChange(of: talk.typing) { _, typing in
-            fieldFocused = typing
-            if !typing { draft = "" }
-        }
+        .onChange(of: talk.typing) { _, typing in fieldFocused = typing }
     }
 
     // MARK: - Top bar
@@ -311,8 +307,9 @@ struct TalkView: View {
     }
 
     private var typeBar: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Type to SamRabbit", text: $draft, axis: .vertical)
+        @Bindable var talk = talk
+        return HStack(alignment: .bottom, spacing: 10) {
+            TextField("Type to SamRabbit", text: $talk.draft, axis: .vertical)
                 .font(.system(size: 17))
                 .lineLimit(1...5)
                 .focused($fieldFocused)
@@ -330,20 +327,21 @@ struct TalkView: View {
             .buttonStyle(.glassProminent)
             .buttonBorderShape(.circle)
             .tint(SamTheme.orb)
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(talk.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityLabel("Send")
             .accessibilityIdentifier("talk-send")
-            CircleIconButton(symbol: "xmark", label: "Close the keyboard", size: 48) { talk.typing = false }
+            CircleIconButton(symbol: "xmark", label: "Close the keyboard", size: 48) {
+                talk.typing = false
+                talk.draft = ""
+            }
                 .accessibilityIdentifier("talk-type-close")
         }
         .padding(.bottom, 6)
     }
 
+    /// The field closes once the words went (or wait for the conversation to listen); else they stay in it.
     private func sendDraft() {
-        let text = draft
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        draft = ""
-        talk.send(text)
+        talk.send(talk.draft)
     }
 
     // MARK: - Words

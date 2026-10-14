@@ -27,13 +27,16 @@ final class TalkModel {
     var presented = false
     /// The keyboard's field is open on the Talk screen.
     var typing = false
+    /// What is typed in it (kept when the words couldn't go, so nothing typed is lost).
+    var draft = ""
     /// The transcript (the conversation's earlier exchanges) is shown instead of the big orb.
     var transcript = false
 
     @ObservationIgnored private let account: BridgeAccount
     @ObservationIgnored private let activity = TalkActivityController()
     @ObservationIgnored private var lastPhase: ConversationMachine.Phase = .idle
-    /// Words typed while no conversation listened yet: sent once it does.
+    /// Words typed while no conversation listened yet: sent once it does (after the announcements that waited, if
+    /// any), or back in the field when the conversation ends before it ever listened.
     @ObservationIgnored private var pendingText: String?
 
     init(account: BridgeAccount) {
@@ -63,7 +66,17 @@ final class TalkModel {
         typing = false
         withAnimation(.smooth(duration: 0.35)) { presented = true }
         guard account.isPaired else { return }
-        if !engine.active { engine.open() }
+        guard !engine.active else { return }
+        // One microphone: a composer's dictation stops first (it gives the audio session back before Talk takes it).
+        SpeechDictation.stopListening()
+        engine.open()
+    }
+
+    /// SamRabbit is in front again: a conversation paused by a call that ended meanwhile goes on, and a Live Activity
+    /// that couldn't start (the app wasn't in front yet) is asked for again.
+    func sceneActive() {
+        activity.retry()
+        engine.sceneActive()
     }
 
     /// The app's own intent ran again while talking (the Action Button pressed again): like a tap on the orb, it
@@ -81,15 +94,21 @@ final class TalkModel {
 
     /// Ends the conversation (End, the Live Activity's End, dictation starting) and closes Talk.
     func end() {
-        typing = false
         engine.stop()
+        // After the stop: words still waiting for the conversation stay as the draft, the field closes.
+        typing = false
         withAnimation(.smooth(duration: 0.35)) { presented = false }
     }
 
     /// The orb: talk, send now, or interrupt.
     func tapOrb() {
         guard account.isPaired else { return }
-        engine.active ? engine.tap() : engine.open()
+        if engine.active {
+            engine.tap()
+        } else {
+            SpeechDictation.stopListening()
+            engine.open()
+        }
     }
 
     func toggleMute() {
@@ -103,18 +122,28 @@ final class TalkModel {
     }
 
     /// Sends a typed turn (`{text}`); the field closes. With no conversation listening (it ended meanwhile, or is
-    /// still starting) one starts and the words go once it listens.
+    /// still starting) one starts and the words go once it listens. Words the conversation can't take (it is saying
+    /// why it has to end) stay in the field.
     func send(_ text: String) {
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty, account.isPaired else { return }
-        typing = false
         switch machine.phase {
         case .idle, .starting:
             pendingText = words
-            if !engine.active { engine.open() }
+            closeField()
+            if !engine.active {
+                SpeechDictation.stopListening()
+                engine.open()
+            }
         default:
-            engine.send(text: words)
+            guard engine.send(text: words) else { return }
+            closeField()
         }
+    }
+
+    private func closeField() {
+        draft = ""
+        typing = false
     }
 
     /// The reply is something you can stop.
@@ -127,10 +156,21 @@ final class TalkModel {
         if now != lastPhase {
             talkLog.info("talk \(self.lastPhase.rawValue, privacy: .public) -> \(now.rawValue, privacy: .public)")
             lastPhase = now
-            if let words = pendingText, now != .starting {
-                pendingText = nil
-                // Listening now: the typed words go (a conversation that couldn't start drops them).
-                if now == .listening { engine.send(text: words) }
+            if let words = pendingText {
+                switch now {
+                case .listening:
+                    // Listening now: the typed words go.
+                    pendingText = nil
+                    engine.send(text: words)
+                case .idle:
+                    // Over before it ever listened (it couldn't start, a failure was said): the words come back.
+                    pendingText = nil
+                    if draft.isEmpty { draft = words }
+                    if presented { typing = true }
+                default:
+                    // Starting, or announcements that waited are said first.
+                    break
+                }
             }
         }
         var state = TalkActivityState(machine, muted: engine.micMuted)
@@ -149,7 +189,8 @@ final class TalkActivityController {
     private var shownAt: Date?
     private var latest: TalkActivityState?
     private var flush: Task<Void, Never>?
-    /// A request failed (Live Activities are off, or the app is not in front): not asked again this conversation.
+    /// A request failed (the app was not in front yet, too many activities): not asked again until the app is in
+    /// front again (`retry`).
     private var refused = false
 
     func follow(_ state: TalkActivityState) {
@@ -173,6 +214,14 @@ final class TalkActivityController {
                 if let latest = self.latest, latest != self.shown, latest.phase != .ended { self.push(latest) }
             }
         }
+    }
+
+    /// The app is in front again: a conversation running without its activity (the request was refused, say because
+    /// the app wasn't in front yet when an intent started Talk) gets it now.
+    func retry() {
+        refused = false
+        guard activityId == nil, let latest, latest.phase != .ended else { return }
+        start(latest)
     }
 
     private func start(_ state: TalkActivityState) {

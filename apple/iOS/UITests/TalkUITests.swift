@@ -25,6 +25,8 @@ final class TalkUITests: XCTestCase {
 
     nonisolated static let heard = "Draft the release notes for build 2.4"
     nonisolated static let say = "Okay, I started the release notes for build 2.4 in Hermes. Anything else?"
+    nonisolated static let longSay = "Here is everything that changed since Monday, one project at a time, starting "
+        + "with the website, then the assistant, then the release itself."
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -145,6 +147,47 @@ final class TalkUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 5) { !bar.exists }, "the bar goes")
         XCTAssertTrue(waitUntil(timeout: 8) { (self.fakeGet("assistant")["ends"] as? [Any] ?? []).count > endsBefore },
                       "the Mac was told it ended")
+    }
+
+    /// A turn typed while a reply plays stops the reply and is answered in full. While the Mac is still sending the
+    /// reply it is cancelled there first and the typed turn goes once the cancel is through (the Mac cancels whatever
+    /// turn holds the conversation: sent together, the cancel could stop the typed turn). Once the Mac has sent all of
+    /// it (the rest only plays here) no cancel goes at all.
+    func testTypingDuringAReply() throws {
+        try launch(voice: "quiet")
+        app.buttons["home-talk"].tap()
+        XCTAssertNotNil(waitFor(state: "Listening…", timeout: 15), "Talk opens listening")
+
+        // The Mac still sends the reply (slower than it plays): cancelled there, then the typed turn. (The fake reads
+        // `pace` while it streams: it stays until the long reply is over.)
+        fake("assistant", ["pace": 2.0, "say": Self.longSay])
+        typeTurn("Tell me everything that changed")
+        XCTAssertNotNil(waitFor(state: "Speaking…", timeout: 20), "the long reply plays")
+        snap("phone-talk-14-typing-over-a-reply")
+        fake("assistant", ["say": Self.say])
+        let cancels = cancelCount()
+        typeTurn("Next meeting?")
+        let typed = finishedTurn(after: 1, kind: "text")
+        XCTAssertEqual(typed?["interrupted"] as? Bool, false, "the typed turn was answered, not stopped by the cancel")
+        XCTAssertTrue(app.descendants(matching: .any)["talk-card"].waitForExistence(timeout: 10), "with its card")
+        XCTAssertEqual(cancelCount(), cancels + 1, "the reply the Mac was still sending was cancelled there")
+        XCTAssertEqual((fakeGet("assistant")["cancels"] as? [[String: Any]])?.last?["cancelled"] as? Bool, true)
+        XCTAssertNotNil(waitFor(state: "Listening…", timeout: 30))
+
+        // The Mac sent all of the reply (much faster than it plays) and it still plays here: no cancel.
+        fake("assistant", ["pace": 0.1, "say": Self.longSay])
+        typeTurn("Tell me everything that changed")
+        let reply = finishedTurn(after: 2, kind: "text")
+        XCTAssertEqual(reply?["interrupted"] as? Bool, false)
+        XCTAssertEqual(waitFor(state: "Speaking…", timeout: 3), "Speaking…", "the rest of the reply plays here")
+        fake("assistant", ["pace": 0.5, "say": Self.say])
+        let quiet = cancelCount()
+        typeTurn("Next meeting?")
+        let second = finishedTurn(after: 3, kind: "text")
+        XCTAssertEqual(second?["interrupted"] as? Bool, false)
+        XCTAssertEqual(cancelCount(), quiet, "nothing to cancel on the Mac")
+        XCTAssertNotNil(waitFor(state: "Listening…", timeout: 20))
+        app.buttons["talk-end"].tap()
     }
 
     /// `samrabbit://talk` (the Lock Screen widget, a Shortcut's Open URL) opens straight into a conversation; End on
@@ -275,6 +318,32 @@ final class TalkUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.2)
         }
         return condition()
+    }
+
+    /// Types `text` in Talk's field and sends it.
+    private func typeTurn(_ text: String) {
+        app.buttons["talk-keyboard"].tap()
+        let field = app.textFields["talk-field"].exists ? app.textFields["talk-field"] : app.textViews["talk-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "the keyboard's field")
+        field.typeText(text)
+        app.buttons["talk-send"].tap()
+    }
+
+    private func cancelCount() -> Int {
+        (fakeGet("assistant")["cancels"] as? [Any] ?? []).count
+    }
+
+    /// The `index`-th turn of `kind` the Mac got (0-based, of this conversation's turns), once the Mac has finished
+    /// streaming it (`interrupted` is known then).
+    private func finishedTurn(after index: Int, kind: String, timeout: TimeInterval = 25) -> [String: Any]? {
+        var found: [String: Any]?
+        _ = waitUntil(timeout: timeout) {
+            let turns = (self.fakeGet("assistant")["turns"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == kind }
+            found = turns.count > index ? turns[index] : nil
+            return found?["interrupted"] != nil
+        }
+        XCTAssertNotNil(found?["interrupted"], "the Mac answered \(kind) turn \(index + 1)")
+        return found
     }
 
     @discardableResult
