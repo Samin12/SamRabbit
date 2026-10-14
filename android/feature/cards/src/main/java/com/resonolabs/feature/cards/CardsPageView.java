@@ -8,11 +8,13 @@ import android.os.Looper;
 import android.view.Gravity;
 import android.widget.FrameLayout;
 
+import com.resonolabs.feature.briefing.BriefingPageView;
 import com.resonolabs.feature.calendar.CalendarPageView;
 import com.resonolabs.feature.cards.board.AgendaWidget;
 import com.resonolabs.feature.cards.board.BoardFixtures;
 import com.resonolabs.feature.cards.board.BoardHost;
 import com.resonolabs.feature.cards.board.BoardWidget;
+import com.resonolabs.feature.cards.board.BriefingWidget;
 import com.resonolabs.feature.cards.board.ClockWidget;
 import com.resonolabs.feature.cards.board.CreationIdentity;
 import com.resonolabs.feature.cards.board.CreationsWidget;
@@ -34,8 +36,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The Cards tab: a glanceable widget board (clock, Up next, T3, Tasks, Live, Journal,
- * Creations). Full Calendar, Tasks and Live pages and Creations open on top of it with the
+ * The Cards tab: a glanceable widget board (clock, the morning brief until noon, Up next, T3, Tasks,
+ * Live, Journal, Creations). Full Calendar, Tasks, Live and Morning brief pages and Creations open on top of it with the
  * CardsBackButton and the chrome hidden, exactly as the old deck did; T3 threads and Settings
  * open through {@link Links} in the product shell.
  */
@@ -70,6 +72,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
     private final T3Widget t3Widget;
     private final LiveWidget liveWidget;
     private final JournalWidget journalWidget;
+    private final BriefingWidget briefingWidget;
     private final GenUiController genUi;
     private final CardsBackButton back;
     private final Host host = new Host();
@@ -80,6 +83,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
     private CalendarPageView calendar;
     private TaskPageView tasks;
     private LiveCardsPageView live;
+    private BriefingPageView briefing;
     /** The Live page was opened on one card from a board pill: BACK returns to the board. */
     private boolean liveFromPill;
     private android.app.Dialog composer;
@@ -101,9 +105,11 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
         tasksWidget = new TasksWidget(host);
         liveWidget = new LiveWidget(host, genUi);
         journalWidget = new JournalWidget(host);
+        briefingWidget = new BriefingWidget(host);
         creations = new CreationsWidget(host);
         List<BoardWidget> widgets = new ArrayList<>();
         widgets.add(new ClockWidget(host));
+        widgets.add(briefingWidget);   // 05:00-12:00 while the brief has open items
         widgets.add(agenda);
         widgets.add(t3Widget);      // hidden until T3 is paired
         widgets.add(tasksWidget);
@@ -135,6 +141,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
         if (calendar != null) calendar.start();
         if (tasks != null) tasks.start();
         if (live != null) live.start();
+        if (briefing != null) briefing.start();
     }
 
     public void stop() {
@@ -143,6 +150,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
         if (calendar != null) calendar.stop();
         if (tasks != null) tasks.stop();
         if (live != null) live.stop();
+        if (briefing != null) briefing.stop();
         if (composer != null) { composer.dismiss(); composer = null; }
     }
 
@@ -150,6 +158,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
         if (input == UiInputIntent.BACK) { navigateBack(); return true; }
         if (calendar != null) { boolean handled=calendar.onInput(input);if(input==UiInputIntent.BACK&&!handled)closeCalendar();return true; }
         if (tasks != null) { boolean handled=tasks.onInput(input);if(input==UiInputIntent.BACK&&!handled)closeTasks();return true; }
+        if (briefing != null) { briefing.onInput(input); return true; }
         if (live != null) { live.onInput(input); return true; }
         if (creation != null) return creation.onInput(input);
         board.onInput(input);
@@ -159,6 +168,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
     private void navigateBack() {
         if (calendar != null) { if (!calendar.onInput(UiInputIntent.BACK)) closeCalendar(); return; }
         if (tasks != null) { if (!tasks.onInput(UiInputIntent.BACK)) closeTasks(); return; }
+        if (briefing != null) { if (!briefing.onInput(UiInputIntent.BACK)) closeBriefing(); return; }
         if (live != null) {
             // A card opened from a board pill goes straight back to the board, like a Calendar event.
             if ((liveFromPill && live.detailOpen()) || !live.onInput(UiInputIntent.BACK)) closeLive();
@@ -182,9 +192,48 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
         composer.setOnDismissListener(ignored -> composer = null);
     }
 
+    /**
+     * Cards &gt; Morning brief; {@code itemId} opens that item straight away (BACK then returns to the
+     * board). "Read it" continues in Voice; an agent item's Open goes to its T3 thread.
+     */
+    public void openBriefing(String itemId) {
+        if (calendar != null || tasks != null || live != null || creation != null) return;
+        if (briefing == null) {
+            briefing = new BriefingPageView(activity, new BriefingPageView.Host() {
+                @Override public void close() { closeBriefing(); }
+                @Override public void say(String text) {
+                    closeBriefing();
+                    if (links != null) links.say(text);
+                }
+                @Override public void openT3Thread(String threadId) {
+                    closeBriefing();
+                    if (links != null) links.openT3Thread(threadId);
+                }
+            });
+            if (briefingWidget.fixtureMode()) briefing.useFixture(briefingWidget.snapshot());
+            board.setVisibility(GONE);
+            addView(briefing, match());
+            back.setVisibility(VISIBLE);
+            back.bringToFront();
+            creationVisibility.accept(true);
+            briefing.start();
+            briefing.requestFocus();
+        }
+        if (itemId != null) briefing.showItem(itemId);
+    }
+
+    private void closeBriefing() {
+        if (briefing == null) return;
+        removeView(briefing);
+        briefing.close();
+        briefing = null;
+        showBoard();
+        if (!closed) briefingWidget.reload();
+    }
+
     private void openLive(String cardId) {
         if (live == null) {
-            if (calendar != null || tasks != null || creation != null) return;
+            if (calendar != null || tasks != null || creation != null || briefing != null) return;
             live = new LiveCardsPageView(activity, genUi);
             board.setVisibility(GONE);
             addView(live, match());
@@ -338,6 +387,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
         closeCalendar();
         closeTasks();
         closeLive();
+        closeBriefing();
         board.close();
         client.close();
         genUi.close();
@@ -353,6 +403,7 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
             switch (page == null ? "" : page) {
                 case "calendar" -> { closeLive(); openCalendar(); }
                 case "tasks" -> { closeLive(); openTasks(); }
+                case "briefing" -> { closeLive(); openBriefing(null); }
                 case "cards" -> closeLive();
                 default -> { if (links != null) links.openPage(page); }
             }
@@ -388,5 +439,6 @@ public final class CardsPageView extends FrameLayout implements AutoCloseable {
         @Override public void openLiveCard(String cardId) { openLive(cardId); }
         @Override public void openJournalNote() { CardsPageView.this.openJournalNote(); }
         @Override public void openSettings() { if (links != null) links.openSettings(); }
+        @Override public void openBriefing(String itemId) { CardsPageView.this.openBriefing(itemId); }
     }
 }

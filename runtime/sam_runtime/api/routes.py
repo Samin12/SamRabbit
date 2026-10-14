@@ -31,6 +31,8 @@ from .heptabase_routes import HeptabaseRoutes
 from .mac_routes import MacRoutes
 from .conversation_sync_routes import ConversationSyncRoutes
 from .generated_ui_routes import GeneratedUiRoutes
+from .capture_routes import CaptureRoutes
+from .briefing_routes import BriefingRoutes
 
 if TYPE_CHECKING:
     from .http_server import HealthReader, RestartRequest
@@ -106,6 +108,8 @@ class RuntimeRoutes:
         mac: MacRoutes | None = None,
         conversation_sync: ConversationSyncRoutes | None = None,
         generated_ui: GeneratedUiRoutes | None = None,
+        capture: CaptureRoutes | None = None,
+        briefing: BriefingRoutes | None = None,
     ) -> None:
         self._health = health
         self._lifecycle = lifecycle
@@ -135,6 +139,8 @@ class RuntimeRoutes:
         self._mac = mac
         self._conversation_sync = conversation_sync
         self._generated_ui = generated_ui
+        self._capture = capture
+        self._briefing = briefing
 
     def handle_get(self, req: RouteRequest) -> None:
         path = req.path.split("?", 1)[0]
@@ -176,6 +182,8 @@ class RuntimeRoutes:
         if self._mac is not None and self._mac.handle_get(req, pairing): return
         if self._conversation_sync is not None and self._conversation_sync.handle_get(req, pairing): return
         if self._generated_ui is not None and self._generated_ui.handle_get(req, pairing): return
+        if self._capture is not None and self._capture.handle_get(req, pairing): return
+        if self._briefing is not None and self._briefing.handle_get(req, pairing): return
         if path == "/v1/health":
             req.respond_json(200, self._health())
             return
@@ -306,6 +314,8 @@ class RuntimeRoutes:
         if self._heptabase is not None and self._heptabase.handle_post(req, pairing): return
         if self._mac is not None and self._mac.handle_post(req, pairing): return
         if self._conversation_sync is not None and self._conversation_sync.handle_post(req, pairing): return
+        if self._capture is not None and self._capture.handle_post(req, pairing): return
+        if self._briefing is not None and self._briefing.handle_post(req, pairing): return
         if path == "/v1/mcp" and mcp is not None:
             payload = req.request_json(max_bytes=65_536)
             if payload is None:

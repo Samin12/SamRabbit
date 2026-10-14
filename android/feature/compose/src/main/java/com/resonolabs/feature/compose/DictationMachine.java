@@ -39,6 +39,30 @@ public final class DictationMachine {
     public static final long COMMIT_AFTER_MS = 1_500L;
     public static final long FINISH_TIMEOUT_MS = 5_000L;
 
+    /**
+     * How long one dictation may listen, wait for the first words, wait in silence after the last
+     * ones and wait to connect. {@link #DEFAULT} is the text fields' (ComposeSheet); voice notes use
+     * longer listening and a shorter trailing silence.
+     */
+    public static final class Limits {
+        public static final Limits DEFAULT =
+                new Limits(MAX_LISTEN_MS, NO_SPEECH_MS, TRAILING_SILENCE_MS, CONNECT_TIMEOUT_MS);
+
+        public final long maxListenMs;
+        public final long noSpeechMs;
+        public final long trailingSilenceMs;
+        public final long connectTimeoutMs;
+
+        public Limits(long maxListenMs, long noSpeechMs, long trailingSilenceMs, long connectTimeoutMs) {
+            this.maxListenMs = maxListenMs;
+            this.noSpeechMs = noSpeechMs;
+            this.trailingSilenceMs = trailingSilenceMs;
+            this.connectTimeoutMs = connectTimeoutMs;
+        }
+    }
+
+    private final Limits limits;
+
     private Phase phase = Phase.IDLE;
     private Stop stop = Stop.NONE;
     private long startedAt;
@@ -48,6 +72,18 @@ public final class DictationMachine {
     private boolean speechActive;
     private boolean heardSpeech;
     private boolean commitSent;
+
+    public DictationMachine() {
+        this(Limits.DEFAULT);
+    }
+
+    public DictationMachine(Limits limits) {
+        this.limits = limits == null ? Limits.DEFAULT : limits;
+    }
+
+    public Limits limits() {
+        return limits;
+    }
 
     public Phase phase() {
         return phase;
@@ -68,8 +104,8 @@ public final class DictationMachine {
 
     /** Milliseconds of listening left before the max duration, for a countdown. */
     public long remainingMs(long now) {
-        if (phase != Phase.LISTENING) return MAX_LISTEN_MS;
-        return Math.max(0L, MAX_LISTEN_MS - (now - liveAt));
+        if (phase != Phase.LISTENING) return limits.maxListenMs;
+        return Math.max(0L, limits.maxListenMs - (now - liveAt));
     }
 
     public boolean start(long now) {
@@ -155,7 +191,7 @@ public final class DictationMachine {
     public Action tick(long now, int pendingItems) {
         switch (phase) {
             case CONNECTING -> {
-                if (now - startedAt >= CONNECT_TIMEOUT_MS) {
+                if (now - startedAt >= limits.connectTimeoutMs) {
                     phase = Phase.DONE;
                     stop = Stop.FAILED;
                     return Action.CLOSE;
@@ -164,10 +200,12 @@ public final class DictationMachine {
             }
             case LISTENING -> {
                 long listened = now - liveAt;
-                if (listened >= MAX_LISTEN_MS) return stop(now, Stop.MAX_DURATION);
-                if (!heardSpeech && pendingItems == 0 && listened >= NO_SPEECH_MS) return stop(now, Stop.NO_SPEECH);
+                if (listened >= limits.maxListenMs) return stop(now, Stop.MAX_DURATION);
+                if (!heardSpeech && pendingItems == 0 && listened >= limits.noSpeechMs) {
+                    return stop(now, Stop.NO_SPEECH);
+                }
                 if (heardSpeech && !speechActive && lastSpeechStoppedAt > 0L
-                        && now - lastSpeechStoppedAt >= TRAILING_SILENCE_MS) {
+                        && now - lastSpeechStoppedAt >= limits.trailingSilenceMs) {
                     return stop(now, Stop.SILENCE);
                 }
                 return Action.NONE;

@@ -65,6 +65,8 @@ dependencies {
     implementation(project(":feature:genui"))
     implementation(project(":feature:t3"))
     implementation(project(":feature:compose"))
+    implementation(project(":feature:voicenote"))
+    implementation(project(":feature:briefing"))
     implementation(project(":core:motor"))
     implementation(project(":runtime-host"))
     testImplementation("junit:junit:4.13.2")

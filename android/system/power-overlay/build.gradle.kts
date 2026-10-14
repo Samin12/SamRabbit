@@ -1,5 +1,6 @@
 // Static framework RRO (target package "android") that turns a side-button (KEYCODE_POWER) double
-// press into a launch of SamRabbit's non-exported .SideButtonToggle alias. Resource-only: no code.
+// press into a launch of SamRabbit's non-exported .SideButtonToggle alias, and a triple press into the
+// theater-mode signal the app turns into a voice note (theater never sleeps the screen). Resource-only: no code.
 // Install: deploy.sh zipaligns it, signs it with the platform key and copies it to /oem/overlay
 // (the only overlay directory on the R1 that is both scanned and writable). A reboot is required:
 // static RROs are scanned at boot and PhoneWindowManager reads the target activity once in init().

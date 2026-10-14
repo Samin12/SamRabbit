@@ -12,8 +12,10 @@ public final class SettingsListLayoutTest {
     private static final int ROWS = 9;
 
     @Test public void themeIsAHighRowAndAboutStaysLast() {
-        assertEquals(9, SettingsPanelView.ROWS.size());
+        assertEquals(10, SettingsPanelView.ROWS.size());
         assertEquals(List.of("Wi-Fi", "Bluetooth", "Theme"), SettingsPanelView.ROWS.subList(0, 3));
+        assertEquals("Side button follows Sound", SettingsPanelView.ROWS.indexOf("Sound") + 1,
+                SettingsPanelView.ROWS.indexOf(SettingsPanelView.SIDE_BUTTON));
         assertEquals("About", SettingsPanelView.ROWS.get(SettingsPanelView.ROWS.size() - 1));
         // Theme is fully visible before any scrolling.
         int theme = SettingsPanelView.ROWS.indexOf(SettingsPanelView.THEME);

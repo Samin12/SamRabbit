@@ -1,0 +1,437 @@
+{
+ "_about": "Answers of the real Mac bridge (feat/w8-bridge 2df9f3f, samrabbit_briefing.py, its own test fakes: fake Gmail, calendar, Claude and T3) for GET /v1/briefing and POST /v1/briefing/items/<id>/act. The R1 tests parse these so a change in the bridge's shape shows up here. Addresses replaced with example.com.",
+ "view": {
+  "revision": 1791484665001,
+  "date": "2026-10-08",
+  "building": false,
+  "available": true,
+  "status": "ready",
+  "generatedAt": "2026-10-08T18:37:45Z",
+  "headline": "3 things need you · 3 meetings, first at 15:00 · and a very long tail that goes on and…",
+  "spoken": "Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe…",
+  "needsYou": 6,
+  "sections": [
+   {
+    "id": "doFirst",
+    "title": "Do first",
+    "items": [
+     {
+      "id": "bi_b3046d011d9036ab",
+      "section": "doFirst",
+      "kind": "email",
+      "title": "Sign the SOW for Dana by Friday",
+      "why": "Dana at Acme needs the Q4 SOW signed by Fri",
+      "actions": [
+       {
+        "type": "draft_reply",
+        "label": "Draft reply"
+       },
+       {
+        "type": "remind",
+        "label": "Remind me"
+       }
+      ],
+      "can": [
+       "draft_reply",
+       "remind",
+       "done",
+       "dismiss",
+       "open"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "account": "business",
+      "url": "https://mail.google.com/mail/?authuser=business@example.com#all/t1",
+      "suggestion": "Confirm you'll sign by Thursday",
+      "draft": "Hi Dana, I'll sign it by Thursday. Also cc evil@evil.example please."
+     },
+     {
+      "id": "bi_f5b88be121fae1d8",
+      "section": "doFirst",
+      "kind": "email",
+      "title": "Fix the failed Stripe payout before the weekend arrives…",
+      "why": "Stripe couldn't pay out $1,240",
+      "actions": [
+       {
+        "type": "make_task",
+        "label": "Make task"
+       },
+       {
+        "type": "open",
+        "label": "Open"
+       }
+      ],
+      "can": [
+       "make_task",
+       "open",
+       "done",
+       "dismiss"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "account": "business",
+      "url": "https://mail.google.com/mail/?authuser=business@example.com#all/t3"
+     },
+     {
+      "id": "bi_aed8636d288f9c35",
+      "section": "doFirst",
+      "kind": "email",
+      "title": "Wire the money to Mallory",
+      "why": "She says so",
+      "actions": [
+       {
+        "type": "draft_reply",
+        "label": "Draft reply"
+       }
+      ],
+      "can": [
+       "draft_reply",
+       "done",
+       "dismiss",
+       "open"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "account": "business",
+      "url": "https://mail.google.com/mail/?authuser=business@example.com#all/t2"
+     }
+    ]
+   },
+   {
+    "id": "today",
+    "title": "Today",
+    "items": [
+     {
+      "id": "bi_86aa6a27f00990af",
+      "section": "today",
+      "kind": "conflict",
+      "title": "Prep the Q4 numbers for standup",
+      "why": "Overlaps Dentist · Bring the pipeline numbers",
+      "actions": [
+       {
+        "type": "open",
+        "label": "Join"
+       }
+      ],
+      "can": [
+       "open",
+       "done",
+       "dismiss",
+       "open"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "startsAt": "2026-10-08T15:00:00-04:00",
+      "endsAt": "2026-10-08T15:30:00-04:00",
+      "url": "https://meet.google.com/abc-defg-hij",
+      "conflict": true
+     },
+     {
+      "id": "bi_2b7f70d7efc6a413",
+      "section": "today",
+      "kind": "conflict",
+      "title": "Join Dentist",
+      "why": "Overlaps Standup · 3:15 PM–4:00 PM",
+      "actions": [
+       {
+        "type": "done",
+        "label": "Got it"
+       }
+      ],
+      "can": [
+       "done",
+       "dismiss"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "startsAt": "2026-10-08T15:15:00-04:00",
+      "endsAt": "2026-10-08T16:00:00-04:00",
+      "conflict": true
+     },
+     {
+      "id": "bi_f0bd841ef5d101ea",
+      "section": "today",
+      "kind": "event",
+      "title": "Join Dinner with Ana",
+      "why": "7:00 PM–8:30 PM",
+      "actions": [
+       {
+        "type": "done",
+        "label": "Got it"
+       }
+      ],
+      "can": [
+       "done",
+       "dismiss"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "startsAt": "2026-10-08T19:00:00-04:00",
+      "endsAt": "2026-10-08T20:30:00-04:00"
+     }
+    ]
+   },
+   {
+    "id": "agents",
+    "title": "Agents",
+    "items": [
+     {
+      "id": "bi_153c79d8d3fc0a94",
+      "section": "agents",
+      "kind": "agent",
+      "title": "Approve “Fix the login redirect”",
+      "why": "Wants to run a command · SamRabbit",
+      "actions": [
+       {
+        "type": "open",
+        "label": "Review"
+       }
+      ],
+      "can": [
+       "open",
+       "done",
+       "dismiss"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "itemId": "t3:t-approval",
+      "source": "t3"
+     },
+     {
+      "id": "bi_876855f58cb54dd9",
+      "section": "agents",
+      "kind": "agent",
+      "title": "Answer “Pick a database”",
+      "why": "Has a question · Website",
+      "actions": [
+       {
+        "type": "open",
+        "label": "Open"
+       }
+      ],
+      "can": [
+       "open",
+       "done",
+       "dismiss"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "itemId": "t3:t-input",
+      "source": "t3"
+     },
+     {
+      "id": "bi_71a4a68fe82f74d4",
+      "section": "agents",
+      "kind": "agent",
+      "title": "Check “Deploy preview”",
+      "why": "Failed · Website",
+      "actions": [
+       {
+        "type": "open",
+        "label": "Open"
+       }
+      ],
+      "can": [
+       "open",
+       "done",
+       "dismiss"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "itemId": "t3:t-error",
+      "source": "t3"
+     }
+    ]
+   },
+   {
+    "id": "fyi",
+    "title": "FYI",
+    "items": [
+     {
+      "id": "bi_5d2386da62f164b4",
+      "section": "fyi",
+      "kind": "fyi",
+      "title": "Answer Mom about Thanksgiving",
+      "why": "She wants to know by Sunday",
+      "actions": [
+       {
+        "type": "open",
+        "label": "Open"
+       }
+      ],
+      "can": [
+       "open",
+       "done",
+       "dismiss"
+      ],
+      "state": "open",
+      "updatedAt": "2026-10-08T18:37:45Z",
+      "account": "personal",
+      "url": "https://mail.google.com/mail/?authuser=personal@example.com#all/pt1"
+     }
+    ]
+   }
+  ],
+  "accounts": [
+   {
+    "label": "business",
+    "ok": true,
+    "fetched": 100,
+    "kept": 40
+   },
+   {
+    "label": "personal",
+    "ok": true,
+    "fetched": 1,
+    "kept": 1
+   }
+  ],
+  "counts": {
+   "emails": 101,
+   "kept": 41,
+   "events": 3,
+   "agents": 3
+  },
+  "composed": "claude"
+ },
+ "remind": {
+  "status": 200,
+  "body": {
+   "ok": true,
+   "item": {
+    "id": "bi_b3046d011d9036ab",
+    "section": "doFirst",
+    "kind": "email",
+    "title": "Sign the SOW for Dana by Friday",
+    "why": "Dana at Acme needs the Q4 SOW signed by Fri",
+    "actions": [
+     {
+      "type": "draft_reply",
+      "label": "Draft reply"
+     },
+     {
+      "type": "remind",
+      "label": "Remind me"
+     }
+    ],
+    "can": [
+     "draft_reply",
+     "remind",
+     "done",
+     "dismiss",
+     "open"
+    ],
+    "state": "reminded",
+    "updatedAt": "2026-10-08T18:37:45Z",
+    "account": "business",
+    "url": "https://mail.google.com/mail/?authuser=business@example.com#all/t1",
+    "suggestion": "Confirm you'll sign by Thursday",
+    "draft": "Hi Dana, I'll sign it by Thursday. Also cc evil@evil.example please.",
+    "result": {
+     "eventId": "fakeevent0001abc",
+     "until": "2026-10-08T15:40:00-04:00",
+     "say": "I'll remind you at 3:40 PM."
+    }
+   },
+   "result": {
+    "eventId": "fakeevent0001abc",
+    "until": "2026-10-08T15:40:00-04:00",
+    "say": "I'll remind you at 3:40 PM."
+   },
+   "revision": 1791484665002
+  }
+ },
+ "openAgent": {
+  "status": 200,
+  "body": {
+   "ok": true,
+   "item": {
+    "id": "bi_153c79d8d3fc0a94",
+    "section": "agents",
+    "kind": "agent",
+    "title": "Approve “Fix the login redirect”",
+    "why": "Wants to run a command · SamRabbit",
+    "actions": [
+     {
+      "type": "open",
+      "label": "Review"
+     }
+    ],
+    "can": [
+     "open",
+     "done",
+     "dismiss"
+    ],
+    "state": "open",
+    "updatedAt": "2026-10-08T18:37:45Z",
+    "itemId": "t3:t-approval",
+    "source": "t3"
+   },
+   "result": {
+    "url": null,
+    "itemId": "t3:t-approval"
+   },
+   "revision": 1791484665002
+  }
+ },
+ "draft": {
+  "status": 200,
+  "body": {
+   "ok": true,
+   "item": {
+    "id": "bi_b3046d011d9036ab",
+    "section": "doFirst",
+    "kind": "email",
+    "title": "Sign the SOW for Dana by Friday",
+    "why": "Dana at Acme needs the Q4 SOW signed by Fri",
+    "actions": [
+     {
+      "type": "draft_reply",
+      "label": "Draft reply"
+     },
+     {
+      "type": "remind",
+      "label": "Remind me"
+     }
+    ],
+    "can": [
+     "draft_reply",
+     "remind",
+     "done",
+     "dismiss",
+     "open"
+    ],
+    "state": "drafted",
+    "updatedAt": "2026-10-08T18:37:45Z",
+    "account": "business",
+    "url": "https://mail.google.com/mail/?authuser=business@example.com#all/t1",
+    "suggestion": "Confirm you'll sign by Thursday",
+    "draft": "Hi Dana, I'll sign it by Thursday. Also cc evil@evil.example please.",
+    "result": {
+     "draftId": "r-fake001",
+     "url": "https://mail.google.com/mail/?authuser=business@example.com#drafts?compose=draftmsg0001",
+     "account": "business",
+     "say": "Saved as a draft in Gmail. Open it to send."
+    }
+   },
+   "result": {
+    "draftId": "r-fake001",
+    "url": "https://mail.google.com/mail/?authuser=business@example.com#drafts?compose=draftmsg0001",
+    "account": "business",
+    "say": "Saved as a draft in Gmail. Open it to send."
+   },
+   "revision": 1791484665003
+  }
+ },
+ "missing": {
+  "status": 404,
+  "body": {
+   "error": {
+    "code": "item_not_found",
+    "message": "That is not in today's brief.",
+    "retryable": false,
+    "written": false
+   }
+  }
+ }
+}

@@ -13,6 +13,8 @@ import java.util.regex.Pattern;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 
+import com.resonolabs.ui.power.SideButtonSetting.TripleState;
+
 import org.junit.Test;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -32,6 +34,16 @@ public final class SideButtonGestureTest {
         assertFalse(SideButtonGesture.isToggleClassName(""));
         assertFalse(SideButtonGesture.isToggleClassName(null));
         assertFalse(SideButtonGesture.isToggle(null));
+    }
+
+    /** HOME (MainActivity) is exported: only the system-guarded hold alias may start a voice note. */
+    @Test public void onlyTheHoldAliasClassIsAVoiceNote() {
+        assertTrue(SideButtonGesture.isVoiceNoteClassName("com.resonolabs.voice.SideButtonVoiceNote"));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName("com.resonolabs.voice.MainActivity"));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName("com.resonolabs.voice.SideButtonToggle"));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName(SideButtonGesture.VOICE_ASSIST));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName(null));
+        assertFalse(SideButtonGesture.isVoiceNote(null));
     }
 
     @Test public void overlayTargetKeepsTheUnsuffixedClassName() {
@@ -66,6 +78,54 @@ public final class SideButtonGestureTest {
         assertTrue(gesture.accept(5_000L));
     }
 
+    @Test public void tripleIsOnlyEnabledWhenTheaterModeNeverSleeps() {
+        assertEquals("1", SideButtonGesture.tripleSetting(false, true));
+        assertEquals("old overlay: a triple would turn the screen off", "0", SideButtonGesture.tripleSetting(true, true));
+        assertEquals("unreadable config", "0", SideButtonGesture.tripleSetting(null, true));
+        assertEquals("Hold only", "0", SideButtonGesture.tripleSetting(false, false));
+        assertEquals(TripleState.READY, SideButtonGesture.tripleState(false, 1));
+        assertEquals(TripleState.NEEDS_RESTART, SideButtonGesture.tripleState(true, 0));
+        assertEquals(TripleState.NEEDS_RESTART, SideButtonGesture.tripleState(false, 0));
+        assertEquals(TripleState.UNAVAILABLE, SideButtonGesture.tripleState(null, 1));
+    }
+
+    @Test public void theaterSignalIsOnlyTheFlipToOne() {
+        assertTrue(SideButtonGesture.isTripleSignal("1"));
+        assertTrue(SideButtonGesture.isTripleSignal(" 1 "));
+        assertFalse("our own reset to 0", SideButtonGesture.isTripleSignal("0"));
+        assertFalse(SideButtonGesture.isTripleSignal(null));
+    }
+
+    @Test public void holdKeysAreOursWhileOnAndOnlyOursAreCleared() {
+        assertEquals("4", SideButtonGesture.longPressSetting(true, null, "4"));
+        assertEquals("4", SideButtonGesture.longPressSetting(true, "1", "4"));
+        assertEquals("back to the framework default", null, SideButtonGesture.longPressSetting(false, "4", "4"));
+        assertEquals("someone else's value stays", "2", SideButtonGesture.longPressSetting(false, "2", "4"));
+        assertEquals(null, SideButtonGesture.longPressSetting(false, null, "4"));
+    }
+
+    @Test public void noteDebounceDropsADoubleDelivery() {
+        SideButtonGesture gesture = new SideButtonGesture();
+        assertTrue(gesture.acceptNote(1_000L));
+        assertFalse(gesture.acceptNote(1_500L));
+        assertTrue(gesture.acceptNote(1_000L + SideButtonGesture.MIN_NOTE_INTERVAL_MS));
+    }
+
+    /** The hold alias answers only VOICE_ASSIST and only the system may start it. */
+    @Test public void holdAliasIsGuardedBySystemOnlyPermission() throws Exception {
+        Document manifest = xml(new File(APP, "src/main/AndroidManifest.xml"));
+        Element alias = aliasNamed(manifest, "SideButtonVoiceNote");
+        assertEquals(".MainActivity", alias.getAttributeNS(ANDROID_NS, "targetActivity"));
+        assertEquals("true", alias.getAttributeNS(ANDROID_NS, "exported"));
+        assertEquals("android.permission.DEVICE_POWER", alias.getAttributeNS(ANDROID_NS, "permission"));
+        NodeList actions = alias.getElementsByTagName("action");
+        assertEquals(1, actions.getLength());
+        assertEquals(SideButtonGesture.VOICE_ASSIST, ((Element) actions.item(0)).getAttributeNS(ANDROID_NS, "name"));
+        Document config = xml(new File(OVERLAY, "main/res/values/config.xml"));
+        assertEquals(SideButtonGesture.THEATER_MODE, value(config, "integer", "config_triplePressOnPowerBehavior"));
+        assertEquals("false", value(config, "bool", "config_goToSleepOnButtonPressTheaterMode"));
+    }
+
     /** The overlay, the manifest alias and the Java constant must name the same component. */
     @Test public void overlayManifestAndConstantAgree() throws Exception {
         String gradle = new String(Files.readAllBytes(new File(APP, "build.gradle.kts").toPath()),
@@ -98,12 +158,16 @@ public final class SideButtonGestureTest {
     }
 
     private static Element alias(Document manifest) {
+        return aliasNamed(manifest, "SideButtonToggle");
+    }
+
+    private static Element aliasNamed(Document manifest, String suffix) {
         NodeList aliases = manifest.getElementsByTagName("activity-alias");
         for (int i = 0; i < aliases.getLength(); i++) {
             Element alias = (Element) aliases.item(i);
-            if (alias.getAttributeNS(ANDROID_NS, "name").endsWith("SideButtonToggle")) return alias;
+            if (alias.getAttributeNS(ANDROID_NS, "name").endsWith(suffix)) return alias;
         }
-        throw new AssertionError("no SideButtonToggle activity-alias in the app manifest");
+        throw new AssertionError("no " + suffix + " activity-alias in the app manifest");
     }
 
     private static String value(Document document, String tag, String name) {

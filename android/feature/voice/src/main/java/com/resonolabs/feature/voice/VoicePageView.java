@@ -116,6 +116,8 @@ public final class VoicePageView extends View implements AutoCloseable, VoiceSes
     private final GenUiController genUi;
     private final GenCardOverlay cards;
     private final IdleGlance glance;
+    private static final String DEFAULT_IDLE_HINT = "Double-press the side button to talk";
+    private String idleHint = DEFAULT_IDLE_HINT;
     private final GlassPainter glass = new GlassPainter();
     private final RectF scratch = new RectF();
     private final boolean debuggable;
@@ -312,6 +314,14 @@ public final class VoicePageView extends View implements AutoCloseable, VoiceSes
     /** The page's card controller (app-built cards such as T3 announcements). */
     public GenUiController genUi() {
         return genUi;
+    }
+
+    /** The idle hint under "Tap to talk" (the shell names the side-button gestures in use). */
+    public void setIdleHint(String hint) {
+        String value = hint == null || hint.isBlank() ? DEFAULT_IDLE_HINT : hint.trim();
+        if (value.equals(idleHint)) return;
+        idleHint = value;
+        invalidate();
     }
 
     /** T3 counts for the idle glance chip (0/0 hides it). */
@@ -1105,7 +1115,7 @@ public final class VoicePageView extends View implements AutoCloseable, VoiceSes
                     Paint.Align.CENTER, false);
         } else {
             String detail = restoring ? reconnectDetail() : switch (state) {
-                case IDLE -> "Double-press the side button to talk";
+                case IDLE -> idleHint;
                 case CONNECTING -> "Opening a voice session";
                 case RESPONDING -> "Tap the orb to stop it talking";
                 default -> transcript;

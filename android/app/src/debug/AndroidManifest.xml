@@ -13,6 +13,7 @@
                 <action android:name="com.resonolabs.voice.DEBUG_STATE" />
                 <action android:name="com.resonolabs.voice.DEBUG_PICTURE" />
                 <action android:name="com.resonolabs.voice.DEBUG_TRANSCRIPT" />
+                <action android:name="com.resonolabs.voice.DEBUG_NOTE" />
             </intent-filter>
         </receiver>
     </application>

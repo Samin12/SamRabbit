@@ -43,6 +43,8 @@ import com.resonolabs.ui.input.UiInputTarget;
 import com.resonolabs.runtime.host.ManagementOpenAiSource;
 import com.resonolabs.runtime.host.ManagementOpenAiState;
 import com.resonolabs.ui.power.AlwaysOnVoice;
+import com.resonolabs.ui.power.IdleScreenSetting;
+import com.resonolabs.ui.power.SideButtonSetting;
 
 import java.util.List;
 
@@ -65,12 +67,13 @@ public final class SettingsPanelView extends View implements UiInputTarget {
     private static final float ALWAYS_ON_TOP = 396f;
     private static final float ALWAYS_ON_BOTTOM = 472f;
     static final String THEME = "Theme";
+    static final String SIDE_BUTTON = "Side button";
     /**
      * Theme sits right under the two radios: the first personal setting, high enough to be seen
      * without scrolling. Nine rows overflow 640 px, so the list scrolls (SettingsListLayout).
      */
     static final List<String> ROWS = List.of(
-            "Wi-Fi", "Bluetooth", THEME, "Management", "AI", "Creations", "Sound", "Display", "About");
+            "Wi-Fi", "Bluetooth", THEME, "Management", "AI", "Creations", "Sound", SIDE_BUTTON, "Display", "About");
     /** Drag distance (design px) before a touch on the list scrolls instead of tapping. */
     private static final float TOUCH_SLOP = 10f;
     /** Rows fade out over this many px where they slide under the header / off the bottom. */
@@ -81,6 +84,15 @@ public final class SettingsPanelView extends View implements UiInputTarget {
     private static final RectF DISPLAY_MINUS = new RectF(20f, 262f, 230f, 326f);
     private static final RectF DISPLAY_PLUS = new RectF(250f, 262f, 460f, 326f);
     private static final RectF DISPLAY_THEME_LINK = new RectF(20f, 342f, 460f, 406f);
+    /** Display page: "Screen off · After 10 min / Never" (the HOME idle timeout). */
+    private static final RectF DISPLAY_SCREEN_OFF = new RectF(20f, 422f, 460f, 498f);
+    // Side button page: the talk line, then the three voice-note choices.
+    private static final float SIDE_TALK_TOP = 96f;
+    private static final float SIDE_OPTION_TOP = 222f;
+    private static final float SIDE_OPTION_HEIGHT = 74f;
+    private static final float SIDE_OPTION_GAP = 10f;
+    private static final String[] SIDE_OPTION_LINES = {
+            "Three quick presses", "Hold half a second · power menu at 3.5 s", "Triple press or hold"};
     // Theme page copy, per OrbStyle.values() (built once: the page redraws every frame).
     private static final String[] THEME_NAMES = new String[ThemePageLayout.TILES];
     private static final String[] THEME_APPLIED = new String[ThemePageLayout.TILES];
@@ -125,6 +137,8 @@ public final class SettingsPanelView extends View implements UiInputTarget {
     /** The touch stopped a moving list, so lifting it is not also a tap. */
     private boolean caughtMotion;
     private int themeFocus;
+    /** Side button page: the wheel's choice (applied with a tap or ACTIVATE). */
+    private int sideFocus;
     private OrbStyle themeApplied = OrbStyle.FLUID;
     private long themeAppliedAt = -1L;
     /** Page that BACK returns to from Theme ("Display" when its link opened it), else the list. */
@@ -306,6 +320,9 @@ public final class SettingsPanelView extends View implements UiInputTarget {
         if (THEME.equals(name)) {
             SamTheme.text(canvas, paint, OrbStyleSetting.current().label(), 418f, top + 36f, 18f,
                     focused ? SamTheme.ORB_PALE : SamTheme.MUTED, Paint.Align.RIGHT, false);
+        } else if (SIDE_BUTTON.equals(name)) {
+            SamTheme.text(canvas, paint, SideButtonSetting.voiceNote(activity).label, 418f, top + 36f, 18f,
+                    focused ? SamTheme.ORB_PALE : SamTheme.MUTED, Paint.Align.RIGHT, false);
         }
         chevron(canvas, 436f, mid, focused ? SamTheme.ORB_PALE : SamTheme.MUTED);
     }
@@ -322,6 +339,7 @@ public final class SettingsPanelView extends View implements UiInputTarget {
             case "AI" -> drawAiPage(canvas);
             case "Sound" -> drawSoundPage(canvas);
             case "Display" -> drawDisplayPage(canvas);
+            case SIDE_BUTTON -> drawSideButtonPage(canvas);
             case THEME -> drawThemePage(canvas);
             case "Bluetooth" -> drawBluetoothPage(canvas);
             case "About" -> drawAboutPage(canvas);
@@ -395,8 +413,93 @@ public final class SettingsPanelView extends View implements UiInputTarget {
         SamTheme.text(canvas, paint, "+", DISPLAY_PLUS.centerX(), DISPLAY_PLUS.centerY() + 12f, 38f,
                 SamTheme.INK, Paint.Align.CENTER, true);
         drawThemeLink(canvas);
-        SamTheme.text(canvas, paint, "Screen sleep · Manual while open", 240f, 600f, 15f,
+        drawScreenOffRow(canvas);
+        SamTheme.text(canvas, paint, IdleScreenSetting.never(activity) ? "The screen stays on while SamRabbit is open"
+                        : "Off after 10 min with nothing going on · any press wakes it", 240f, 600f, 15f,
                 SamTheme.MUTED, Paint.Align.CENTER, false);
+    }
+
+    /** "Screen off   After 10 min" with a switch (on = turns off when idle, the default). */
+    private void drawScreenOffRow(Canvas canvas) {
+        RectF row = DISPLAY_SCREEN_OFF;
+        boolean idleOff = !IdleScreenSetting.never(activity);
+        glassPainter.draw(canvas, paint, row, 22f, false);
+        SamTheme.text(canvas, paint, "Screen off", 40f, row.top + 33f, 20f, SamTheme.INK, Paint.Align.LEFT, true);
+        SamTheme.text(canvas, paint, idleOff ? "After 10 min" : "Never", 40f, row.top + 58f, 14f, SamTheme.MUTED,
+                Paint.Align.LEFT, false);
+        drawSwitch(canvas, row.centerY(), idleOff);
+    }
+
+    /** The pill switch at the right of a row (allocation-free). */
+    private void drawSwitch(Canvas canvas, float cy, boolean on) {
+        if (on) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(SamTheme.ORB_BLUE);
+            canvas.drawRoundRect(374f, cy - 17f, 436f, cy + 17f, 17f, 17f, paint);
+        } else {
+            glassPainter.draw(canvas, paint, 374f, cy - 17f, 436f, cy + 17f, 17f, false);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(on ? SamTheme.INK : SamTheme.MUTED);
+        canvas.drawCircle(on ? 419f : 391f, cy, 13f, paint);
+    }
+
+    /**
+     * Settings &gt; Side button: double press talks (fixed); the voice note is a triple press, a hold
+     * or both. Triple press needs the framework overlay that ships with SamRabbit (a restart after an
+     * update): the status line says when it is not active yet. Allocation-free.
+     */
+    private void drawSideButtonPage(Canvas canvas) {
+        glassPainter.draw(canvas, paint, 20f, SIDE_TALK_TOP, 460f, SIDE_TALK_TOP + 80f, 22f, false);
+        SamTheme.text(canvas, paint, "Double-press", 40f, SIDE_TALK_TOP + 36f, 20f, SamTheme.INK, Paint.Align.LEFT, true);
+        SamTheme.text(canvas, paint, "Talk: starts or ends a voice chat", 40f, SIDE_TALK_TOP + 62f, 15f,
+                SamTheme.MUTED, Paint.Align.LEFT, false);
+        paint.setLetterSpacing(0.14f);
+        SamTheme.text(canvas, paint, "VOICE NOTE", 40f, SIDE_OPTION_TOP - 16f, 13f,
+                SamTheme.withAlpha(SamTheme.INK, 190), Paint.Align.LEFT, true);
+        paint.setLetterSpacing(0f);
+        SideButtonSetting.VoiceNote current = SideButtonSetting.voiceNote(activity);
+        SideButtonSetting.VoiceNote[] choices = SideButtonSetting.VoiceNote.values();
+        for (int i = 0; i < choices.length; i++) {
+            float top = SIDE_OPTION_TOP + i * (SIDE_OPTION_HEIGHT + SIDE_OPTION_GAP);
+            boolean chosen = choices[i] == current;
+            boolean focused = i == sideFocus;
+            glassPainter.draw(canvas, paint, 20f, top, 460f, top + SIDE_OPTION_HEIGHT, 22f, focused);
+            SamTheme.text(canvas, paint, choices[i].label, 40f, top + 33f, 20f, SamTheme.INK, Paint.Align.LEFT, true);
+            SamTheme.text(canvas, paint, SIDE_OPTION_LINES[i], 40f, top + 57f, 14f, SamTheme.MUTED,
+                    Paint.Align.LEFT, false);
+            float cy = top + SIDE_OPTION_HEIGHT / 2f;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2.4f);
+            paint.setColor(chosen ? SamTheme.ORB_BLUE : SamTheme.withAlpha(SamTheme.MUTED, 200));
+            canvas.drawCircle(420f, cy, 13f, paint);
+            paint.setStyle(Paint.Style.FILL);
+            if (chosen) {
+                paint.setColor(SamTheme.ORB_BLUE);
+                canvas.drawCircle(420f, cy, 7.5f, paint);
+            }
+        }
+        String status;
+        int color = SamTheme.MUTED;
+        switch (current.triple() ? SideButtonSetting.tripleState() : SideButtonSetting.TripleState.UNKNOWN) {
+            case READY -> status = "Triple press is ready · each press within 0.3 s";
+            case NEEDS_RESTART -> { status = "Triple press works after the next restart"; color = SamTheme.AMBER; }
+            case UNAVAILABLE -> { status = "Triple press isn't available on this R1"; color = SamTheme.AMBER; }
+            default -> status = current.hold() ? "Hold the button until the note opens" : "";
+        }
+        float statusY = SIDE_OPTION_TOP + 3 * (SIDE_OPTION_HEIGHT + SIDE_OPTION_GAP) + 26f;
+        if (!status.isEmpty()) {
+            SamTheme.text(canvas, paint, status, 240f, statusY, 15f, color, Paint.Align.CENTER, false);
+        }
+        SamTheme.text(canvas, paint, "While recording: a press or a tap sends · Back cancels", 240f, 600f, 15f,
+                SamTheme.MUTED, Paint.Align.CENTER, false);
+    }
+
+    private void chooseVoiceNote(int index) {
+        SideButtonSetting.VoiceNote[] choices = SideButtonSetting.VoiceNote.values();
+        sideFocus = Math.max(0, Math.min(choices.length - 1, index));
+        SideButtonSetting.setVoiceNote(activity, choices[sideFocus]);
+        invalidate();
     }
 
     /** One line under brightness pointing at the look's real home: "Theme   Pixel head ›". */
@@ -551,9 +654,11 @@ public final class SettingsPanelView extends View implements UiInputTarget {
         displayValue = Math.round(brightness * 100f / 255f) + "%";
     }
 
-    /** Display page taps: brightness -/+ and the link row that opens Theme. */
+    /** Display page taps: brightness -/+, the link row that opens Theme and the Screen off switch. */
     private void onDisplayTap(float x, float y) {
-        if (y >= DISPLAY_MINUS.top - 6f && y <= DISPLAY_MINUS.bottom + 6f) {
+        if (y >= DISPLAY_SCREEN_OFF.top - 6f && y <= DISPLAY_SCREEN_OFF.bottom + 6f) {
+            IdleScreenSetting.setNever(activity, !IdleScreenSetting.never(activity));
+        } else if (y >= DISPLAY_MINUS.top - 6f && y <= DISPLAY_MINUS.bottom + 6f) {
             adjustBrightness(x >= DESIGN_WIDTH / 2f);
             displayValue = null;
         } else if (y >= DISPLAY_THEME_LINK.top - 6f && y <= DISPLAY_THEME_LINK.bottom + 6f) {
@@ -922,6 +1027,12 @@ public final class SettingsPanelView extends View implements UiInputTarget {
                 glyph.close();
                 canvas.drawPath(glyph, paint);
                 canvas.drawArc(cx - 3f, cy - 7f, cx + 9f, cy + 7f, -50f, 100f, false, paint);
+            }
+            case SIDE_BUTTON -> {
+                // The R1 seen edge-on: its body and the side button standing out on the right.
+                canvas.drawRoundRect(cx - 9f, cy - 11f, cx + 5f, cy + 11f, 4f, 4f, paint);
+                paint.setStyle(Paint.Style.FILL);
+                canvas.drawRoundRect(cx + 7f, cy - 7f, cx + 11f, cy + 1f, 2f, 2f, paint);
             }
             case "Display" -> {
                 canvas.drawCircle(cx, cy, 4.5f, paint);
@@ -1385,7 +1496,7 @@ public final class SettingsPanelView extends View implements UiInputTarget {
                 Settings.System.SCREEN_BRIGHTNESS, 0);
         return new SettingValue[]{
                 new SettingValue("BRIGHTNESS", Math.round(brightness * 100f / 255f) + "%"),
-                new SettingValue("SCREEN SLEEP", "Manual while open")};
+                new SettingValue("SCREEN OFF", IdleScreenSetting.never(activity) ? "Never" : "After 10 min")};
     }
 
     private void button(Canvas canvas, String label, float left, float top, float right) {
@@ -1567,6 +1678,15 @@ public final class SettingsPanelView extends View implements UiInputTarget {
             onDisplayTap(x, y);
             return;
         }
+        if (SIDE_BUTTON.equals(openPage)) {
+            float within = (y - SIDE_OPTION_TOP) % (SIDE_OPTION_HEIGHT + SIDE_OPTION_GAP);
+            int option = (int) Math.floor((y - SIDE_OPTION_TOP) / (SIDE_OPTION_HEIGHT + SIDE_OPTION_GAP));
+            if (y >= SIDE_OPTION_TOP && option < SideButtonSetting.VoiceNote.values().length
+                    && within <= SIDE_OPTION_HEIGHT) {
+                chooseVoiceNote(option);
+            }
+            return;
+        }
         if (THEME.equals(openPage)) {
             // A tile applies only when the press both starts and ends on it.
             int tile = ThemePageLayout.tileAt(x, y);
@@ -1652,6 +1772,15 @@ public final class SettingsPanelView extends View implements UiInputTarget {
             }
             return true;
         }
+        if (SIDE_BUTTON.equals(openPage)) {
+            if (intent == UiInputIntent.ACTIVATE) chooseVoiceNote(sideFocus);
+            else {
+                sideFocus = SettingsInputPolicy.themeFocusForWheel(sideFocus,
+                        SideButtonSetting.VoiceNote.values().length, intent);
+                invalidate();
+            }
+            return true;
+        }
         if (SettingsInputPolicy.consumeWheelWithoutAdjustment(openPage, intent)) {
             // Volume and brightness never follow the R1 wheel; they need
             // their explicit on-screen buttons.
@@ -1708,6 +1837,7 @@ public final class SettingsPanelView extends View implements UiInputTarget {
                 case "Management" -> refreshManagement();
                 case "AI" -> refreshOpenAi();
                 case "Display" -> displayValue = null;
+                case SIDE_BUTTON -> sideFocus = SideButtonSetting.voiceNote(activity).ordinal();
                 case "About" -> aboutValues = null;
                 case THEME -> {
                     themeFocus = OrbStyleSetting.current().ordinal();
