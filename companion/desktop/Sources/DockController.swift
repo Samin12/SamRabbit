@@ -84,12 +84,18 @@ final class DockHostingView<Content: View>: NSHostingView<Content> {
 final class DockMenuItem: NSMenuItem {
     private let handler: () -> Void
 
-    init(_ title: String, key: String = "", state: NSControl.StateValue = .off, enabled: Bool = true, handler: @escaping () -> Void = {}) {
+    /// `shortcut`: shown at the right of the item, as the menus of the app show theirs (the global hot key does the work).
+    init(_ title: String, key: String = "", shortcut: DockShortcut? = nil, state: NSControl.StateValue = .off, enabled: Bool = true,
+         handler: @escaping () -> Void = {}) {
         self.handler = handler
         super.init(title: title, action: enabled ? #selector(run) : nil, keyEquivalent: key)
         target = self
         self.state = state
         isEnabled = enabled
+        if let shortcut, let key = shortcut.menuKey {
+            keyEquivalent = key
+            keyEquivalentModifierMask = NSEvent.ModifierFlags(rawValue: shortcut.menuModifierFlags)
+        }
     }
 
     @available(*, unavailable)
@@ -98,12 +104,14 @@ final class DockMenuItem: NSMenuItem {
     @objc private func run() { handler() }
 }
 
-/// The Agent Dock: a floating glass pill at the bottom of the screen with the agents that are waiting for Samin
-/// (T3 Code threads, Claude Code and Codex sessions, SamRabbit chats), a list that opens above it with inline
-/// approve / answer / reply / stop / open, a compose bar for a new prompt, and the voice bar during a conversation.
-/// It shows whenever the main window is minimised, closed or hidden, or another app is in front, and steps aside while
-/// Samin is in the main window. See CONTRACTS-WAVE6 §B; the rules live in DockVisibility / DockPlacement /
-/// DockKeyboard (unit-tested), this class wires them to AppKit.
+/// The Agent Dock: a floating glass pill with the agents that are waiting for Samin (T3 Code threads, Claude Code and
+/// Codex sessions, SamRabbit chats), a list that opens beside it with inline approve / answer / reply / stop / open, a
+/// compose bar for a new prompt, and the voice bar during a conversation. It rests at the bottom of the screen until
+/// Samin drags it anywhere on any screen (remembered per screen as a corner and a gap), folds to the orb (⌃⌥M, the
+/// "–"), and ⌃⌥D puts it away and brings it back. It shows whenever the main window is minimised, closed or hidden, or
+/// another app is in front, and steps aside while Samin is in the main window. See CONTRACTS-WAVE6 §B and WAVE7 §B2;
+/// the rules live in DockVisibility / DockPlacement / DockKeyboard / DockShortcut (unit-tested), this class wires
+/// them to AppKit.
 @MainActor
 final class DockController: NSObject {
     static let shared = DockController()
@@ -123,7 +131,7 @@ final class DockController: NSObject {
     private var pointerTimer: Timer?
     private var followTimer: Timer?
     private var unhideTimer: Timer?
-    private var hotKey: DockHotKey?
+    private let shortcuts = DockShortcutCenter.shared
     /// ⌘+ / ⌘− / ⌘0, held only while the pointer is on the dock.
     private var zoomKeys: [DockHotKey] = []
     private var monitors: [Any] = []
@@ -135,9 +143,16 @@ final class DockController: NSObject {
     private var summoned = false
     private var voiceActive = false
     private var lastReason: DockVisibility.Reason?
+    /// ⌃⌥D's hide, the orb, "over the app" (DockPresence; the first two are kept in UserDefaults).
+    private var presence = DockPresence()
+    /// The screen it is on and its spot there (from `place`, or the bottom middle).
     private var screen: DockScreen?
-    private var fraction = 0.5
+    private var spotHere = DockSpot.home
+    /// What the pill window measured: its size, and how much of that is the "–".
     private var pillSize = CGSize.zero
+    private var slotWidth: CGFloat = 0
+    /// Where the pill rests without the "–" (the list lines up with this, so the button doesn't move it).
+    private var restFrame = CGRect.zero
     private var listSize = CGSize.zero
     private var pillControls: [CGRect] = []
     private var overPill = false
@@ -150,6 +165,7 @@ final class DockController: NSObject {
 
     private struct Press {
         var start: CGPoint
+        /// The resting frame (without the "–", which goes while dragging).
         var frame: CGRect
         var grip: Bool
         var leftGrip: Bool
@@ -164,8 +180,10 @@ final class DockController: NSObject {
     private enum Key {
         static let enabled = "AgentDockEnabled"
         static let hiddenUntil = "AgentDockHiddenUntil"
-        static let spot = "AgentDockSpot"
+        // AgentDockPlace, Wave 6's AgentDockSpot and AgentDockPlaceMigrated: DockPlaceMemory.
         static let zoom = "AgentDockZoom"
+        static let putAway = "AgentDockPutAway"
+        static let minimized = "AgentDockMinimized"
     }
 
     private var enabled: Bool {
@@ -184,12 +202,26 @@ final class DockController: NSObject {
         }
     }
 
-    private var spot: DockSpot? {
-        get { UserDefaults.standard.data(forKey: Key.spot).flatMap { try? JSONDecoder().decode(DockSpot.self, from: $0) } }
-        set {
-            if let newValue, let data = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(data, forKey: Key.spot) }
-            else { UserDefaults.standard.removeObject(forKey: Key.spot) }
+    private let memory = DockPlaceMemory(defaults: UserDefaults.standard)
+
+    /// Where Samin left it (nil: never moved, or "Move Back to the Middle").
+    private var place: DockPlace? {
+        get { memory.place }
+        set { memory.place = newValue }
+    }
+
+    /// Wave 6 remembered a fraction of the bottom edge: the same place as a corner and a gap, at the first launch only.
+    private func migratePlace() {
+        let size = CGSize(width: 260, height: DockMetrics.pillBaseHeight)
+        if let converted = memory.migrate(size: size, screens: screens()) {
+            Log.write("dock: its spot is a corner and a gap now (\(converted.spot.corner.rawValue))")
         }
+    }
+
+    private func savePresence() {
+        UserDefaults.standard.set(presence.hidden, forKey: Key.putAway)
+        UserDefaults.standard.set(presence.minimized, forKey: Key.minimized)
+        if ui.minimized != presence.minimized { ui.minimized = presence.minimized }
     }
 
     private var zoom: Double {
@@ -197,12 +229,54 @@ final class DockController: NSObject {
         set { UserDefaults.standard.set(DockMetrics.zoom(newValue), forKey: Key.zoom) }
     }
 
+    /// The switch in AgentDockEnabled (off = "Turn Off the Dock" until it is turned on again).
     var isEnabled: Bool { enabled }
+
+    /// What Settings' "Show the Agent Dock" says: turned on, and not put away (⌃⌥D, "Hide Agent Dock") or hidden for a
+    /// while. Stepping aside for the main window doesn't count: that is the dock's own doing.
+    var isOn: Bool {
+        guard enabled, !presence.hidden else { return false }
+        return hiddenUntil.map { $0 <= Date() } ?? true
+    }
+
+    var isMinimized: Bool { presence.minimized }
 
     /// Dev runs: forget a hide (the smoke driver hides it once and puts it back).
     func clearHide() {
         hiddenUntil = nil
         refresh()
+    }
+
+    /// Dev runs: leave the dock at `spot` on the screen it is on, as a drag ending there would (nil: forget every
+    /// spot, as "Move Back to the Middle").
+    func devPlace(_ spot: DockSpot?) {
+        guard let screen else { return }
+        place = spot.map { DockPlacement.remember($0, on: screen, in: place) }
+        chooseScreen()
+        placePill()
+    }
+
+    /// Dev runs: the screen it is on, and the frame it rests at there (without the "–").
+    var devState: (screen: DockScreen?, rest: CGRect) { (screen, restFrame) }
+
+    /// Dev runs: what the dock keeps of Samin's moves (its spot, the orb, ⌃⌥D's hide), to put back after a smoke run.
+    struct DevMemory {
+        let place: DockPlace?
+        let minimized: Bool
+        let putAway: Bool
+    }
+
+    var devMemory: DevMemory { DevMemory(place: place, minimized: presence.minimized, putAway: presence.hidden) }
+
+    func devRestore(_ kept: DevMemory) {
+        place = kept.place
+        presence.minimized = kept.minimized
+        presence.hidden = kept.putAway
+        presence.overApp = false
+        savePresence()
+        chooseScreen()
+        refresh()
+        if visible { placePill() }
     }
 
     // MARK: start
@@ -213,6 +287,10 @@ final class DockController: NSObject {
         store.onAnnounce = { [weak self] items in self?.announce(items) }
         store.onOpenConversation = { id in AppModel.shared.openMainWindow(conversation: id) }
         AppModel.shared.notifier.onOpenInboxItem = { [weak self] id in self?.reveal(id) }
+        presence.hidden = UserDefaults.standard.bool(forKey: Key.putAway)
+        presence.minimized = UserDefaults.standard.bool(forKey: Key.minimized)
+        ui.minimized = presence.minimized
+        migratePlace()
 
         let center = NotificationCenter.default
         let names: [Notification.Name] = [
@@ -263,19 +341,25 @@ final class DockController: NSObject {
             let keep = MainActor.assumeIsolated { self?.keepCommandKey(event) ?? true }
             return keep ? event : nil
         }) { monitors.append(keys) }
-        hotKey = DockHotKey(keyCode: kVK_ANSI_K, modifiers: controlKey | optionKey, name: "⌃⌥K") { [weak self] in
-            self?.summon(focusCompose: true)
-        }
-        Log.write("dock: \(enabled ? "on" : "off") (glass \(render.glass.rawValue))")
+        // ⌃⌥Space talk (MacVoice toggles itself), ⌃⌥K the list on compose, ⌃⌥D show / hide, ⌃⌥M orb ↔ pill: or
+        // what Settings recorded instead.
+        shortcuts.start([
+            .compose: { [weak self] in self?.summon(focusCompose: true) },
+            .showHide: { [weak self] in self?.toggleShown() },
+            .minimize: { [weak self] in self?.toggleMinimized() },
+        ])
+        Log.write("dock: \(enabled ? "on" : "off")\(presence.hidden ? ", put away (⌃⌥D)" : "")\(presence.minimized ? ", minimized" : "")"
+                  + " (glass \(render.glass.rawValue))")
         if enabled { store.start() }
         refresh()
         if let directory = ProcessInfo.processInfo.environment["SAMRABBIT_DOCK_SMOKE"] { DockSmoke.run(self, directory: directory) }
+        if ProcessInfo.processInfo.environment["SAMRABBIT_DOCK_SMOKE_PLACES"] == "1" { DockSmoke.runPlaces(self) }
     }
 
     // MARK: visibility
 
-    func refresh() {
-        guard started else { return }
+    /// What decides whether it shows, as AppKit says it now (without Samin's own say: DockPresence adds that).
+    private func visibilityInput() -> DockVisibilityInput {
         let main = AppModel.shared.window?.window
         var input = DockVisibilityInput()
         input.enabled = enabled
@@ -289,6 +373,14 @@ final class DockController: NSObject {
         input.mainWindowMinimized = main?.isMiniaturized ?? false
         input.voiceActive = voiceActive
         input.summoned = summoned
+        return input
+    }
+
+    func refresh() {
+        guard started else { return }
+        let seen = visibilityInput()
+        presence.settle(seen)
+        let input = presence.applied(to: seen)
         let reason = DockVisibility.reason(input)
         if reason != lastReason {
             Log.write("dock: \(DockVisibility.shows(input) ? "shown" : "hidden") (\(reason.rawValue))")
@@ -296,6 +388,8 @@ final class DockController: NSObject {
         }
         if DockVisibility.shows(input) { show() } else { hide() }
         scheduleUnhide()
+        let on = isOn
+        if ui.switchedOn != on { ui.switchedOn = on }
     }
 
     private func scheduleUnhide() {
@@ -317,6 +411,7 @@ final class DockController: NSObject {
         let pill = pillWindow()
         if !visible {
             visible = true
+            ui.shown = true
             chooseScreen()
             placePill()
             pill.alphaValue = 0
@@ -334,6 +429,7 @@ final class DockController: NSObject {
     private func hide() {
         guard visible else { return }
         visible = false
+        ui.shown = false
         send(.hidden)
         followTimer?.invalidate()
         pointerTimer?.invalidate()
@@ -342,6 +438,7 @@ final class DockController: NSObject {
         overList = false
         updateZoomKeys()
         ui.pillHover = false
+        updateMinimizeSlot()
         guard let pill else { return }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.14
@@ -365,14 +462,15 @@ final class DockController: NSObject {
         showMenu: { [weak self] in self?.showMenu() },
         collapse: { [weak self] in self?.send(.escape) },
         interact: { [weak self] in self?.send(.interact) },
-        openItem: { [weak self] item in self?.store.open(item) })
+        openItem: { [weak self] item in self?.store.open(item) },
+        minimize: { [weak self] in self?.setMinimized(true) })
 
     private func pillWindow() -> DockPanelWindow {
         if let pill { return pill }
         let window = DockPanelWindow(role: .pill)
         window.controller = self
         let root = DockPillRoot(store: store, ui: ui, voice: pillVoice, commands: commands, render: render,
-                                onSize: { [weak self] size in self?.pillSized(size) },
+                                onMeasure: { [weak self] measure in self?.pillMeasured(measure) },
                                 onHitRects: { [weak self] rects in self?.pillControls = rects })
         let hosting = DockHostingView(rootView: root)
         hosting.sizingOptions = []
@@ -413,11 +511,11 @@ final class DockController: NSObject {
         return "\(screen.localizedName)-\(Int(screen.frame.width))x\(Int(screen.frame.height))"
     }
 
-    /// The screen it rests on: where Samin left it, else the one the pointer is on.
+    /// The screen it rests on and its spot there: where Samin left it, else the pointer's screen (DockPlacement.home).
     private func chooseScreen() {
-        guard let home = DockPlacement.home(spot: spot, pointer: NSEvent.mouseLocation, screens: screens()) else { return }
+        guard let home = DockPlacement.home(place: place, pointer: NSEvent.mouseLocation, screens: screens()) else { return }
         screen = home.screen
-        fraction = home.xFraction
+        spotHere = home.spot
         applyScale()
     }
 
@@ -429,10 +527,12 @@ final class DockController: NSObject {
         if ui.panelScale != panel { ui.panelScale = panel }
     }
 
-    private func pillSized(_ size: CGSize) {
-        let rounded = CGSize(width: ceil(size.width), height: ceil(size.height))
-        guard rounded.width > 0, rounded.height > 0, rounded != pillSize else { return }
+    private func pillMeasured(_ measure: DockPillMeasure) {
+        let rounded = CGSize(width: ceil(measure.size.width), height: ceil(measure.size.height))
+        let slot = measure.slot > 0 ? ceil(measure.slot) : 0
+        guard rounded.width > 0, rounded.height > 0, rounded != pillSize || slot != slotWidth else { return }
         pillSize = rounded
+        slotWidth = min(slot, rounded.width - 1)
         if press == nil { placePill() }
     }
 
@@ -444,19 +544,47 @@ final class DockController: NSObject {
         if expansion.isOpen, let list, !list.isVisible { revealList() }
     }
 
+    /// The pill's size without the "–" (before it has measured itself: a guess at the pill or the orb).
+    private var restSize: CGSize {
+        guard pillSize != .zero else {
+            let orb = ((DockMetrics.orbBaseSize + DockMetrics.orbBadgeRoom) * ui.pillScale).rounded()
+            return ui.minimized ? CGSize(width: orb, height: orb) : CGSize(width: 240, height: DockMetrics.pillBaseHeight * ui.pillScale)
+        }
+        return CGSize(width: pillSize.width - slotWidth, height: pillSize.height)
+    }
+
+    /// The pill window at its spot: the resting frame by its corner and gap, plus the "–" on its side.
     private func placePill() {
         guard let pill, let screen else { return }
-        let size = pillSize == .zero ? CGSize(width: 240, height: DockMetrics.pillBaseHeight * ui.pillScale) : pillSize
-        let frame = DockPlacement.pillFrame(size: size, screen: screen, xFraction: fraction)
+        let rest = DockPlacement.frame(for: spotHere, size: restSize, on: screen)
+        restFrame = rest
+        let anchor = Self.anchor(spotHere.corner)
+        if ui.pillAnchor != anchor { ui.pillAnchor = anchor }
+        let frame = DockPlacement.withSlot(rest, width: slotWidth, onLeft: ui.minimizeSlot == .leading, on: screen)
         if pill.frame != frame { pill.setFrame(frame, display: true) }
-        let maxHeight = DockPlacement.maxPanelHeight(pill: frame, screen: screen)
+        let below = DockPlacement.panelOpensBelow(pill: rest, screen: screen)
+        if ui.listBelow != below { ui.listBelow = below }
+        let maxHeight = DockPlacement.maxPanelHeight(pill: rest, screen: screen)
         if ui.maxPanelHeight != maxHeight { ui.maxPanelHeight = maxHeight }
         placeList()
     }
 
+    /// The pill window's content sits against the dock's corner (the window follows a new size a moment later).
+    private static func anchor(_ corner: DockCorner) -> Alignment {
+        switch (corner.isTop, corner.side) {
+        case (true, .left): return .topLeading
+        case (true, .middle): return .top
+        case (true, .right): return .topTrailing
+        case (false, .left): return .bottomLeading
+        case (false, .middle): return .bottom
+        case (false, .right): return .bottomTrailing
+        }
+    }
+
+    /// The list on the side with room, lined up with the pill's resting frame (the "–" coming and going moves nothing).
     private func placeList() {
-        guard let list, let pill, let screen, listSize != .zero else { return }
-        let frame = DockPlacement.panelFrame(size: listSize, pill: pill.frame, screen: screen)
+        guard let list, pill != nil, let screen, listSize != .zero, restFrame != .zero else { return }
+        let frame = DockPlacement.panelFrame(size: listSize, pill: restFrame, screen: screen)
         if list.frame != frame { list.setFrame(frame, display: true) }
     }
 
@@ -475,7 +603,7 @@ final class DockController: NSObject {
     }
 
     private func followPointer() {
-        guard visible, spot == nil, press == nil, !expansion.isOpen, !voiceActive,
+        guard visible, place == nil, press == nil, !expansion.isOpen, !voiceActive,
               let here = DockPlacement.screen(containing: NSEvent.mouseLocation, in: screens()),
               here.id != screen?.id, here.frame.contains(NSEvent.mouseLocation) else {
             otherScreenTicks = 0
@@ -486,9 +614,53 @@ final class DockController: NSObject {
         guard otherScreenTicks >= 2 else { return }
         otherScreenTicks = 0
         screen = here
-        fraction = 0.5
+        spotHere = .home
         applyScale()
         placePill()
+    }
+
+    /// ⌃⌥D on another screen: the dock comes to the one the pointer is on (its own spot there, else the same corner).
+    private func bringHere() {
+        guard let here = DockPlacement.screen(containing: NSEvent.mouseLocation, in: screens()) else { return }
+        let moved = DockPlacement.bringing(place, current: spotHere, to: here)
+        place = moved.place
+        screen = here
+        spotHere = moved.spot
+        applyScale()
+        Log.write("dock: brought to the screen the pointer is on")
+        if visible { placePill() }
+    }
+
+    /// The dock is on (or would come back on) another screen than the pointer's.
+    private func isElsewhere() -> Bool {
+        let all = screens()
+        guard let here = DockPlacement.screen(containing: NSEvent.mouseLocation, in: all) else { return false }
+        let there = visible ? screen : DockPlacement.home(place: place, pointer: NSEvent.mouseLocation, screens: all)?.screen
+        return there.map { $0.id != here.id } ?? false
+    }
+
+    /// The "–" while the pointer is on the pill (not the orb, not the voice bar, not while dragging), at the end away
+    /// from the edge the pill is kept against; the side is chosen as it appears, so it doesn't hop under the pointer.
+    private func updateMinimizeSlot() {
+        let wanted = visible && overPill && !ui.minimized && !voiceActive && !(press?.moved ?? false)
+        let slot: HorizontalEdge?
+        if !wanted {
+            slot = nil
+        } else if let current = ui.minimizeSlot {
+            slot = current
+        } else if let screen {
+            slot = DockPlacement.minimizeOnLeft(restFrame, on: screen) ? .leading : .trailing
+        } else {
+            slot = .trailing
+        }
+        guard slot != ui.minimizeSlot else { return }
+        ui.minimizeSlot = slot
+        if slot == nil, slotWidth != 0 {
+            // Gone at once (the next measure agrees): the pill is back at its resting frame.
+            slotWidth = 0
+            pillSize = restFrame.size == .zero ? pillSize : restFrame.size
+            if press == nil { placePill() }
+        }
     }
 
     private func setZoom(_ value: Double) {
@@ -629,6 +801,7 @@ final class DockController: NSObject {
         overList = onList
         updateZoomKeys()
         if ui.pillHover != onPill { ui.pillHover = onPill }
+        updateMinimizeSlot()
         if !voiceActive { send(.pointer(overPill: onPill, overPanel: onList)) }
     }
 
@@ -703,9 +876,10 @@ final class DockController: NSObject {
             // forward). The bar never takes them by itself: Esc stays with the app Samin is in (a terminal's Esc
             // interrupts Claude Code).
             if voiceActive && !window.isKeyWindow { window.makeKey() }
-            // The two ends of the pill resize it (drag up to grow); anywhere else drags it along the bottom.
-            let grip = !voiceActive && (point.x < 12 || point.x > window.frame.width - 12)
-            press = Press(start: NSEvent.mouseLocation, frame: window.frame, grip: grip, leftGrip: point.x < 12, zoom: zoom)
+            // The two ends of the pill resize it (drag up to grow); anywhere else (and anywhere on the orb) moves it.
+            let grip = !voiceActive && !ui.minimized && (point.x < 12 || point.x > window.frame.width - 12)
+            let rest = restFrame == .zero ? window.frame : restFrame
+            press = Press(start: NSEvent.mouseLocation, frame: rest, grip: grip, leftGrip: point.x < 12, zoom: zoom)
             return true
         case .leftMouseDragged:
             guard var current = press else { return false }
@@ -714,8 +888,11 @@ final class DockController: NSObject {
             let dy = location.y - current.start.y
             if !current.moved && hypot(dx, dy) >= 4 {
                 current.moved = true
+                press = current
                 ui.dragging = true
                 send(.dragStarted)
+                // The "–" goes while it moves: the window is the resting pill from here (set just below).
+                updateMinimizeSlot()
             }
             press = current
             guard current.moved else { return true }
@@ -726,13 +903,13 @@ final class DockController: NSObject {
                     zoom = wanted
                     applyScale()
                 }
-            } else if let moved = DockPlacement.dragged(from: current.frame, dx: dx, pointer: location, screens: screens()) {
+            } else if let moved = DockPlacement.dragged(from: current.frame, dx: dx, dy: dy, pointer: location, screens: screens()) {
                 if moved.screen.id != screen?.id {
                     screen = moved.screen
                     applyScale()
                 }
+                restFrame = moved.frame
                 window.setFrame(moved.frame, display: true)
-                if let screen { fraction = DockPlacement.fraction(of: moved.frame, on: screen) }
             }
             return true
         case .leftMouseUp:
@@ -743,14 +920,20 @@ final class DockController: NSObject {
                 if done.grip {
                     Log.write("dock: size \(String(format: "%.2f", zoom))x (dragged)")
                 } else if let screen {
-                    spot = DockSpot(screenId: screen.id, xFraction: fraction)
-                    Log.write("dock: moved to \(Int((fraction * 100).rounded()))% of a screen")
+                    // Remembered as this screen's corner and gap (never as a desktop point).
+                    spotHere = DockPlacement.spot(for: restFrame, on: screen)
+                    place = DockPlacement.remember(spotHere, on: screen, in: place)
+                    Log.write("dock: moved to \(spotHere.corner.rawValue) +\(Int(spotHere.dx)),\(Int(spotHere.dy)) of a screen")
                 }
                 placePill()
                 send(.dragEnded)
+                updateMinimizeSlot()
             } else if event.clickCount >= 2 {
                 send(.escape)
                 AppModel.shared.openMainWindow()
+            } else if ui.minimized && !voiceActive {
+                // A click on the orb opens it into the pill (pointing at it opens the list, as on the pill).
+                setMinimized(false)
             } else if !voiceActive {
                 send(.clickPill)
                 // The list opens with the compose field taking the keys: what Samin types becomes a new prompt, and a
@@ -766,7 +949,7 @@ final class DockController: NSObject {
             return true
         case .mouseMoved:
             let point = local(event, in: window)
-            if !voiceActive && !onControl(point) && (point.x < 12 || point.x > window.frame.width - 12) {
+            if !voiceActive && !ui.minimized && !onControl(point) && (point.x < 12 || point.x > window.frame.width - 12) {
                 NSCursor.resizeUpDown.set()
             } else {
                 NSCursor.arrow.set()
@@ -869,6 +1052,7 @@ final class DockController: NSObject {
             pill.orderOut(nil)
             if visible { pill.orderFrontRegardless() }
         }
+        updateMinimizeSlot()
         refresh()
     }
 
@@ -901,12 +1085,97 @@ final class DockController: NSObject {
         }
     }
 
-    /// "Show Agent Dock" (menu bar extra, main menu): turns it back on, ends a hide, and opens it.
+    /// "Show Agent Dock" (menu bar extra, main menu): turns it back on, ends a hide (⌃⌥D's too), and opens it.
     func showFromMenu() {
         guard started else { return }
         if !enabled { turnOn() }
         hiddenUntil = nil
+        _ = presence.handle(.showFromMenu, visibilityInput())
+        savePresence()
         summon(focusCompose: false)
+    }
+
+    /// ⌃⌥D: on screen here → put away until pressed again; away (for any reason: ⌃⌥D, a hide for a while, turned
+    /// off, stepped aside for the main window) → back as it was; on screen on another display → brought to this one.
+    /// The hot key only: the menus use putAwayFromMenu / bringBackFromMenu, which never look at the pointer.
+    func toggleShown() {
+        guard started else { return }
+        let effects = presence.handle(.toggleShown(elsewhere: isElsewhere()), visibilityInput())
+        Log.write("dock: ⌃⌥D, " + (presence.hidden ? "put away" : effects.contains(.bringHere) ? "brought here" : "shown"))
+        carry(effects)
+    }
+
+    /// "Hide Agent Dock" (the menu bar extra), "Hide the Dock" (its own menu): put away where it is, until ⌃⌥D or
+    /// "Show Agent Dock". Never moved: in the menu bar extra the pointer is on the menu bar's display.
+    func putAwayFromMenu() {
+        guard started else { return }
+        carry(presence.handle(.putAway, visibilityInput()))
+        Log.write("dock: put away (menu)")
+    }
+
+    /// "Show Agent Dock" in the menu bar extra: back as it was and where it was, as ⌃⌥D brings it back (on again, a
+    /// hide for a while over, over the main window), without moving it to the menu bar's display.
+    func bringBackFromMenu() {
+        guard started else { return }
+        carry(presence.handle(.bringBack, visibilityInput()))
+        Log.write("dock: shown (menu)")
+    }
+
+    /// ⌃⌥M (and "Minimize to Orb" / "Expand the Dock"): orb ↔ pill; a dock that isn't on screen comes back so (the hot
+    /// key brings it to the pointer's screen; a menu item leaves it on its own).
+    func toggleMinimized(fromMenu: Bool = false) {
+        guard started else { return }
+        let effects = presence.handle(.toggleMinimized(elsewhere: !fromMenu && isElsewhere()), visibilityInput())
+        Log.write("dock: " + (presence.minimized ? "minimized to the orb" : "expanded to the pill"))
+        carry(effects)
+    }
+
+    /// The "–", a click on the orb, Settings.
+    func setMinimized(_ on: Bool) {
+        guard started, on != presence.minimized else { return }
+        _ = presence.handle(on ? .minimize : .expand, visibilityInput())
+        Log.write("dock: " + (on ? "minimized to the orb" : "expanded to the pill"))
+        carry([])
+    }
+
+    /// Settings (and the main window's Settings): the dock on or off (off for good, until it is turned on again). On
+    /// also ends ⌃⌥D's hide and a hide for a while, even when it was never turned off: the switch then says it shows.
+    func setEnabled(_ on: Bool) {
+        guard started else { return }
+        if on {
+            guard !isOn else { return }
+            if !enabled { turnOn() }
+            hiddenUntil = nil
+            _ = presence.handle(.showFromMenu, visibilityInput())
+            savePresence()
+            refresh()
+        } else if enabled {
+            turnOff()
+        }
+    }
+
+    /// "Agent Dock Settings…" (the dock's menu, the menu bar extra): the shortcuts, the dock on/off and the orb.
+    func openSettings() {
+        send(.escape)
+        DockSettingsWindowController.shared.show()
+    }
+
+    /// What DockPresence asked for, then the windows again.
+    private func carry(_ effects: [DockPresence.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .turnOn: if !enabled { turnOn() }
+            case .endHide: hiddenUntil = nil
+            case .bringHere: bringHere()
+            case .closeList:
+                summoned = false
+                send(.escape)
+            }
+        }
+        savePresence()
+        updateMinimizeSlot()
+        refresh()
+        if visible { placePill() }
     }
 
     private func turnOn() {
@@ -952,11 +1221,19 @@ final class DockController: NSObject {
         menu.autoenablesItems = false
         menu.addItem(DockMenuItem("Open SamRabbit") { AppModel.shared.openMainWindow() })
         menu.addItem(.separator())
+        menu.addItem(DockMenuItem(presence.minimized ? "Expand the Dock" : "Minimize to Orb",
+                                  shortcut: shortcuts.working(.minimize)) { [weak self] in self?.toggleMinimized(fromMenu: true) })
+        menu.addItem(DockMenuItem("Hide the Dock", shortcut: shortcuts.working(.showHide)) { [weak self] in self?.putAwayFromMenu() })
         for choice in DockVisibility.HideChoice.allCases {
             menu.addItem(DockMenuItem(choice.label) { [weak self] in self?.hide(for: choice) })
         }
         menu.addItem(DockMenuItem("Turn Off the Dock") { [weak self] in self?.turnOff() })
         menu.addItem(.separator())
+        menu.addItem(DockMenuItem(voice.state == .idle || voice.isShowingError ? "Talk to SamRabbit" : "End Conversation",
+                                  shortcut: shortcuts.working(.talk)) { [weak self] in self?.toggleVoice() })
+        menu.addItem(DockMenuItem("New Task", shortcut: shortcuts.working(.compose)) { [weak self] in
+            self?.summon(focusCompose: true)
+        })
         menu.addItem(DockMenuItem("Always Listen for “Hey Rabbit”", state: voice.wakeEnabled ? .on : .off) { [weak self] in
             guard let self else { return }
             self.voice.wakeEnabled.toggle()
@@ -964,10 +1241,13 @@ final class DockController: NSObject {
         if let problem = voice.wakeProblem, voice.wakeEnabled {
             menu.addItem(DockMenuItem("“Hey Rabbit”: \(problem)", enabled: false))
         }
-        menu.addItem(DockMenuItem(voice.shortcutDescription.isEmpty
-                                  ? "Voice Shortcut Unavailable\(voice.shortcutProblem.map { " (\($0))" } ?? "")"
-                                  : "Voice Shortcut: \(voice.shortcutDescription)", enabled: false))
-        menu.addItem(DockMenuItem("Open the Dock: ⌃⌥K", enabled: false))
+        // A shortcut the system refused is said, not shown as if it worked.
+        for action in DockShortcutAction.allCases {
+            if let problem = shortcuts.unavailable[action] {
+                menu.addItem(DockMenuItem("\(shortcuts.shortcut(action).display) (\(action.label)): \(problem)", enabled: false))
+            }
+        }
+        menu.addItem(DockMenuItem("Shortcuts & Settings…") { [weak self] in self?.openSettings() })
         menu.addItem(.separator())
         menu.addItem(DockMenuItem("Bigger") { [weak self] in
             guard let self else { return }
@@ -978,13 +1258,14 @@ final class DockController: NSObject {
             self.setZoom(DockMetrics.zoomStepped(self.zoom, by: -1))
         })
         if zoom != 1 { menu.addItem(DockMenuItem("Default Size") { [weak self] in self?.setZoom(1) }) }
-        if spot != nil {
+        if place != nil {
             menu.addItem(DockMenuItem("Move Back to the Middle") { [weak self] in
                 guard let self else { return }
-                self.spot = nil
-                self.fraction = 0.5
+                // Forgotten on every screen: the bottom middle of the pointer's screen, following it again.
+                self.place = nil
                 self.chooseScreen()
                 self.placePill()
+                Log.write("dock: back to the middle")
             })
         }
         guard let view = pill?.contentView else { return }

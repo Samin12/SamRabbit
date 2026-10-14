@@ -17,29 +17,40 @@ struct DockVisibilityInput: Equatable {
     var voiceActive = false
     /// Samin asked for it (⌃⌥K, "Show Agent Dock", a notification): it shows until he lets the list close.
     var summoned = false
+    /// ⌃⌥D put it away: hidden until he presses it again (DockPresence).
+    var userHidden = false
+    /// ⌃⌥D (or ⌃⌥M) brought it back while he is in the main window, where it otherwise steps aside (DockPresence).
+    var overApp = false
 }
 
 enum DockVisibility {
     enum Reason: String, Equatable {
-        case voice, summoned, off, hiddenForAWhile, inApp, shown
+        case voice, summoned, off, userHidden, hiddenForAWhile, inApp, shown
     }
 
     static func reason(_ input: DockVisibilityInput) -> Reason {
+        // A live microphone is never out of sight: the voice bar shows through every hide.
         if input.voiceActive { return .voice }
         if input.summoned { return .summoned }
         if !input.enabled { return .off }
+        if input.userHidden { return .userHidden }
         if let until = input.hiddenUntil, until > input.now { return .hiddenForAWhile }
         // It steps aside while Samin is in the main window: there the app already shows all of this, bigger. It is
         // back as soon as the window is minimised, closed or hidden, or another app is in front.
-        if input.appActive && input.mainWindowVisible && input.mainWindowKey && !input.mainWindowMinimized { return .inApp }
+        if inMainWindow(input) && !input.overApp { return .inApp }
         return .shown
     }
 
     static func shows(_ input: DockVisibilityInput) -> Bool {
         switch reason(input) {
         case .voice, .summoned, .shown: return true
-        case .off, .hiddenForAWhile, .inApp: return false
+        case .off, .userHidden, .hiddenForAWhile, .inApp: return false
         }
+    }
+
+    /// Samin is working in the main window (SamRabbit in front, the window visible, key and not minimised).
+    static func inMainWindow(_ input: DockVisibilityInput) -> Bool {
+        input.appActive && input.mainWindowVisible && input.mainWindowKey && !input.mainWindowMinimized
     }
 
     /// The ways to hide it for a while. Both come back by themselves; only "Turn off" (persisted) is for good, and
@@ -63,6 +74,127 @@ enum DockVisibility {
             let startOfToday = calendar.startOfDay(for: now)
             return calendar.date(byAdding: .day, value: 1, to: startOfToday) ?? now.addingTimeInterval(86_400)
         }
+    }
+}
+
+/// Samin's own say over the dock, beside the rules above (CONTRACTS-WAVE7 §B2): ⌃⌥D shows and hides it (hidden
+/// lasts until he presses it again; pressed while the dock is on another screen it brings the dock to his), and ⌃⌥M,
+/// the "–" on the pill, "Minimize to Orb" or a click on the orb fold it to the orb and back. The menus' Hide / Show /
+/// Minimize do what the keys do without looking at the pointer: a menu item never moves the dock to another screen.
+/// Pure, like the rest of this file: the controller keeps `hidden` and `minimized` in UserDefaults and carries out the
+/// effects.
+struct DockPresence: Equatable {
+    /// ⌃⌥D or "Hide Agent Dock" put it away: until ⌃⌥D again or "Show Agent Dock" (⌃⌥K shows it with its list until
+    /// that closes).
+    var hidden = false
+    /// Folded to the orb.
+    var minimized = false
+    /// ⌃⌥D (or ⌃⌥M) brought it back while Samin is in the main window, where it would step aside: it stays until he
+    /// leaves the app or the window (a click in the dock giving it the keys is not leaving), then the rules are back.
+    var overApp = false
+
+    enum Form: Equatable {
+        case pill, orb, voiceBar
+    }
+
+    enum Event: Equatable {
+        /// ⌃⌥D. `elsewhere`: the dock is (or would come back) on another screen than the pointer's.
+        case toggleShown(elsewhere: Bool)
+        /// "Hide Agent Dock" / "Hide the Dock" in a menu: put away where it is. A menu never asks where the pointer
+        /// is (in the menu bar extra it is on the menu bar's display, maybe not the dock's).
+        case putAway
+        /// "Show Agent Dock" in the menu bar extra: back as it was and where it was (⌃⌥D's reveal, never moved).
+        case bringBack
+        /// ⌃⌥M (`elsewhere` as for ⌃⌥D), "Minimize to Orb" / "Expand the Dock" in the menus (never elsewhere).
+        case toggleMinimized(elsewhere: Bool)
+        /// The "–" on the pill.
+        case minimize
+        /// A click on the orb.
+        case expand
+        /// "Show Agent Dock" (the menu bar extra, the app menu, Settings).
+        case showFromMenu
+    }
+
+    enum Effect: Equatable {
+        /// It was turned off: turn it on again.
+        case turnOn
+        /// It was hidden for a while: that hide is over.
+        case endHide
+        /// Move it to the screen the pointer is on.
+        case bringHere
+        /// It goes away: the list closes with it.
+        case closeList
+    }
+
+    /// What the pill window draws: during a conversation always the voice bar, and the orb again after it.
+    func form(voiceActive: Bool) -> Form {
+        voiceActive ? .voiceBar : (minimized ? .orb : .pill)
+    }
+
+    /// The visibility input with Samin's say in it.
+    func applied(to input: DockVisibilityInput) -> DockVisibilityInput {
+        var input = input
+        input.userHidden = hidden
+        input.overApp = overApp
+        return input
+    }
+
+    mutating func handle(_ event: Event, _ input: DockVisibilityInput) -> [Effect] {
+        switch event {
+        case .toggleShown(let elsewhere):
+            let now = applied(to: input)
+            if DockVisibility.shows(now) && !hidden {
+                // On screen somewhere else: here it comes, still shown. On screen here: put away until pressed again
+                // (the voice bar of a conversation stays until it ends).
+                if elsewhere { return [.bringHere] }
+                hidden = true
+                overApp = false
+                return [.closeList]
+            }
+            return reveal(input, elsewhere: elsewhere)
+
+        case .putAway:
+            hidden = true
+            overApp = false
+            return [.closeList]
+
+        case .bringBack:
+            return reveal(input, elsewhere: false)
+
+        case .toggleMinimized(let elsewhere):
+            minimized.toggle()
+            // Folding a dock that isn't on screen shows it, in its new shape.
+            return DockVisibility.shows(applied(to: input)) ? [] : reveal(input, elsewhere: elsewhere)
+
+        case .minimize:
+            minimized = true
+            return []
+
+        case .expand:
+            minimized = false
+            return []
+
+        case .showFromMenu:
+            hidden = false
+            return []
+        }
+    }
+
+    /// After every look at the windows: "over the app" ends once Samin has left the app or its main window.
+    mutating func settle(_ input: DockVisibilityInput) {
+        guard overApp else { return }
+        if !input.appActive || !input.mainWindowVisible || input.mainWindowMinimized { overApp = false }
+    }
+
+    /// Back on screen, as it was (pill or orb, its spot): whatever kept it away is lifted.
+    private mutating func reveal(_ input: DockVisibilityInput, elsewhere: Bool) -> [Effect] {
+        var effects: [Effect] = []
+        hidden = false
+        if !input.enabled { effects.append(.turnOn) }
+        if let until = input.hiddenUntil, until > input.now { effects.append(.endHide) }
+        if DockVisibility.inMainWindow(input) { overApp = true }
+        if elsewhere { effects.append(.bringHere) }
+        return effects
     }
 }
 

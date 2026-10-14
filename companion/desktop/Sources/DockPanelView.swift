@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-// The expanded panel (grows upward from the pill, ≈440 pt wide, at most 60% of the screen, scrolls): Needs you,
-// Working, Recent chats (SamRabbit) and a folded Earlier; a row opens in place with its last messages and the actions
-// the item supports right now (`can`); the compose bar is pinned at the bottom.
+// The expanded panel (opens on the side of the pill with room, ≈440 pt wide, at most 60% of the screen, scrolls):
+// Needs you, Working, Recent chats (SamRabbit) and a folded Earlier; a row opens in place with its last messages and
+// the actions the item supports right now (`can`); the compose bar is pinned at the bottom.
 
 struct DockPanel: View {
     @ObservedObject var store: DockStore
@@ -998,7 +998,8 @@ struct DockPanelRoot: View {
         DockPanel(store: store, ui: ui, voice: voice.snapshot, commands: commands)
             .fixedSize()
             .dockReportSize()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            // Against the dock's side: a list below a high dock grows downward, one above a low dock upward.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: ui.listBelow ? .top : .bottom)
             .onPreferenceChange(DockSizeKey.self) { size in onSize(size) }
             .environment(\.dockRender, render)
             .environment(\.colorScheme, .dark)

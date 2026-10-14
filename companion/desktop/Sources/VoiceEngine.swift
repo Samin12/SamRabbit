@@ -138,6 +138,30 @@ final class MacVoice: ObservableObject {
         updateWake()
     }
 
+    /// Settings recorded another talk shortcut (Carbon key code and modifiers; `description` as the menus show it,
+    /// "⌃⌥Space"; `activate(shortcut: false)` leaves the first one to this too): the old one is let go and this one
+    /// registered (exclusively: an app holding it so makes this fail). False when the system refused it (another app
+    /// has it), or when `unavailable` already says why it can't be (macOS uses it itself): then no key talks and the
+    /// menus say so, as when ⌃⌥Space is taken at launch.
+    @discardableResult
+    func setShortcut(keyCode: UInt32, modifiers: UInt32, description: String, unavailable: String? = nil) -> Bool {
+        hotKey = nil
+        if unavailable == nil {
+            hotKey = VoiceHotKey(keyCode: keyCode, modifiers: modifiers, description: description, exclusive: true) { [weak self] in
+                self?.toggle(reason: "shortcut")
+            }
+        }
+        shortcutDescription = hotKey == nil ? "" : description
+        shortcutProblem = hotKey == nil ? (unavailable ?? "\(description) is used by another app") : nil
+        return hotKey != nil
+    }
+
+    /// Lets go of the talk shortcut for a moment (Settings is recording a new one, and the keys must reach it there);
+    /// the menus keep showing it. `setShortcut` takes it again.
+    func releaseShortcut() {
+        hotKey = nil
+    }
+
     // MARK: - What the app asks for
 
     /// Opens a conversation ("button", "shortcut", "wake"); nothing while one is open.

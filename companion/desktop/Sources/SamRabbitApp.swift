@@ -242,7 +242,7 @@ struct MenuContent: View {
         }
         Button("Open SamRabbit") { model.openMainWindow() }
             .keyboardShortcut("o")
-        Button("Show Agent Dock") { DockController.shared.showFromMenu() }
+        DockMenuBarItems()
         Button("Pair iPhone…") { model.openPairing() }
         Button("Connect ChatGPT…") { model.openChatGPT() }
         if !model.notificationsAllowed {
@@ -269,7 +269,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   + (Config.isDefaultBase ? "" : " (override)") + (atLogin ? " at-login" : ""))
         MainActor.assumeIsolated {
             AppModel.shared.start(showWindow: !atLogin)
-            MacVoice.shared.activate()
+            // The talk shortcut is one of the four Settings can record anew: the dock's shortcut center registered it
+            // (through MacVoice.setShortcut) when the dock started.
+            MacVoice.shared.activate(shortcut: false)
         }
     }
 
@@ -306,8 +308,7 @@ struct SamRabbitApp: App {
                 Button("Pair iPhone…") { model.openPairing() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Connect ChatGPT…") { model.openChatGPT() }
-                Button("Show Agent Dock") { DockController.shared.showFromMenu() }
-                    .keyboardShortcut("k", modifiers: [.control, .option])
+                DockAppMenuItems()
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload") { model.reload() }

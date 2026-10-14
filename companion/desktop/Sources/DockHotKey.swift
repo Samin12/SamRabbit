@@ -4,27 +4,33 @@ import Carbon
 private let dockHotKeySignature: OSType = 0x5352_446B  // 'SRDk'
 
 /// A global keyboard shortcut through Carbon's `RegisterEventHotKey`: it needs no Accessibility or Input Monitoring
-/// permission (the system only tells the app about its own combination). The dock registers ⌃⌥K; the voice work owns
-/// ⌃⌥Space and installs its own handler on the same event target, so this handler answers only hot keys carrying its
-/// own signature and passes every other one on (`eventNotHandledErr`).
+/// permission (the system only tells the app about its own combination). The dock registers ⌃⌥K, ⌃⌥D and ⌃⌥M (or what
+/// Settings recorded instead, DockShortcutCenter); the voice work registers the talk shortcut with its own handler on
+/// the same event target, so this handler answers only hot keys carrying its own signature and passes every other one
+/// on (`eventNotHandledErr`).
 @MainActor
 final class DockHotKey {
     private static var actions: [UInt32: () -> Void] = [:]
     private static var handler: EventHandlerRef?
     private static var nextId: UInt32 = 1
+    /// What Carbon answered the last registration (`eventHotKeyExistsErr`: another app has the combination).
+    private(set) static var lastStatus: OSStatus = noErr
 
     private var ref: EventHotKeyRef?
     private let id: UInt32
 
     /// nil when the combination is taken by another app (or Carbon refused it); the reason is logged unless `quiet`
-    /// (keys held only for a moment, like the dock's size keys while the pointer is on it).
-    init?(keyCode: Int, modifiers: Int, name: String, quiet: Bool = false, action: @escaping () -> Void) {
+    /// (keys held only for a moment, like the dock's size keys while the pointer is on it). `exclusive`: Carbon refuses
+    /// it while another app holds it exclusively too, and refuses such an app while SamRabbit holds it (a registration
+    /// without exclusivity, ours or another app's, is never refused: the combination is shared and nobody is told).
+    init?(keyCode: Int, modifiers: Int, name: String, quiet: Bool = false, exclusive: Bool = false, action: @escaping () -> Void) {
         Self.installHandler()
         id = Self.nextId
         Self.nextId += 1
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), EventHotKeyID(signature: dockHotKeySignature, id: id),
-                                         GetApplicationEventTarget(), 0, &ref)
+                                         GetApplicationEventTarget(), exclusive ? OptionBits(kEventHotKeyExclusive) : 0, &ref)
+        Self.lastStatus = status
         guard status == noErr, let ref else {
             if !quiet {
                 Log.write(status == eventHotKeyExistsErr ? "shortcut \(name) is taken by another app" : "shortcut \(name) not registered (\(status))")
