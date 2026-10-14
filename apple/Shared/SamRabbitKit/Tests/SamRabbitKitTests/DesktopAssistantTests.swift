@@ -83,9 +83,9 @@ struct DesktopAssistantBridgeTests {
         #expect(sent?["kind"].string == "audio")
         #expect(state["sessions"].array?.last?["deviceId"].string == "mac")
         // Announcements, cancel and end go to the desktop routes too.
-        _ = try await bridge.control("announce", ["say": "“Fix login redirect” in Hermes finished."])
+        _ = try await bridge.control("announce", ["say": "“Fix login redirect” in Website finished."])
         let page = try await client.assistantAnnouncements(conversationId: session.conversationId)
-        #expect(page.items.map(\.say) == ["“Fix login redirect” in Hermes finished."])
+        #expect(page.items.map(\.say) == ["“Fix login redirect” in Website finished."])
         try await client.assistantCancel(conversationId: session.conversationId)
         try await client.assistantEnd(conversationId: session.conversationId)
         let after = try await bridge.assistantState()

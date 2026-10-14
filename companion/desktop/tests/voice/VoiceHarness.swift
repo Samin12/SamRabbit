@@ -60,7 +60,7 @@ struct VoiceHarness {
             voice.stopSpeaking()
             ok = await waitUntil(within: 5) { voice.state == .listening } && ok
             ok = ok && check(voice.state == .listening, "listening again after the barge-in")
-            await post("/dev/announce", ["say": "“Fix login redirect” in Hermes finished."])
+            await post("/dev/announce", ["say": "“Fix login redirect” in Website finished."])
             // The first poll comes 4 s into the conversation; the announcement is said as a turn.
             ok = await waitUntil(within: 30) { voice.caption.contains("Fix login redirect") } && ok
             ok = ok && check(voice.caption.contains("Fix login redirect"), "the announcement was said")

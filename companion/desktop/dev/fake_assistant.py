@@ -247,7 +247,7 @@ class FakeAssistant:
     def announce(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
             item = {"id": len(self.announcements) + 1,
-                    "say": str(payload.get("say") or "“Fix login redirect” in Hermes finished."),
+                    "say": str(payload.get("say") or "“Fix login redirect” in Website finished."),
                     "audio": None, "kind": str(payload.get("kind") or "done"),
                     "threadId": payload.get("threadId") or "t_login", "title": payload.get("title") or "Fix login redirect"}
             self.announcements.append(item)
