@@ -173,18 +173,18 @@ extension BridgeClient {
     public func assistantSession(conversationId: String? = nil, timeout: TimeInterval = 8) async throws -> AssistantSession {
         var body: [String: JSONValue] = [:]
         if let conversationId, !conversationId.isEmpty { body["conversationId"] = .string(conversationId) }
-        return try await json(.post("/v1/mobile/assistant/session", body: body, timeout: timeout).repeatable)
+        return try await json(.post(api.assistantPath("session"), body: body, timeout: timeout).repeatable)
     }
 
     /// `POST /v1/mobile/assistant/cancel {conversationId}`: stop the reply being said (barge-in).
     public func assistantCancel(conversationId: String, timeout: TimeInterval = 5) async throws {
-        try await send(.post("/v1/mobile/assistant/cancel", body: ["conversationId": .string(conversationId)],
+        try await send(.post(api.assistantPath("cancel"), body: ["conversationId": .string(conversationId)],
                              timeout: timeout).repeatable)
     }
 
-    /// `POST /v1/mobile/assistant/end {conversationId}`: the watch stopped listening.
+    /// `POST /v1/mobile/assistant/end {conversationId}`: the watch (or the Mac) stopped listening.
     public func assistantEnd(conversationId: String, timeout: TimeInterval = 5) async throws {
-        try await send(.post("/v1/mobile/assistant/end", body: ["conversationId": .string(conversationId)],
+        try await send(.post(api.assistantPath("end"), body: ["conversationId": .string(conversationId)],
                              timeout: timeout).repeatable)
     }
 
@@ -193,7 +193,7 @@ extension BridgeClient {
                                        timeout: TimeInterval = 10) async throws -> AnnouncementPage {
         var query = [URLQueryItem(name: "conversationId", value: conversationId)]
         if let cursor, !cursor.isEmpty { query.append(URLQueryItem(name: "since", value: cursor)) }
-        return try await json(.get("/v1/mobile/assistant/announcements", query: query, timeout: timeout))
+        return try await json(.get(api.assistantPath("announcements"), query: query, timeout: timeout))
     }
 
     /// One turn, as items in order (`heard`, `say.delta`…, audio, `say.done`, actions, cards, `done`), whether the
@@ -264,10 +264,13 @@ extension BridgeClient {
         return answer
     }
 
-    /// The turn on the bridge's own addresses only (the iPhone's side of the relay uses this too).
+    /// The turn on the bridge's own addresses only (the iPhone's side of the relay uses this too). A desktop client
+    /// sends it to `/v1/desktop/assistant/turn`.
     public func openDirect(_ turn: AssistantTurnRequest) async throws -> AssistantTurnResponse {
         do {
-            return try await withHosts(turn.bridgeRequest, idempotent: true) { urlRequest in
+            var request = turn.bridgeRequest
+            request.path = api.assistantPath("turn")
+            return try await withHosts(request, idempotent: true) { urlRequest in
                 let (http, body) = try await StreamingBody.open(urlRequest, in: self.streamSession,
                                                                 headWithin: turn.headTimeout)
                 return AssistantTurnResponse(status: http.statusCode,

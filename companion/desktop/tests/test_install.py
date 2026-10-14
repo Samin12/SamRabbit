@@ -116,5 +116,61 @@ class DesktopInstallTest(unittest.TestCase):
         self.assertNotIn(token, output)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "the build targets macOS")
+class DesktopBuildTest(unittest.TestCase):
+    """build.sh and its SamRabbitKit cache, into a throwaway folder (never the app's own build folder)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name, "out")
+
+    def test_an_identity_that_cannot_sign_falls_back_to_ad_hoc(self) -> None:
+        # The keychain lists an Apple Development identity codesign can't use (a locked keychain, a denied key
+        # prompt): stand in for `security` with one that lists an identity that doesn't exist.
+        shims = Path(self.tmp.name, "bin")
+        shims.mkdir()
+        security = shims / "security"
+        security.write_text('#!/bin/sh\necho \'  1) 0123456789ABCDEF0123456789ABCDEF01234567 '
+                            '"Apple Development: Nobody (NOTEAM0000)"\'\necho "     1 valid identities found"\n')
+        security.chmod(0o755)
+        env = {**os.environ, "PATH": f"{shims}:{os.environ['PATH']}"}
+        done = subprocess.run([str(ROOT / "build.sh"), "--out", str(self.out)], env=env, capture_output=True,
+                              text=True, timeout=600)
+        self.assertEqual(0, done.returncode, done.stdout + done.stderr)
+        self.assertIn("the Apple Development identity couldn't sign", done.stderr)
+        self.assertIn("signed ad-hoc", done.stdout)
+        app = self.out / "SamRabbit.app"
+        details = subprocess.run(["codesign", "-dv", str(app)], capture_output=True, text=True)
+        self.assertIn("Signature=adhoc", details.stderr)
+        with (app / "Contents/Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+        self.assertIn("NSMicrophoneUsageDescription", info)
+        self.assertEqual("26.0", info["LSMinimumSystemVersion"])
+
+    def test_the_samrabbitkit_cache_follows_the_compiler_and_the_files(self) -> None:
+        kit = self.out / "SamRabbitKit"
+        target = "x86_64-apple-macos26.0" if os.uname().machine == "x86_64" else "arm64-apple-macos26.0"
+
+        def build() -> str:
+            done = subprocess.run([str(ROOT / "tools/build_samrabbitkit.sh"), str(kit), target], capture_output=True,
+                                  text=True, timeout=600, check=True)
+            return done.stdout + done.stderr
+
+        self.assertIn("compiling SamRabbitKit", build())
+        stamp = (kit / "stamp").read_text().splitlines()
+        self.assertEqual(target, stamp[0])
+        self.assertIn("Swift version", stamp[1])
+        self.assertIn("Assistant/ConversationMachine.swift", stamp)
+        self.assertEqual("", build(), "cached")
+        # Another compiler (an Xcode update): its module can't be imported, so it is built again.
+        (kit / "stamp").write_text("\n".join([stamp[0], "Apple Swift version 0.1", *stamp[2:]]) + "\n")
+        self.assertIn("compiling SamRabbitKit", build())
+        self.assertEqual("", build(), "cached again")
+        # A source that is gone (the stamp lists one more file than there is now).
+        (kit / "stamp").write_text("\n".join([*stamp, "Assistant/Removed.swift"]) + "\n")
+        self.assertIn("compiling SamRabbitKit", build())
+
+
 if __name__ == "__main__":
     unittest.main()

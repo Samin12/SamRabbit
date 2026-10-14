@@ -24,7 +24,15 @@ import Foundation
 ///   muted, `mutedTimeout`, about 5 minutes), or after the current reply when the app leaves the screen (coming back
 ///   while it plays keeps the conversation going). Stop while paused means it: the paused conversation no longer
 ///   goes on by itself.
+///
+/// The Mac's own app runs the same machine (`device: .mac`): only what it says when something fails differs.
 public struct ConversationMachine: Sendable {
+    /// Who holds the conversation: the watch reaches the Mac over the network, the Mac's app is on the Mac.
+    public enum Device: String, Sendable, Equatable {
+        case watch
+        case mac
+    }
+
     public enum Phase: String, Sendable, Equatable {
         /// No conversation.
         case idle
@@ -135,8 +143,20 @@ public struct ConversationMachine: Sendable {
         }
 
         /// What the watch says.
-        public var spoken: String {
-            switch self {
+        public var spoken: String { spoken(on: .watch) }
+
+        /// What `device` says.
+        public func spoken(on device: Device) -> String {
+            if device == .mac {
+                switch self {
+                case .unreachable: return "I can't reach the SamRabbit bridge on this Mac."
+                case .unauthorized: return "The SamRabbit bridge didn't accept this app. Reinstall SamRabbit on this Mac."
+                case .unavailable: return "The assistant isn't available on this Mac right now."
+                case .outdated: return "Update the SamRabbit bridge on this Mac to talk with me."
+                case .busy, .failed: break
+                }
+            }
+            return switch self {
             case .unreachable: "I can't reach your Mac right now."
             case .unauthorized: "Your watch needs to reconnect. Open SamRabbit on your iPhone."
             case .unavailable: "The assistant isn't available on your Mac right now."
@@ -150,8 +170,20 @@ public struct ConversationMachine: Sendable {
         }
 
         /// Shown under the orb once the conversation ended because of it.
-        public var shown: String {
-            switch self {
+        public var shown: String { shown(on: .watch) }
+
+        /// Shown on `device` once the conversation ended because of it.
+        public func shown(on device: Device) -> String {
+            if device == .mac {
+                switch self {
+                case .unreachable: return "The SamRabbit bridge isn't running"
+                case .unauthorized: return "The bridge didn't accept the desktop token"
+                case .unavailable: return "Assistant unavailable on this Mac"
+                case .outdated: return "Update the SamRabbit bridge"
+                case .busy, .failed: break
+                }
+            }
+            return switch self {
             case .unreachable: "Can't reach your Mac"
             case .unauthorized: "Reconnect through your iPhone"
             case .unavailable: "Assistant unavailable on the Mac"
@@ -271,6 +303,7 @@ public struct ConversationMachine: Sendable {
     /// The quiet end while muted (never shorter than `idleTimeout`): muted and put away, the conversation still
     /// ends, so it doesn't hold the microphone and read announcements out loud until someone comes back.
     public var mutedTimeout: TimeInterval = 300
+    public let device: Device
     /// A conversation that stopped because the app left (or the audio was taken) is resumed within this long.
     public var resumeWindow: TimeInterval = 180
     public static let maxExchanges = 12
@@ -305,8 +338,10 @@ public struct ConversationMachine: Sendable {
     private var endedAt: Date?
     private let makeId: @Sendable () -> String
 
-    public init(idleTimeout: TimeInterval = 120, makeId: @escaping @Sendable () -> String = { UUID().uuidString }) {
+    public init(idleTimeout: TimeInterval = 120, device: Device = .watch,
+                makeId: @escaping @Sendable () -> String = { UUID().uuidString }) {
         self.idleTimeout = idleTimeout
+        self.device = device
         self.makeId = makeId
     }
 
@@ -674,20 +709,21 @@ public struct ConversationMachine: Sendable {
         if failure == .unreachable { reachable = false }
         // The Mac no longer knows the conversation (it restarted): the next turn starts a new one.
         if case .failed("conversation_not_found", _) = failure { conversationId = nil }
+        let spoken = failure.spoken(on: device)
         update { exchange in
             exchange.failed = true
             // The caption shows what the watch says now (unless the reply had said something already).
-            if exchange.say.isEmpty { exchange.say = failure.spoken }
+            if exchange.say.isEmpty { exchange.say = spoken }
         }
         let id = current?.id ?? makeId()
-        if current == nil { record(Exchange(id: id, kind: .notice, say: failure.spoken, failed: true)) }
+        if current == nil { record(Exchange(id: id, kind: .notice, say: spoken, failed: true)) }
         current = Turn(id: id, kind: .local, complete: true, completedAt: now)
         phase = .thinking
         if failure.isFatal {
             endAfterPlayback = true
-            problem = failure.shown
+            problem = failure.shown(on: device)
         }
-        return effects + [.closeMic, .speak(failure.spoken), .haptic(.failure)]
+        return effects + [.closeMic, .speak(spoken), .haptic(.failure)]
     }
 
     /// The current turn is over (played out, or nothing to play): end, pause, announce, or listen again.

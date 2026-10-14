@@ -80,13 +80,15 @@ stream quiet after `heard` (a long tool call) with a `{"type":"ping"}` every `pi
 A turn that hears "task", "draft", "notes" or "start" reports the task it started (`t3.started`, thread
 `t_relnotes`) and that thread then exists (working), so the iPhone's Talk can open it in Tasks; "calendar", "next"
 or "meeting" brings an "Up next" card. Text turns (`{text}`, the iPhone's keyboard in Talk) are answered the same way.
+The Mac app's twin of these routes, `/v1/desktop/assistant/*`, answers the same with the desktop token
+(`X-SamRabbit-Desktop: fake-desktop-token`, loopback only), recorded with `deviceId: "mac"`.
 Pending approvals and questions carry `requestId` (questions also `questionId`) and `respond` refuses a stale id
 with 409 `t3_request_not_pending`, exactly like the real bridge.
 
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 194 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 198 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
@@ -203,7 +205,7 @@ the SamRabbit control) and `WatchActionButtonTests` (Apple Watch Ultra simulator
 | Conversations | `ConversationTimeline` (port of the desktop `store.js`), `TimelineItem`, `GenCard` |
 | Look | `SamTheme` (colours, `glassCard()`, `samScreen()`, `StatusChip`, `PulseDot`, `SectionHeader`), `OrbView(mood:)`, `OrbRenderer`, `OrbMood` |
 | Watch link | `WatchContext` (applicationContext), `WatchRelay` (sendMessage relay), `BridgeRelay` (the client's second route) |
-| Assistant | `ConversationMachine` (the conversation's rules; the iPhone adds `typed` turns and `muted`), `SpeechDetector` + `NoiseFloor`, `AssistantStream` / `AssistantStreamParser` (frames), `AssistantEvent`, `AssistantReply` (buffered), `AssistantTurnRequest` / `AssistantTurnResponse`, `BridgeClient.assistantTurn` / `assistantSession` / `assistantCancel` / `assistantEnd` / `assistantAnnouncements`, `TurnRelay` + `TurnRelayHost` (turns through the iPhone), `WAV`, `PCM16`, `AssistantStatus` (`summary.assistant`), `AudioSessionClaims` (who holds the app's audio session: Talk, dictation) |
+| Assistant | `ConversationMachine` (the conversation's rules; the iPhone adds `typed` turns and `muted`), `SpeechDetector` + `NoiseFloor`, `AssistantStream` / `AssistantStreamParser` (frames), `AssistantEvent`, `AssistantReply` (buffered), `AssistantTurnRequest` / `AssistantTurnResponse`, `BridgeClient.assistantTurn` / `assistantSession` / `assistantCancel` / `assistantEnd` / `assistantAnnouncements`, `TurnRelay` + `TurnRelayHost` (turns through the iPhone), `WAV`, `PCM16`, `AssistantStatus` (`summary.assistant`), `AudioSessionClaims` (who holds the app's audio session: Talk, dictation); `device: .mac` for the desktop app's wording; `BridgeClient(api: .desktop)`: the same calls through the bridge's desktop API (`/v1/desktop/assistant/*`, the desktop token), used by the Mac app (`companion/desktop`, which compiles SamRabbitKit as a static library) |
 | Live Activity | `TaskActivityAttributes` (iOS); Talk's `TalkActivityAttributes` (iOS), `TalkActivityState` and `TalkPhase` (what Talk shows in a word, the Live Activity's line and when it updates) |
 
 **The orb** is the desktop `OrbRenderer.swift` math, unchanged, evaluated on the CPU: `OrbRenderer.field`

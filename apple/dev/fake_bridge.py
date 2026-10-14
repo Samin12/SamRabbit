@@ -76,6 +76,9 @@ The voice assistant (CONTRACTS-WAVE5, "Streaming turn protocol"), with canned an
   instead of WAV); ``missing`` (an older bridge: 404 and no ``assistant`` in the summary).
   ``POST /__fake/announce {say?, kind?, threadId?, title?, audio?}`` queues an announcement (``audio: true`` with its
   own WAV clip, ``"broken"`` with a clip no player can read).
+* The Mac app's twin of those routes (CONTRACTS-WAVE6): ``/v1/desktop/assistant/turn|session|cancel|end|announcements``
+  with the desktop token (``X-SamRabbit-Desktop: fake-desktop-token``, loopback only) instead of a mobile token; the
+  same answers, recorded with ``deviceId: "mac"``.
 Stdlib only, Python 3.9.
 """
 
@@ -107,6 +110,8 @@ FIXTURES = os.path.join(HERE, "fixtures")
 VERSION = "fake-1.0"
 DEFAULT_CODE = "SAMRABBT"
 DESKTOP_TOKEN = "fake-desktop-token"
+# Who the desktop assistant routes talk for (the Mac's own app).
+MAC_DEVICE: Dict[str, Any] = {"deviceId": "mac", "name": "Mac", "platform": "mac"}
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 HEARTBEAT_SECONDS = 15.0
 # Voice (the real bridge's limits and answers, samrabbit_transcribe.py)
@@ -1031,6 +1036,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, self.health())
             if path.startswith("/__fake/"):
                 return self.fake(method, path)
+            if path.startswith("/v1/desktop/assistant/"):
+                self.require_desktop()
+                return self.assistant(method, path[len("/v1/desktop/"):], MAC_DEVICE)
             if not path.startswith("/v1/mobile/"):
                 raise ApiError(404, "not_found", "Not found.")
             self.mobile(method, path)

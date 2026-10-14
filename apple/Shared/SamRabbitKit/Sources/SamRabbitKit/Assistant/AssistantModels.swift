@@ -10,6 +10,8 @@ import Foundation
 //   POST /v1/mobile/assistant/cancel     {conversationId}  (stops the reply: the stream ends with done{interrupted})
 //   POST /v1/mobile/assistant/end        {conversationId}
 //   GET  /v1/mobile/assistant/announcements?conversationId=&since= -> {items:[...], cursor}
+//
+// The Mac's own app has the same routes under /v1/desktop/assistant/* (desktop token, loopback only; `BridgeAPI`).
 
 /// Which model answers: gpt-realtime on the Mac (the R1's voice and tools) or the Claude fallback.
 public enum AssistantBrain: String, Sendable, Codable, Equatable {
