@@ -3,8 +3,8 @@ import SwiftUI
 
 // The expanded panel (opens on the side of the pill with room, ≈440 pt wide, at most 60% of the screen, scrolls):
 // Morning (the brief, before noon: CONTRACTS-WAVE8 §D2), Needs you, Working, Recent chats (SamRabbit) and a folded
-// Earlier; a row opens in place with its last messages and
-// the actions the item supports right now (`can`); the compose bar is pinned at the bottom.
+// Earlier; a row opens in place with its last messages and the actions the item supports right now (`can`); the
+// compose bar is pinned at the bottom.
 
 struct DockPanel: View {
     @ObservedObject var store: DockStore
