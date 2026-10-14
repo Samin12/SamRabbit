@@ -24,6 +24,8 @@ final class DockNoteFeed: ObservableObject {
 /// While a voice note records, is sent, or says how it went (CONTRACTS-WAVE8 §D1), the pill becomes this small bar:
 /// a red dot and the level, "Recording… ⌃⌥N to send" with the time, × (throw it away) and ↑ (send now); then "Sending…",
 /// then "Sent ✓ — Added to your journal" (or "Saved on this Mac" when the bridge can't take it yet) for a few seconds.
+/// A note kept with a suggestion offers it as a button under the words, at the bar's leading side: never where the
+/// pill's note button or the bar's ↑ was (a click meant for the next note), and it needs a second click (VoiceNotes).
 /// It never speaks.
 struct DockNoteBar: View {
     let note: VoiceNoteSnapshot
@@ -61,9 +63,19 @@ struct DockNoteBar: View {
                         .truncationMode(.tail)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if !note.recording && !note.offer.isEmpty {
+                    DockCapsuleButton(title: note.offer, symbol: note.offerArmed ? "checkmark" : "arrow.turn.down.right",
+                                      style: note.offerArmed ? .accent : .plain, scale: s) {
+                        commands.takeNoteSuggestion()
+                    }
+                    .dockControl()
+                    .fixedSize()
+                    .help(note.offerArmed ? "Click again to do it" : "Click, then click again to do it")
+                    .padding(.top, 5 * s)
+                }
             }
             // Recording, the level and the two buttons sit beside the words; after, the words have the room.
-            .frame(width: (note.recording ? 236 : note.offer.isEmpty ? 292 : 226) * s, alignment: .leading)
+            .frame(width: (note.recording ? 236 : 292) * s, alignment: .leading)
             .padding(.vertical, 8 * s)
             if note.recording {
                 DockLevelBars(level: note.level, scale: s)
@@ -77,13 +89,6 @@ struct DockNoteBar: View {
                         .dockControl()
                 }
                 .padding(.trailing, 11 * s)
-            } else if !note.offer.isEmpty {
-                DockCapsuleButton(title: note.offer, symbol: "arrow.turn.down.right", style: .accent, scale: s) {
-                    commands.takeNoteSuggestion()
-                }
-                .dockControl()
-                .fixedSize()
-                .padding(.trailing, 12 * s)
             } else {
                 Spacer(minLength: 0).frame(width: 4 * s)
             }

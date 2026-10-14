@@ -25,6 +25,12 @@ enum VoiceNoteRules {
     static let outcomeSeconds: TimeInterval = 4.5
     /// How long it waits for the bridge to say what it did with a note before showing "Sent" alone.
     static let outcomeWait: TimeInterval = 20
+    /// After that it keeps asking quietly this long, and says the result in a notification when it comes.
+    static let lateWatch: TimeInterval = 180
+    /// A suggestion's button needs a second click (the first only arms it): it stays armed this long, and a second
+    /// click sooner than `confirmGap` after the first (a double click) is not taken as the confirmation.
+    static let confirmSeconds: TimeInterval = 4
+    static let confirmGap: TimeInterval = 0.4
     /// The outbox keeps at most this many notes, none older than a week.
     static let outboxLimit = 50
     static let outboxMaxAge: TimeInterval = 7 * 86_400
@@ -152,6 +158,8 @@ struct VoiceNoteSnapshot: Equatable {
     var waiting = 0
     /// What the bridge suggests for a note it kept, as a button ("Start as task"); "" for none.
     var offer = ""
+    /// The button was clicked once: it now says what the next click does ("Yes, start the task").
+    var offerArmed = false
 
     var active: Bool { phase != .idle }
 
@@ -177,6 +185,7 @@ struct VoiceNoteSnapshot: Equatable {
         }
         return [
             "state": name, "held": held, "line": line, "detail": detail, "shortcut": shortcut, "waiting": waiting, "offer": offer,
+            "offerArmed": offerArmed,
             "startedAt": startedAt.map { ($0.timeIntervalSince1970 * 1000).rounded() } ?? NSNull(),
         ]
     }
@@ -314,6 +323,26 @@ enum VoiceNoteText {
         }
     }
 
+    /// The same button once clicked: what the second click does. Nothing a suggestion does happens on one click (a
+    /// journal line can't be taken back, a task starts an agent), so a click meant for the dock's note button that
+    /// lands on the bar only arms it.
+    static func confirm(_ action: String) -> String {
+        switch actAction(action) {
+        case "task": return "Yes, start the task"
+        case "journal": return "Yes, add to journal"
+        default: return "Yes, put on calendar"
+        }
+    }
+
+    /// How the bar marks what the bridge said: a failure as failed, nothing heard as not sent (no green check for a
+    /// note that saved nothing), the rest as sent.
+    static func phase(_ status: CaptureStatus) -> VoiceNoteSnapshot.Phase {
+        let kind = (status.outcome?.kind ?? "").lowercased()
+        if status.state == "failed" || kind == "failed" { return .failed }
+        if status.state == "no_speech" || kind == "nothing" { return .discarded }
+        return .sent
+    }
+
     /// The bridge's act for a suggestion (`task` | `journal` | `event`), nil for one it can't do.
     static func actAction(_ action: String) -> String? {
         switch action.lowercased() {
@@ -370,32 +399,46 @@ enum VoiceNoteDelivery: Equatable {
     case keep(String)
     /// Never going to be taken (too long, unreadable): it leaves the outbox.
     case drop(String)
+    /// This Mac called the try off (its task was cancelled, the app is quitting): not an answer from the bridge, so it
+    /// isn't counted as a try; the note stays as it was.
+    case cancelled
 
-    /// `status` 0: unreachable, -1: no desktop token.
+    /// `status` 0: unreachable, -1: no desktop token. Only what can never change for these bytes drops the note
+    /// (too long, not audio, an id the bridge refuses, another note's id); an error the bridge marks `retryable` (a
+    /// body that didn't arrive whole, a stalled upload) and anything it doesn't name keep it for another try.
     static func classify(status: Int, body: Data, captureId: String) -> VoiceNoteDelivery {
         if (200..<300).contains(status) {
             return .delivered(CaptureStatus.decode(body, fallbackId: captureId)
                 ?? CaptureStatus(captureId: captureId, state: "received"))
         }
-        let code = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])
-            .flatMap { ($0["error"] as? [String: Any])?["code"] as? String } ?? ""
+        let error = (try? JSONSerialization.jsonObject(with: body) as? [String: Any]).flatMap { $0["error"] as? [String: Any] }
+        let code = error?["code"] as? String ?? ""
+        let retryable = error?["retryable"] as? Bool ?? false
         switch status {
         case 0: return .keep("The bridge isn’t running")
         case -1: return .keep("SamRabbit isn’t set up (no desktop token)")
         case 401, 403: return .keep("The bridge didn’t accept SamRabbit")
         case 404, 405: return .keep("The bridge needs an update for voice notes")
-        case 409: return .drop("The bridge already has a different note with this id")
-        case 413: return .drop("Too long for the bridge")
+        case 400..<500 where retryable: return .keep("The recording didn’t reach the bridge whole")
+        case 409 where code == "capture_conflict" || code.isEmpty: return .drop("The bridge already has a different note with this id")
+        case 413: return .drop("Too long for the bridge (5 minutes at most)")
         case 422 where code == "no_speech": return .drop("Didn’t catch anything")
         case 400, 415, 422:
             switch code {
             case "audio_too_long": return .drop("Too long for the bridge (5 minutes at most)")
             case "unsupported_audio", "invalid_audio": return .drop("The bridge couldn’t read the recording")
             case "invalid_capture_id": return .drop("The bridge refused the note’s id")
-            default: return .drop("The bridge refused it (\(code.isEmpty ? "HTTP \(status)" : code))")
+            default: return .keep("The bridge refused it for now (\(code.isEmpty ? "HTTP \(status)" : code))")
             }
         default: return .keep("The bridge is busy")
         }
+    }
+
+    /// An upload that threw: called off on this Mac (`URLError.cancelled`, a cancelled task), else the bridge
+    /// couldn't be reached.
+    static func failure(_ error: Error) -> VoiceNoteDelivery {
+        if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
+        return classify(status: 0, body: Data(), captureId: "")
     }
 }
 

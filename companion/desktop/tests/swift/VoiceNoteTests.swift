@@ -12,6 +12,8 @@ enum VoiceNoteTests {
         ("captureAnswers", captureAnswers),
         ("outcomeLines", outcomeLines),
         ("deliveryByStatus", deliveryByStatus),
+        ("retryableAndCalledOffTriesKeepTheNote", retryableAndCalledOffTriesKeepTheNote),
+        ("phaseAndConfirm", phaseAndConfirm),
         ("uploadHeaders", uploadHeaders),
         ("outboxKeepsAndRetries", outboxKeepsAndRetries),
         ("outboxPrunes", outboxPrunes),
@@ -183,6 +185,54 @@ enum VoiceNoteTests {
             }
         }
         expectEqual(VoiceNoteDelivery.classify(status: 404, body: Data(), captureId: id), .keep("The bridge needs an update for voice notes"))
+    }
+
+    /// A 400 the bridge marks retryable (samrabbit_capture: "The recording did not arrive completely", a stalled
+    /// upload) keeps the WAV; so does a 4xx it doesn't name. A try this Mac called off is no try at all.
+    static func retryableAndCalledOffTriesKeepTheNote() throws {
+        let id = "8b9f5f8e-4c1e-4a0b-9a51-3c2b1e0d9f88"
+        func error(_ code: String, retryable: Bool) -> Data {
+            Data(#"{"error":{"code":"\#(code)","message":"x","retryable":\#(retryable)}}"#.utf8)
+        }
+        expectEqual(VoiceNoteDelivery.classify(status: 400, body: error("invalid_audio", retryable: true), captureId: id),
+                    .keep("The recording didn’t reach the bridge whole"), "a body that didn't arrive whole: sent again")
+        if case .drop = VoiceNoteDelivery.classify(status: 400, body: error("invalid_audio", retryable: false), captureId: id) {} else {
+            expect(false, "an empty or unreadable body (not retryable) is dropped")
+        }
+        if case .keep = VoiceNoteDelivery.classify(status: 409, body: error("capture_busy", retryable: true), captureId: id) {} else {
+            expect(false, "a retryable 409 keeps it")
+        }
+        if case .keep = VoiceNoteDelivery.classify(status: 400, body: error("invalid_captured_at", retryable: false), captureId: id) {} else {
+            expect(false, "a 400 the Mac doesn't know is not a reason to lose the note")
+        }
+        if case .drop = VoiceNoteDelivery.classify(status: 400, body: error("audio_too_long", retryable: false), captureId: id) {} else {
+            expect(false, "too long stays dropped")
+        }
+        expectEqual(VoiceNoteDelivery.failure(URLError(.cancelled)), .cancelled, "URLSession's cancelled")
+        expectEqual(VoiceNoteDelivery.failure(CancellationError()), .cancelled, "a cancelled task")
+        expectEqual(VoiceNoteDelivery.failure(URLError(.cannotConnectToHost)), .keep("The bridge isn’t running"))
+        expectEqual(VoiceNoteDelivery.failure(URLError(.timedOut)), .keep("The bridge isn’t running"))
+    }
+
+    /// How the bar marks an outcome, and the suggestion button's second-click label.
+    static func phaseAndConfirm() throws {
+        func status(_ state: String, _ kind: String?) -> CaptureStatus {
+            CaptureStatus(captureId: "c", state: state, heard: nil, outcome: kind.map { CaptureOutcome(kind: $0, title: "", detail: "") })
+        }
+        expectEqual(VoiceNoteText.phase(status("done", "journal")), .sent)
+        expectEqual(VoiceNoteText.phase(status("done", "note")), .sent)
+        expectEqual(VoiceNoteText.phase(status("done", "nothing")), .discarded, "nothing heard is no green check")
+        expectEqual(VoiceNoteText.phase(status("no_speech", nil)), .discarded)
+        expectEqual(VoiceNoteText.phase(status("failed", "failed")), .failed)
+        expectEqual(VoiceNoteText.phase(status("failed", nil)), .failed)
+        expectEqual(VoiceNoteText.confirm("task"), "Yes, start the task")
+        expectEqual(VoiceNoteText.confirm("t3_task"), "Yes, start the task")
+        expectEqual(VoiceNoteText.confirm("journal"), "Yes, add to journal")
+        expectEqual(VoiceNoteText.confirm("event"), "Yes, put on calendar")
+        var snapshot = VoiceNoteSnapshot()
+        snapshot.offer = "Yes, add to journal"
+        snapshot.offerArmed = true
+        expectEqual(snapshot.json["offerArmed"] as? Bool, true)
     }
 
     static func uploadHeaders() throws {

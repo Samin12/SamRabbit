@@ -12,7 +12,12 @@ import SamRabbitKit
 ///   conversation starts (`MacVoice.setNoteRecording`).
 /// * Nothing is lost: the WAV goes into the outbox (`VoiceNoteOutbox`) before it is sent, and leaves it only once the
 ///   bridge said it has it. Notes the bridge couldn't take are tried again (5 s, 30 s, 2 min, then every 10 min, and at
-///   once when the bridge is back).
+///   once when the bridge is back); a pass through the outbox is never called off halfway (that would fail its
+///   uploads as if the bridge were down). A note still recording when the app quits goes into the outbox as it is.
+/// * What the bridge did shows on the bar; when the bar no longer shows that note (another one started, the answer
+///   came late, it was an outbox retry), a failure or a late answer comes as a notification.
+/// * A suggestion's button ("Start as task") sits under the words, away from the pill's note button and the bar's ↑,
+///   and needs a second click: a click meant for the next note never writes a journal line or starts an agent.
 /// * Nothing heard or said is logged: ids, lengths, sizes and what kind of thing the bridge made of it.
 @MainActor
 final class VoiceNotes: ObservableObject {
@@ -32,8 +37,11 @@ final class VoiceNotes: ObservableObject {
     /// The note whose outcome the bar shows.
     private var shownId: String?
     private var hideTask: Task<Void, Never>?
-    /// What the bridge suggested for the note on the bar (its button: `snapshot.offer`).
+    /// What the bridge suggested for the note on the bar (its button: `snapshot.offer`), and since when its button is
+    /// armed (clicked once).
     private var suggestion: (id: String, action: String)?
+    private var armedAt: Date?
+    private var disarmTask: Task<Void, Never>?
     private var retryTask: Task<Void, Never>?
     private var inFlight = Set<String>()
     private var flushing = false
@@ -99,6 +107,25 @@ final class VoiceNotes: ObservableObject {
         finish(reason: "button")
     }
 
+    /// The app is quitting (or logging out) while a note records: what was said goes into the outbox as it is, sent
+    /// at the next launch. Synchronous: nothing is uploaded now.
+    func keepForLater() {
+        guard let note = current else { return }
+        current = nil
+        let samples = recorder.stop()
+        gesture.ended()
+        let seconds = Double(samples.count) / 16_000
+        guard seconds >= VoiceNoteRules.minimumSeconds else { return }
+        let now = Date()
+        let item = VoiceNoteOutbox.Item(captureId: note.id, capturedAt: note.startedAt, createdAt: now, seconds: seconds, nextAt: now)
+        do {
+            try outbox.add(item, wav: WAV.encode(samples: samples))
+            Log.write("note: \(note.id.prefix(8)) kept for the next launch (\(String(format: "%.1f", seconds)) s)")
+        } catch {
+            Log.write("note: the outbox couldn't keep the note being recorded (\(VoiceAudio.describe(error)))")
+        }
+    }
+
     /// Stops and throws it away (the bar's ×, Esc on the bar).
     func cancel() {
         guard let note = current else { return }
@@ -122,6 +149,7 @@ final class VoiceNotes: ObservableObject {
         current = (id, startedAt, source)
         shownId = id
         hideTask?.cancel()
+        disarm()
         activity = VoiceActivity(silence: VoiceNoteRules.tapSilence, limit: VoiceNoteRules.maxSeconds)
         voice.setNoteRecording(true)
         suggestion = nil
@@ -129,6 +157,7 @@ final class VoiceNotes: ObservableObject {
         next.phase = .recording(held: held)
         next.startedAt = startedAt
         next.offer = ""
+        next.offerArmed = false
         next.level = 0
         next.line = "Recording…"
         next.detail = ""
@@ -217,11 +246,16 @@ final class VoiceNotes: ObservableObject {
             outbox.remove(item.captureId)
             refreshWaiting()
             Log.write("note: \(item.captureId.prefix(8)) sent (\(status.state))" + (shown ? "" : " after \(item.attempts) tr\(item.attempts == 1 ? "y" : "ies")"))
-            if shown {
+            if shown, !status.settled {
                 let lines = VoiceNoteText.outcome(status)
-                show(.sent, lines.line, lines.detail, for: item.captureId, hideAfter: status.settled ? VoiceNoteRules.outcomeSeconds : nil)
+                show(.sent, lines.line, lines.detail, for: item.captureId, hideAfter: nil)
             }
-            if !status.settled { await follow(item.captureId, shown: shown) } else { report(status, shown: shown) }
+            if status.settled {
+                report(status, shown: shown)
+            } else {
+                // Followed on its own: the outbox's next note doesn't wait for this one's outcome.
+                Task { [weak self] in await self?.follow(item.captureId, shown: shown) }
+            }
         case .keep(let why):
             outbox.update(VoiceNoteOutbox.failed(item, why: why, now: Date()))
             refreshWaiting()
@@ -236,51 +270,88 @@ final class VoiceNotes: ObservableObject {
             refreshWaiting()
             Log.write("note: \(item.captureId.prefix(8)) not sent (\(why))")
             if shown { show(.failed, "Not sent", why, for: item.captureId, hideAfter: VoiceNoteRules.outcomeSeconds) }
+        case .cancelled:
+            // Not the bridge's answer: no try counted, it goes again in a moment.
+            var again = item
+            again.nextAt = max(item.nextAt, Date().addingTimeInterval(VoiceNoteRules.retryDelays[0]))
+            outbox.update(again)
+            refreshWaiting()
+            Log.write("note: \(item.captureId.prefix(8)) try called off on this Mac; it stays in the outbox")
+            if shown {
+                show(.queued, "Saved on this Mac", "It goes to the bridge in a moment.", for: item.captureId,
+                     hideAfter: VoiceNoteRules.outcomeSeconds)
+            }
+            scheduleRetry()
         }
     }
 
-    /// Asks the bridge what it did with the note until it says (about 20 s at most).
+    /// Asks the bridge what it did with the note until it says: about 20 s for the bar, then quietly for 3 minutes
+    /// more (transcription waiting for its model, a slow classifier), the result then in a notification. A cancelled
+    /// watch ends at once (it never spins).
     private func follow(_ id: String, shown: Bool) async {
         let deadline = Date().addingTimeInterval(VoiceNoteRules.outcomeWait)
-        while Date() < deadline {
-            guard let status = await VoiceNoteAPI.status(id, wait: 8) else {
-                try? await Task.sleep(for: .seconds(1))
-                continue
+        while Date() < deadline, !Task.isCancelled {
+            let asked = Date()
+            if let status = await VoiceNoteAPI.status(id, wait: 8) {
+                if status.settled {
+                    report(status, shown: shown)
+                    return
+                }
+                // A bridge that answers at once without news is not asked again in a tight loop.
+                if Date().timeIntervalSince(asked) >= 1 { continue }
             }
-            if status.settled {
-                report(status, shown: shown)
-                return
-            }
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
         }
+        guard !Task.isCancelled else { return }
         Log.write("note: \(id.prefix(8)) still being worked on")
         if shown, shownId == id, snapshot.phase == .sent {
             show(.sent, "Sent", "The bridge is still working on it.", for: id, hideAfter: VoiceNoteRules.outcomeSeconds)
         }
+        let late = Date().addingTimeInterval(VoiceNoteRules.lateWatch)
+        while Date() < late, !Task.isCancelled {
+            if let status = await VoiceNoteAPI.status(id, wait: 10), status.settled {
+                report(status, shown: shown, late: true)
+                return
+            }
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+        }
+        if !Task.isCancelled { Log.write("note: \(id.prefix(8)) no outcome from the bridge yet; it is in its Voice notes") }
     }
 
-    private func report(_ status: CaptureStatus, shown: Bool) {
+    /// What the bridge did. On the bar while it still shows this note; else (an outbox retry, a late answer, another
+    /// note has the bar now) a notification, for a retry or a late answer always, otherwise only when it went wrong
+    /// (a kept note's suggestion waits in the dock's list, "Needs you").
+    private func report(_ status: CaptureStatus, shown: Bool, late: Bool = false) {
         let kind = status.outcome?.kind ?? status.state
         Log.write("note: \(status.captureId.prefix(8)) \(status.state) (\(kind.isEmpty ? "-" : kind))")
         let lines = VoiceNoteText.outcome(status)
-        if shown, shownId == status.captureId, snapshot.phase == .sent {
+        let phase = VoiceNoteText.phase(status)
+        if shown, !late, shownId == status.captureId, snapshot.phase == .sent || snapshot.phase == .sending {
             // A note the bridge kept with a suggestion offers it as a button, a little longer.
-            let offer = VoiceNoteText.offer(status.suggestion)
-            suggestion = status.suggestion.flatMap { VoiceNoteText.actAction($0.action) }.map { (status.captureId, $0) }
-            show(status.state == "failed" ? .failed : .sent, lines.line, lines.detail, for: status.captureId,
+            let offer = phase == .sent ? VoiceNoteText.offer(status.suggestion) : nil
+            suggestion = offer == nil ? nil : status.suggestion.flatMap { VoiceNoteText.actAction($0.action) }.map { (status.captureId, $0) }
+            show(phase, lines.line, lines.detail, for: status.captureId,
                  hideAfter: offer == nil ? VoiceNoteRules.outcomeSeconds : VoiceNoteRules.outcomeSeconds * 2, offer: offer ?? "")
-        } else if !shown {
+        } else if !shown || late || phase != .sent {
             var note = VoiceNoteSnapshot()
-            note.phase = .sent
+            note.phase = phase
             note.line = lines.line
             note.detail = lines.detail
             onOutcome?(note)
         }
     }
 
-    /// The bar's suggestion button ("Start as task"): the bridge does it, and the bar says how that went.
+    /// The bar's suggestion button ("Start as task"). The first click arms it ("Yes, start the task", for a few
+    /// seconds); the second (not part of a double click) has the bridge do it, and the bar says how that went.
     func takeSuggestion() {
         guard let taken = suggestion, shownId == taken.id, current == nil else { return }
+        guard let armed = armedAt else {
+            arm(taken)
+            return
+        }
+        guard Date().timeIntervalSince(armed) >= VoiceNoteRules.confirmGap else { return }
         suggestion = nil
+        disarm()
         Log.write("note: \(taken.id.prefix(8)) suggestion taken (\(taken.action))")
         show(.sending, "On it…", "", for: taken.id, hideAfter: nil)
         Task {
@@ -289,9 +360,32 @@ final class VoiceNotes: ObservableObject {
                 return
             }
             let lines = VoiceNoteText.outcome(status)
-            show(status.state == "failed" ? .failed : .sent, lines.line, lines.detail, for: taken.id,
-                 hideAfter: VoiceNoteRules.outcomeSeconds)
+            show(VoiceNoteText.phase(status), lines.line, lines.detail, for: taken.id, hideAfter: VoiceNoteRules.outcomeSeconds)
         }
+    }
+
+    /// The suggestion's first click: the button says what the next one does, the bar stays a little longer, and after
+    /// a few seconds without the second it is back as it was.
+    private func arm(_ taken: (id: String, action: String)) {
+        armedAt = Date()
+        snapshot.offer = VoiceNoteText.confirm(taken.action)
+        snapshot.offerArmed = true
+        Log.write("note: \(taken.id.prefix(8)) suggestion armed (\(taken.action))")
+        rescheduleHide(after: VoiceNoteRules.outcomeSeconds + VoiceNoteRules.confirmSeconds)
+        disarmTask?.cancel()
+        disarmTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(VoiceNoteRules.confirmSeconds)) } catch { return }
+            guard let self, self.armedAt != nil, let still = self.suggestion, still.id == taken.id else { return }
+            self.armedAt = nil
+            self.snapshot.offer = VoiceNoteText.offer(CaptureSuggestion(label: "", action: still.action)) ?? ""
+            self.snapshot.offerArmed = false
+        }
+    }
+
+    private func disarm() {
+        armedAt = nil
+        disarmTask?.cancel()
+        disarmTask = nil
     }
 
     // MARK: - The outbox
@@ -308,13 +402,17 @@ final class VoiceNotes: ObservableObject {
         scheduleRetry()
     }
 
+    /// The next pass through the outbox. A pass on its way is never called off (`retryTask` runs it: cancelling it
+    /// would fail its uploads as if the bridge were down); it schedules the next one itself when it ends, so a
+    /// `retryNow()` meanwhile is picked up then.
     private func scheduleRetry() {
+        guard !flushing else { return }
         retryTask?.cancel()
+        retryTask = nil
         guard let next = outbox.nextDue() else { return }
         retryTask = Task { [weak self] in
             let wait = max(0.2, next.timeIntervalSinceNow)
-            try? await Task.sleep(for: .seconds(wait))
-            guard !Task.isCancelled else { return }
+            do { try await Task.sleep(for: .seconds(wait)) } catch { return }
             await self?.flush()
         }
     }
@@ -350,26 +448,37 @@ final class VoiceNotes: ObservableObject {
         if let id, current != nil, current?.id != id { return }
         if let id { shownId = id }
         if offer.isEmpty, phase != .sending { suggestion = nil }
+        disarm()
         var next = snapshot
         next.phase = phase
         next.line = line
         next.detail = detail
         next.offer = offer
+        next.offerArmed = false
         next.level = 0
         if !(phase == .sending || phase == .sent) { next.startedAt = nil }
         snapshot = next
         hideTask?.cancel()
         hideTask = nil
         guard let hideAfter else { return }
+        rescheduleHide(after: hideAfter)
+    }
+
+    /// The bar goes back to the pill after `seconds` (unless another note or outcome has it by then).
+    private func rescheduleHide(after seconds: TimeInterval) {
+        hideTask?.cancel()
         let shown = shownId
         hideTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(hideAfter))
-            guard !Task.isCancelled, let self, self.current == nil, self.shownId == shown else { return }
+            do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+            guard let self, self.current == nil, self.shownId == shown else { return }
+            self.disarm()
+            self.suggestion = nil
             var idle = self.snapshot
             idle.phase = .idle
             idle.line = ""
             idle.detail = ""
             idle.offer = ""
+            idle.offerArmed = false
             idle.startedAt = nil
             self.snapshot = idle
         }

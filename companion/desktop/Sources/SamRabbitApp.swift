@@ -298,7 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // (through MacVoice.setShortcut) when the dock started, and ⌃⌥N for voice notes with it.
             MacVoice.shared.activate(shortcut: false)
             // Voice notes the bridge hasn't taken yet go again; one sent later says how it went in a notification
-            // (a note recorded now says so on the dock's bar).
+            // (a note recorded now says so on the dock's bar; a notification only when the bar no longer shows it and
+            // it went wrong, or the answer came late).
             VoiceNotes.shared.onOutcome = { note in
                 AppModel.shared.notifier.voiceNote(title: note.line, body: note.detail)
             }
@@ -330,6 +331,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // A voice note still recording (tapped, up to 5 minutes) is kept in the outbox and sent at the next launch.
+        MainActor.assumeIsolated { VoiceNotes.shared.keepForLater() }
         Log.write("quit")
     }
 }

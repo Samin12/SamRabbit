@@ -15,10 +15,14 @@ in T3 or put on a calendar: it only says it did, in the bridge's words (``compan
 * ``GET /v1/desktop/captures?limit=`` (newest first) and ``POST /v1/desktop/captures/<id>/act {action}`` (``task``,
   ``journal``, ``event``, ``note``, ``undo``, ``dismiss``, ``seen``, ``retry``; a note not done yet 409
   ``capture_not_ready``, undoing a journal line or a task 409 ``cannot_undo``).
-* Dev controls: ``POST /dev/capture {mode?, delay?, script?}`` (modes ``ok``, ``outdated`` (404: a bridge without
-  voice notes), ``busy`` (503), ``refuse`` (401), ``no_speech``, ``fail``; ``script``: ``[{heard, kind, title?,
-  detail?, suggestion?}]``), ``GET /dev/capture`` (what arrived: ids, sources, times, content types, byte counts and
-  lengths, never the audio), ``POST /dev/capture/reset``. With ``$SAMRABBIT_FAKE_CAPTURE_SAVE`` set to a folder each
+* In the inbox (``fake_sync_server.py``, ``POST /dev/inbox/notes``): two voice notes as the bridge lists them
+  (``samrabbit_capture`` ``inbox_items``: ``note:<captureId>``, one kept with a suggestion, one that failed, ``can``
+  act/dismiss/seen) and their ``act``/``seen`` (``note_inbox_action``, as the bridge's ``inbox_action``).
+* Dev controls: ``POST /dev/capture {mode?, delay?, hold?, script?}`` (modes ``ok``, ``outdated`` (404: a bridge
+  without voice notes), ``busy`` (503), ``refuse`` (401), ``no_speech``, ``fail``; ``hold``: seconds each upload's
+  answer waits, a slow bridge; ``script``: ``[{heard, kind, title?, detail?, suggestion?}]``), ``GET /dev/capture``
+  (what arrived: ids, sources, times, content types, byte counts and lengths, never the audio; ``polls``: the
+  outcome reads), ``POST /dev/capture/reset``. With ``$SAMRABBIT_FAKE_CAPTURE_SAVE`` set to a folder each
   recording is also saved there (``capture-<n>.wav``) for the voice tests to transcribe.
 
 Stdlib only.
@@ -36,7 +40,7 @@ import time
 import uuid
 import wave
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote
 
 MAX_BYTES = 16 * 1024 * 1024
@@ -102,6 +106,8 @@ class FakeCapture:
         with self.lock:
             self.mode = "ok"
             self.delay = 1.2
+            self.hold = 0.0
+            self.polls = 0
             self.script = [dict(item) for item in SCRIPT]
             self.turn = 0
             self.captures: Dict[str, Dict[str, Any]] = {}
@@ -120,6 +126,7 @@ class FakeCapture:
         try:
             if path == "/dev/capture/reset":
                 self.only(method, "POST")
+                self.json_body(handler)  # read, so a kept-alive connection's next request starts clean
                 self.reset()
                 return handler.json(200, {"ok": True})
             if path == "/dev/capture":
@@ -131,6 +138,8 @@ class FakeCapture:
             if path == "/v1/desktop/capture":
                 self.only(method, "POST")
                 status, payload = self.receive(handler)
+                if self.hold:
+                    time.sleep(self.hold)  # a slow bridge: the answer comes late (outside the lock)
                 return handler.json(status, payload)
             if path.startswith("/v1/desktop/capture/"):
                 self.only(method, "GET")
@@ -307,6 +316,7 @@ class FakeCapture:
     def status(self, capture_id: str, wait: float) -> Dict[str, Any]:
         deadline = time.time() + wait
         with self.lock:
+            self.polls += 1
             capture = self.captures.get(capture_id.lower())
             if capture is None:
                 raise Refusal(404, "capture_not_found", "No such capture.")
@@ -380,16 +390,76 @@ class FakeCapture:
                 self.mode = body["mode"]
             if isinstance(body.get("delay"), (int, float)) and not isinstance(body.get("delay"), bool):
                 self.delay = max(0.0, min(30.0, float(body["delay"])))
+            if isinstance(body.get("hold"), (int, float)) and not isinstance(body.get("hold"), bool):
+                self.hold = max(0.0, min(10.0, float(body["hold"])))
             if isinstance(body.get("script"), list):
                 self.script = [dict(item) for item in body["script"] if isinstance(item, dict)]
                 self.turn = 0
-            return {"ok": True, "mode": self.mode, "delay": self.delay}
+            return {"ok": True, "mode": self.mode, "delay": self.delay, "hold": self.hold}
 
     def arrived(self) -> Dict[str, Any]:
         with self.lock:
             return {"fake": True, "mode": self.mode, "captures": [dict(item) for item in self.log],
-                    "repeats": sum(c["repeats"] for c in self.captures.values()), "acts": list(self.acts)}
+                    "repeats": sum(c["repeats"] for c in self.captures.values()), "acts": list(self.acts),
+                    "polls": self.polls}
 
 
 def new_capture_id() -> str:
     return str(uuid.uuid4())
+
+
+KEPT_NOTE = "note:3f2b8c1e-7d4a-4e9b-8f21-6a5c0d9e1b47"
+FAILED_NOTE = "note:9c4e2a7b-1f3d-4b8e-a6c5-2d7f0e8b3a91"
+NOTE_ACTS = {"task": "task", "t3_task": "task", "journal": "journal", "event": "event"}
+
+
+def note_items(now_ms: int) -> List[Dict[str, Any]]:
+    """Two voice notes in the inbox, in the bridge's shape (``samrabbit_capture.CaptureService.inbox_items``)."""
+    def at(minutes: float) -> str:
+        return datetime.fromtimestamp(now_ms / 1000 - minutes * 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def item(item_id: str, **fields: Any) -> Dict[str, Any]:
+        base = {"id": item_id, "source": "note", "agent": None, "project": "Voice note", "cwd": None,
+                "unread": True, "pending": {"approvals": [], "inputs": []}, "can": ["act", "dismiss", "seen"],
+                "live": False, "progress": None, "phase": None, "captureId": item_id[5:]}
+        base.update(fields)
+        return base
+    return [
+        item(KEPT_NOTE, title="Look into why the watch build is slow", status="needs-input",
+             statusLabel="Start it as a T3 task?", summary="Look into why the watch build is slow on the release machine.",
+             updatedAt=at(3), capturedAt=at(3), suggestion={"action": "task", "label": "Start it as a T3 task?"},
+             _messages=[{"role": "user", "text": "Look into why the watch build is slow on the release machine.",
+                         "at": at(3)}, {"role": "assistant", "text": "Saved as a note.", "at": at(2.9)}]),
+        item(FAILED_NOTE, title="Voice note", status="error", statusLabel="Couldn't hear it",
+             summary="Couldn't save it: transcription is not installed on the Mac bridge.", updatedAt=at(41),
+             capturedAt=at(41), suggestion=None,
+             _messages=[{"role": "assistant", "text": "Couldn't save it: transcription is not installed on the Mac "
+                                                      "bridge.", "at": at(41)}]),
+    ]
+
+
+def note_inbox_action(item: Dict[str, Any], action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], bool]:
+    """``POST /v1/desktop/inbox/items/note:<id>/act|seen`` as ``samrabbit_capture.inbox_action``: ``act`` does the
+    suggestion (or ``body.action``), a failed note is tried again; ``seen``. Returns (status, answer, gone): a note done
+    another way, or tried again, leaves the inbox. Nothing is journaled, filed or put on a calendar."""
+    capture = {"captureId": item["captureId"], "state": "done", "seen": True, "dismissed": False}
+    if action == "seen":
+        item["unread"] = False
+        if item.get("status") == "needs-input":
+            item["status"] = "idle"
+        return 200, {"ok": True, "capture": capture}, False
+    if action != "act":
+        raise Refusal(409, "unsupported", "A voice note can be acted on, dismissed or marked seen.")
+    chosen = body.get("action") or (item.get("suggestion") or {}).get("action") or \
+        ("retry" if item.get("status") == "error" else None)
+    if chosen == "retry":
+        if item.get("status") != "error":
+            raise Refusal(409, "not_failed", "Only a note that failed can be tried again.")
+        return 202, {"ok": True, "capture": dict(capture, state="received")}, True
+    kind = NOTE_ACTS.get(str(chosen))
+    if kind is None:
+        raise Refusal(400, "invalid_action", "Say what to do with it: task, journal or event.")
+    title = title_from(item.get("summary") or item.get("title") or "")
+    detail = {"task": "Started “%s” in SamRabbit." % title, "journal": "Added to your journal.",
+              "event": "Added “%s” for tomorrow 9:00 AM." % title}[kind]
+    return 200, {"ok": True, "capture": dict(capture, outcome={"kind": kind, "title": title, "detail": detail})}, True

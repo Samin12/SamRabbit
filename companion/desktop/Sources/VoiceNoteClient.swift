@@ -36,12 +36,14 @@ enum VoiceNoteAPI {
         for (name, value) in VoiceNoteUpload.headers(captureId: item.captureId, capturedAt: item.capturedAt) {
             request.setValue(value, forHTTPHeaderField: name)
         }
+        guard !Task.isCancelled else { return .cancelled }
         do {
             let (data, response) = try await session.upload(for: request, from: wav)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             return VoiceNoteDelivery.classify(status: status, body: data, captureId: item.captureId)
         } catch {
-            return VoiceNoteDelivery.classify(status: 0, body: Data(), captureId: item.captureId)
+            // Called off on this Mac is not the bridge being down: VoiceNotes counts no try for it.
+            return VoiceNoteDelivery.failure(error)
         }
     }
 
