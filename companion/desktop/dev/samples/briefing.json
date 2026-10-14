@@ -1,121 +1,304 @@
 {
-  "_comment": "A morning brief as the bridge's GET /v1/desktop/briefing answers it (CONTRACTS-WAVE8 §A3), for the fake server, the dock snapshots and the tests. Invented people and mail. Times are moved so that `base` is the moment the fake starts (the date becomes today's).",
+  "_comment": "A morning brief exactly as the bridge's GET /v1/desktop/briefing answers it (companion/mac-bridge/samrabbit_briefing.py BriefingService.view, CONTRACTS-WAVE8 §A3), for the fake server, the dock snapshots and the tests. Invented people and mail. Every time is moved by whole days so that `base` falls on the day the fake starts (the date becomes today's; clock times stay).",
   "base": "2026-10-14T07:01:00-04:00",
   "briefing": {
+    "revision": 3,
+    "date": "2026-10-14",
+    "building": false,
     "available": true,
     "status": "ready",
-    "date": "2026-10-14",
-    "revision": 3,
-    "updatedAt": "2026-10-14T07:01:00-04:00",
-    "headline": "3 things need you · 4 meetings, first at 9:30 · 1 agent waiting",
-    "spoken": "Morning. Three things need you: Dana needs the SOW confirmed by Thursday, Monday's Stripe payout failed, and the dentist clashes with the design review tomorrow. Four meetings today, the first is standup at 9:30. One agent is waiting for your approval.",
-    "needsYou": 3,
+    "generatedAt": "2026-10-14T11:01:00Z",
+    "headline": "3 things need you · 4 meetings, first at 09:30 · 1 agent waiting",
+    "spoken": "First: Reply to Dana: confirm the SOW by Thursday; Fix the failed Stripe payout; Move the dentist or the design sync. You have 4 meetings today, the first at 9:30 AM. 1 agent is waiting for you.",
+    "needsYou": 4,
     "sections": [
       {
-        "kind": "doFirst",
+        "id": "doFirst",
         "title": "Do first",
         "items": [
           {
             "id": "bi_7f3a2c91d0e4b512",
+            "section": "doFirst",
             "kind": "email",
-            "account": "business",
-            "accountEmail": "sam@example.com",
             "title": "Reply to Dana: confirm the SOW by Thursday",
             "why": "Dana Whitfield needs it signed by Thu; she asked twice",
-            "suggestion": "Draft a reply confirming Thursday 2 pm",
             "actions": [
-              {"type": "draft_reply", "label": "Draft reply"},
-              {"type": "remind", "label": "Remind me"}
+              {
+                "type": "draft_reply",
+                "label": "Draft reply"
+              },
+              {
+                "type": "remind",
+                "label": "Remind me"
+              }
+            ],
+            "can": [
+              "draft_reply",
+              "remind",
+              "done",
+              "dismiss",
+              "open"
             ],
             "state": "open",
-            "priority": 1,
-            "url": "https://mail.google.com/mail/u/0/#inbox/18f2a9c3b7e4d001"
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "account": "business",
+            "url": "https://mail.google.com/mail/?authuser=sam@example.com#all/18f2a9c3b7e4d001",
+            "suggestion": "Draft a reply confirming Thursday 2 pm",
+            "draft": "Hi Dana,\n\nThursday works. I'll have the SOW signed and back to you by 2 pm.\n\nThanks,\nSam"
           },
           {
             "id": "bi_2b81e05c94af7d36",
+            "section": "doFirst",
             "kind": "email",
-            "account": "business",
-            "accountEmail": "sam@example.com",
             "title": "Fix the failed Stripe payout",
             "why": "Stripe: the bank declined Monday’s $1,240 payout",
-            "suggestion": "Update the bank details in Stripe today",
             "actions": [
-              {"type": "open", "label": "Open"},
-              {"type": "make_task", "label": "Make task"}
+              {
+                "type": "open",
+                "label": "Open"
+              },
+              {
+                "type": "make_task",
+                "label": "Make task"
+              }
+            ],
+            "can": [
+              "open",
+              "make_task",
+              "done",
+              "dismiss"
             ],
             "state": "open",
-            "priority": 2,
-            "url": "https://mail.google.com/mail/u/0/#inbox/18f2a77d0c3e9a42"
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "account": "business",
+            "url": "https://mail.google.com/mail/?authuser=sam@example.com#all/18f2a77d0c3e9a42",
+            "suggestion": "Update the bank details in Stripe today"
           },
           {
             "id": "bi_c4d90a1f6e2b8873",
+            "section": "doFirst",
             "kind": "conflict",
             "title": "Move the dentist or the design sync",
             "why": "Both are tomorrow at 4:00 PM",
-            "suggestion": "Block 45 min before the sync instead",
             "actions": [
-              {"type": "block_time", "label": "Block time"},
-              {"type": "remind", "label": "Remind me"}
+              {
+                "type": "block_time",
+                "label": "Block 45 min"
+              },
+              {
+                "type": "remind",
+                "label": "Remind me"
+              }
+            ],
+            "can": [
+              "block_time",
+              "remind",
+              "done",
+              "dismiss"
             ],
             "state": "open",
-            "priority": 3,
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "startsAt": "2026-10-15T16:00:00-04:00",
+            "endsAt": "2026-10-15T17:00:00-04:00",
             "conflict": true
           }
         ]
       },
       {
-        "kind": "today",
+        "id": "today",
         "title": "Today",
         "items": [
-          {"id": "bi_ev_standup", "kind": "event", "title": "Standup", "why": "Google Meet", "startsAt": "2026-10-14T09:30:00-04:00", "endsAt": "2026-10-14T09:45:00-04:00", "actions": [], "state": "open"},
-          {"id": "bi_ev_review", "kind": "event", "title": "Design review: Agent Dock and the Mac window", "why": "Priya sent the deck last night", "startsAt": "2026-10-14T11:00:00-04:00", "endsAt": "2026-10-14T11:45:00-04:00", "actions": [], "state": "open"},
-          {"id": "bi_ev_one_on_one", "kind": "event", "title": "1:1 with Priya", "why": "Zoom", "startsAt": "2026-10-14T14:00:00-04:00", "endsAt": "2026-10-14T14:30:00-04:00", "actions": [], "state": "open"},
-          {"id": "bi_ev_gym", "kind": "event", "title": "Gym", "why": "Equinox Hudson Yards", "startsAt": "2026-10-14T18:30:00-04:00", "endsAt": "2026-10-14T19:30:00-04:00", "actions": [], "state": "open"}
+          {
+            "id": "bi_0e5d8a2f71c4b936",
+            "section": "today",
+            "kind": "event",
+            "title": "Standup",
+            "why": "9:30–9:45 AM",
+            "actions": [
+              {
+                "type": "open",
+                "label": "Join"
+              }
+            ],
+            "can": [
+              "open",
+              "done",
+              "dismiss"
+            ],
+            "state": "open",
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "startsAt": "2026-10-14T09:30:00-04:00",
+            "endsAt": "2026-10-14T09:45:00-04:00",
+            "url": "https://meet.google.com/abc-defg-hij"
+          },
+          {
+            "id": "bi_93b1f6c20d8e4a57",
+            "section": "today",
+            "kind": "event",
+            "title": "Design review: Agent Dock and the Mac window",
+            "why": "Priya sent the deck last night",
+            "actions": [
+              {
+                "type": "open",
+                "label": "Join"
+              }
+            ],
+            "can": [
+              "open",
+              "done",
+              "dismiss"
+            ],
+            "state": "open",
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "startsAt": "2026-10-14T11:00:00-04:00",
+            "endsAt": "2026-10-14T11:45:00-04:00",
+            "url": "https://meet.google.com/kqv-rmxt-pzd"
+          },
+          {
+            "id": "bi_4a7c19e3b65d0f28",
+            "section": "today",
+            "kind": "event",
+            "title": "1:1 with Priya",
+            "why": "2:00–2:30 PM",
+            "actions": [
+              {
+                "type": "open",
+                "label": "Join"
+              }
+            ],
+            "can": [
+              "open",
+              "done",
+              "dismiss"
+            ],
+            "state": "open",
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "startsAt": "2026-10-14T14:00:00-04:00",
+            "endsAt": "2026-10-14T14:30:00-04:00",
+            "url": "https://example.zoom.us/j/81234567890"
+          },
+          {
+            "id": "bi_d2f80b4e6a3c9175",
+            "section": "today",
+            "kind": "event",
+            "title": "Gym",
+            "why": "Equinox Hudson Yards",
+            "actions": [
+              {
+                "type": "done",
+                "label": "Got it"
+              }
+            ],
+            "can": [
+              "done",
+              "dismiss"
+            ],
+            "state": "open",
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "startsAt": "2026-10-14T18:30:00-04:00",
+            "endsAt": "2026-10-14T19:30:00-04:00"
+          }
         ]
       },
       {
-        "kind": "agents",
+        "id": "agents",
         "title": "Agents",
         "items": [
           {
             "id": "bi_a19e44d07c2f65b0",
+            "section": "agents",
             "kind": "agent",
-            "title": "Approve the pairing tests",
-            "why": "T3 · SamRabbit wants to run npm test for the pairing fix",
-            "inboxItemId": "t3:th_pairing_redirect",
-            "actions": [{"type": "open", "label": "Open"}],
-            "state": "open"
+            "title": "Approve “Pairing redirect fix”",
+            "why": "Wants to run npm test · SamRabbit",
+            "actions": [
+              {
+                "type": "open",
+                "label": "Review"
+              }
+            ],
+            "can": [
+              "open",
+              "done",
+              "dismiss"
+            ],
+            "state": "open",
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "itemId": "t3:th_pairing_redirect",
+            "source": "t3"
           }
         ]
       },
       {
-        "kind": "fyi",
+        "id": "fyi",
         "title": "FYI",
         "items": [
           {
             "id": "bi_5e0b7a3d21c98f44",
+            "section": "fyi",
             "kind": "fyi",
-            "account": "personal",
-            "accountEmail": "sam.personal@example.com",
             "title": "Your flight to SFO on Saturday is confirmed",
             "why": "United UA 1532 · JFK 8:05 AM → SFO 11:30 AM",
-            "actions": [{"type": "open", "label": "Open"}],
+            "actions": [
+              {
+                "type": "open",
+                "label": "Open"
+              }
+            ],
+            "can": [
+              "open",
+              "done",
+              "dismiss"
+            ],
             "state": "open",
-            "url": "https://mail.google.com/mail/u/0/#inbox/18f29e5a4b1c7d20"
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "account": "personal",
+            "url": "https://mail.google.com/mail/?authuser=sam.personal@example.com#all/18f29e5a4b1c7d20"
           },
           {
             "id": "bi_9d2c6f81a7e03b55",
+            "section": "fyi",
             "kind": "fyi",
-            "account": "business",
-            "title": "Bookedin weekly numbers are in",
+            "title": "Read the Bookedin weekly numbers",
             "why": "Leads up 18% week over week",
-            "actions": [{"type": "open", "label": "Open"}],
+            "actions": [
+              {
+                "type": "open",
+                "label": "Open"
+              }
+            ],
+            "can": [
+              "open",
+              "done",
+              "dismiss"
+            ],
             "state": "open",
-            "url": "https://mail.google.com/mail/u/0/#inbox/18f2a1b6c9d0e377"
+            "updatedAt": "2026-10-14T11:01:00Z",
+            "account": "business",
+            "url": "https://mail.google.com/mail/?authuser=sam@example.com#all/18f2a1b6c9d0e377"
           }
         ]
       }
     ],
-    "skipped": {"promotions": 182, "business": 64, "personal": 41}
+    "accounts": [
+      {
+        "label": "business",
+        "ok": true,
+        "fetched": 64,
+        "kept": 9
+      },
+      {
+        "label": "personal",
+        "ok": true,
+        "fetched": 41,
+        "kept": 3
+      }
+    ],
+    "counts": {
+      "emails": 105,
+      "kept": 12,
+      "events": 4,
+      "agents": 1
+    },
+    "composed": "claude"
   }
 }

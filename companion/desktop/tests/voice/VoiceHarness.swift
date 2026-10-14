@@ -169,9 +169,11 @@ struct VoiceHarness {
         var ok = check(await waitUntil(within: 20) { voice.wakeArmed }, "listening for the wake phrase before")
         if scenario == "note-offline" { await post("/dev/capture", ["mode": "busy"]) }
         if scenario == "note-suggest" {
+            // The bridge's words for a kept note (samrabbit_capture `_as_note`).
             await postJSON("/dev/capture", ["script": [["heard": "Call the bank about the replacement card.", "kind": "note",
-                                                        "title": "Voice note",
-                                                        "suggestion": ["label": "Start it as a T3 task?", "action": "task"]]]])
+                                                        "title": "Call the bank about the replacement card.",
+                                                        "detail": "Saved as a note.",
+                                                        "suggestion": ["action": "task", "label": "Start it as a T3 task?"]]]])
         }
         if scenario == "note-hold" {
             notes.press()

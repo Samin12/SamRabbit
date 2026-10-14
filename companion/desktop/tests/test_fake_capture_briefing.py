@@ -1,6 +1,7 @@
 """Voice notes and the morning brief in dev/fake_sync_server.py (dev/fake_capture.py, dev/fake_briefing.py), on a
-throwaway port and token: the shapes the Mac app reads (CONTRACTS-WAVE8 §A2, §A3), idempotent captures, the brief
-moved to today, its actions (a draft link in the item's own Google account), and that nothing leaves the fake.
+throwaway port and token: the bridge's own shapes (companion/mac-bridge samrabbit_capture.py / samrabbit_briefing.py,
+CONTRACTS-WAVE8 §A2, §A3), idempotent captures, the brief moved to today, its actions (only those an item `can`, a
+draft link in the item's own Google account, no send), and that nothing leaves the fake.
 
 Run: python3 -m unittest discover -s companion/desktop/tests
 """
@@ -22,7 +23,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wave
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
@@ -118,13 +119,18 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         started = time.time()
         status, body = self.capture(wav(2.5), capture_id)
         self.assertEqual(status, 202)
-        self.assertEqual(body, {"captureId": capture_id, "state": "received", "receivedAt": body["receivedAt"]})
+        self.assertEqual((body["captureId"], body["state"], body["source"], body["kind"], body["say"]),
+                         (capture_id, "received", "mac", "audio", "Sent."))
+        self.assertEqual(set(body) - {"error", "retryAt"}, {"captureId", "state", "source", "kind", "capturedAt",
+                                                           "receivedAt", "updatedAt", "heard", "outcome", "suggestion",
+                                                           "say", "seen", "dismissed"}, "the bridge's view()")
         self.assertLess(time.time() - started, 1.0, "202 at once")
         status, body = self.call("GET", "/v1/desktop/capture/%s?wait=0" % capture_id)
         self.assertEqual((status, body["state"]), (200, "received"))
         status, body = self.call("GET", "/v1/desktop/capture/%s?wait=5" % capture_id)
         self.assertEqual(body["state"], "done", "a wait blocks until it is routed")
-        self.assertEqual(body["outcome"]["kind"], "journal")
+        self.assertEqual((body["outcome"]["kind"], body["outcome"]["title"], body["outcome"]["detail"]),
+                         ("journal", "Journal", "Added to your journal."))
         self.assertTrue(body["heard"].startswith("Put this in my journal"))
         arrived = self.call("GET", "/dev/capture")[1]
         self.assertEqual(arrived["captures"][0]["seconds"], 2.5)
@@ -140,23 +146,34 @@ class FakeCaptureBriefingTest(unittest.TestCase):
             self.capture(wav(1), capture_id)
             body = self.call("GET", "/v1/desktop/capture/%s?wait=5" % capture_id)[1]
             kinds.append(body["outcome"]["kind"])
+            self.assertEqual(body["state"], "done", "the bridge's states: received, transcribed, done, failed")
             if body["outcome"]["kind"] == "note":
-                self.assertEqual(body["state"], "needs_you")
-                self.assertEqual(body["suggestion"]["action"], "task")
-                acted = self.call("POST", "/v1/desktop/captures/note:%s/act" % capture_id, {"action": "task"})[1]
-                self.assertEqual(acted["outcome"]["kind"], "t3_task", "the suggestion done on a tap")
-        self.assertEqual(kinds, ["journal", "t3_task", "note", "calendar_event"])
+                self.assertEqual(body["suggestion"], {"action": "task", "label": "Start it as a T3 task?"})
+                self.assertEqual(body["outcome"]["noteId"], "note:" + capture_id)
+                acted = self.call("POST", "/v1/desktop/captures/%s/act" % capture_id, {"action": "task"})[1]
+                self.assertEqual(acted["outcome"]["kind"], "task", "the suggestion done on a tap")
+                self.assertEqual(acted["suggestion"], None)
+                self.assertEqual(self.call("POST", "/v1/desktop/captures/%s/act" % capture_id, {"action": "undo"})[1]
+                                 ["error"]["code"], "cannot_undo", "a task that started stays")
+            if body["outcome"]["kind"] == "event":
+                undone = self.call("POST", "/v1/desktop/captures/%s/act" % capture_id, {"action": "undo"})[1]
+                self.assertEqual(undone["outcome"]["kind"], "note", "an event undone is kept as a note")
+        self.assertEqual(kinds, ["journal", "task", "note", "event"])
+        self.assertEqual(self.call("POST", "/v1/desktop/captures/%s/act" % uuid.uuid4(), {"action": "task"})[0], 404)
+        self.assertEqual(self.call("POST", "/v1/desktop/captures/%s/act" % capture_id, {"action": "block"})[1]["error"]["code"],
+                         "invalid_action", "a block suggestion has no act of its own")
         recent = self.call("GET", "/v1/desktop/captures?limit=2")[1]
-        self.assertEqual(len(recent["captures"]), 2)
-        summary = self.call("GET", "/v1/desktop/summary")[1]
-        self.assertEqual(summary["captures"], {"recent": 4, "failed": 0})
+        self.assertEqual((len(recent["captures"]), recent["pending"]), (2, 0))
+        summary = self.call("GET", "/v1/desktop/summary")[1]["captures"]
+        self.assertEqual((summary["available"], len(summary["recent"]), summary["failed"], summary["pending"]),
+                         (True, 3, 0, 0))
 
     def test_the_same_id_is_the_same_note(self) -> None:
         capture_id = str(uuid.uuid4())
         audio = wav(1.2)
         self.assertEqual(self.capture(audio, capture_id)[0], 202)
         status, body = self.capture(audio, capture_id)
-        self.assertEqual((status, body["captureId"]), (200, capture_id), "a retry is answered, not a second note")
+        self.assertEqual((status, body["captureId"]), (202, capture_id), "a retry is answered, not a second note")
         self.assertEqual(self.capture(wav(1.3), capture_id)[1]["error"]["code"], "capture_conflict")
         arrived = self.call("GET", "/dev/capture")[1]
         self.assertEqual((len(arrived["captures"]), arrived["repeats"]), (1, 1))
@@ -165,6 +182,9 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         self.assertEqual(self.capture(wav(1), "not-a-uuid")[1]["error"]["code"], "invalid_capture_id")
         self.assertEqual(self.capture(b"RIFFnope")[1]["error"]["code"], "unsupported_audio")
         self.assertEqual(self.capture(b"x", content_type="text/plain")[1]["error"]["code"], "unsupported_audio")
+        bad = self.call("POST", "/v1/desktop/capture", wav(1), headers={
+            "Content-Type": "audio/wav", "X-SamRabbit-Capture": str(uuid.uuid4()), "X-SamRabbit-Source": "dock"})
+        self.assertEqual(bad[1]["error"]["code"], "invalid_source")
         self.assertEqual(self.capture(wav(301, rate=8000))[1]["error"]["code"], "audio_too_long")
         status, body = self.call("POST", "/v1/desktop/capture", {"text": "Journal: a typed note"},
                                  headers={"X-SamRabbit-Capture": str(uuid.uuid4()), "X-SamRabbit-Source": "mac"})
@@ -178,7 +198,13 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         self.call("POST", "/dev/capture", {"mode": "no_speech"})
         capture_id = str(uuid.uuid4())
         self.capture(wav(1), capture_id)
-        self.assertEqual(self.call("GET", "/v1/desktop/capture/%s?wait=5" % capture_id)[1]["state"], "no_speech")
+        body = self.call("GET", "/v1/desktop/capture/%s?wait=5" % capture_id)[1]
+        self.assertEqual((body["state"], body["outcome"]["kind"]), ("done", "nothing"), "nothing heard is done")
+        self.call("POST", "/dev/capture", {"mode": "fail"})
+        capture_id = str(uuid.uuid4())
+        self.capture(wav(1), capture_id)
+        body = self.call("GET", "/v1/desktop/capture/%s?wait=5" % capture_id)[1]
+        self.assertEqual((body["state"], body["outcome"]["kind"], body["error"]["code"]), ("failed", "failed", "t3_not_connected"))
         self.assertEqual(self.call("GET", "/v1/desktop/capture/%s" % uuid.uuid4())[0], 404)
 
     # ------------------------------------------------------------------ the brief
@@ -189,36 +215,56 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         today = datetime.now().astimezone().date().isoformat()
         self.assertEqual(brief["date"], today)
         self.assertTrue(brief["available"])
-        self.assertEqual([s["kind"] for s in brief["sections"]], ["doFirst", "today", "agents", "fyi"])
+        self.assertEqual([s["id"] for s in brief["sections"]], ["doFirst", "today", "agents", "fyi"])
+        self.assertEqual((brief["status"], brief["building"], brief["composed"]), ("ready", False, "claude"))
+        self.assertTrue(brief["generatedAt"].startswith(today + "T11:01:00"), "moved by whole days too")
+        self.assertEqual(brief["counts"]["emails"], 105)
         standup = brief["sections"][1]["items"][0]
         self.assertTrue(standup["startsAt"].startswith(today + "T09:30:00"), "clock times stay")
         self.assertEqual(brief["needsYou"], 4)
-        for item in brief["sections"][0]["items"]:
-            self.assertLessEqual(len(item["title"]), 60, "verb-first titles, 60 characters at most")
-            self.assertLessEqual(len(item["why"]), 100)
-            self.assertTrue(1 <= len(item["actions"]) <= 2)
+        for section in brief["sections"]:
+            for item in section["items"]:
+                self.assertEqual(item["section"], section["id"])
+                self.assertLessEqual(len(item["title"]), 60, "verb-first titles, 60 characters at most")
+                self.assertLessEqual(len(item["why"]), 100)
+                self.assertTrue(1 <= len(item["actions"]) <= 2)
+                self.assertTrue({"done", "dismiss"} <= set(item["can"]))
+                self.assertTrue({a["type"] for a in item["actions"]} <= set(item["can"]))
+                if "mail.google.com" in item.get("url", ""):
+                    self.assertIn("authuser=", item["url"], "the bridge names the account on every Gmail link")
+        self.assertEqual(brief["sections"][2]["items"][0]["itemId"], "t3:th_pairing_redirect")
         summary = self.call("GET", "/v1/desktop/summary")[1]["briefing"]
-        self.assertEqual((summary["date"], summary["revision"], summary["needsYou"]), (today, brief["revision"], 4))
+        self.assertEqual(summary, {"available": True, "date": today, "status": "ready", "revision": brief["revision"],
+                                   "headline": brief["headline"], "needsYou": 4})
 
     def test_actions(self) -> None:
         brief = self.call("GET", "/v1/desktop/briefing")[1]
         first, second, conflict = brief["sections"][0]["items"]
         status, drafted = self.call("POST", "/v1/desktop/briefing/items/%s/act" % first["id"], {"action": "draft_reply"})
-        self.assertEqual((status, drafted["state"]), (200, "drafted"))
-        self.assertTrue(drafted["result"]["url"].startswith("https://mail.google.com/mail/u/0/?authuser=sam%40example.com#drafts/"))
+        self.assertEqual((status, drafted["ok"], drafted["item"]["state"]), (200, True, "drafted"))
+        self.assertTrue(drafted["result"]["url"].startswith("https://mail.google.com/mail/?authuser=sam@example.com#drafts?compose="))
+        self.assertEqual(drafted["revision"], brief["revision"] + 1)
+        again = self.call("POST", "/v1/desktop/briefing/items/%s/act" % first["id"], {"action": "draft_reply"})[1]
+        self.assertEqual(again["result"], drafted["result"], "a second tap answers what the first did")
         tasked = self.call("POST", "/v1/desktop/briefing/items/%s/act" % second["id"], {"action": "make_task"})[1]
         self.assertTrue(tasked["result"]["itemId"].startswith("t3:"))
+        self.assertEqual(self.call("POST", "/v1/desktop/briefing/items/%s/act" % second["id"], {"action": "remind"})[1]
+                         ["error"]["code"], "unsupported_action", "only what the item can")
+        later = datetime.now().astimezone().replace(microsecond=0) + timedelta(hours=2)
         reminded = self.call("POST", "/v1/desktop/briefing/items/%s/act" % conflict["id"],
-                             {"action": "remind", "at": "2026-10-14T14:00:00-04:00"})[1]
-        self.assertEqual((reminded["state"], reminded["result"]["until"]), ("snoozed", "2026-10-14T14:00:00-04:00"))
+                             {"action": "remind", "at": later.isoformat()})[1]
+        self.assertEqual((reminded["item"]["state"], reminded["result"]["until"]), ("reminded", later.isoformat()))
         after = self.call("GET", "/v1/desktop/briefing")[1]
-        self.assertEqual([i["state"] for i in after["sections"][0]["items"]], ["drafted", "tasked", "snoozed"])
+        self.assertEqual([i["state"] for i in after["sections"][0]["items"]], ["drafted", "tasked", "reminded"])
+        self.assertEqual(after["sections"][0]["items"][0]["result"]["url"], drafted["result"]["url"], "kept on the item")
         self.assertEqual(after["revision"], brief["revision"] + 3)
+        self.assertEqual(after["needsYou"], 1, "the agent")
         self.assertEqual(self.call("POST", "/v1/desktop/briefing/items/nope/act", {"action": "done"})[0], 404)
         self.assertEqual(self.call("POST", "/v1/desktop/briefing/items/%s/act" % first["id"], {"action": "send"})[1]["error"]["code"],
                          "invalid_action", "there is no send")
         acts = self.call("GET", "/dev/briefing")[1]["acts"]
-        self.assertEqual([a["action"] for a in acts], ["draft_reply", "make_task", "remind"], "refusals change nothing")
+        self.assertEqual([a["action"] for a in acts], ["draft_reply", "draft_reply", "make_task", "remind"],
+                         "refusals change nothing")
 
     def test_long_poll_and_refresh(self) -> None:
         brief = self.call("GET", "/v1/desktop/briefing")[1]
@@ -228,12 +274,18 @@ class FakeCaptureBriefingTest(unittest.TestCase):
         newer = self.call("GET", "/v1/desktop/briefing?after=%d&wait=10" % brief["revision"])[1]
         self.assertEqual(newer["revision"], brief["revision"] + 1)
         self.assertLess(time.time() - started, 5)
-        self.assertTrue(self.call("POST", "/v1/desktop/briefing/refresh", {})[1]["throttled"], "once in 5 minutes")
+        status, payload = self.call("POST", "/v1/desktop/briefing/refresh", {})
+        self.assertEqual((status, payload["error"]["code"]), (429, "refresh_too_soon"), "once in 5 minutes")
+        self.assertGreater(payload["error"]["retryAfter"], 0)
 
     def test_states_and_failures(self) -> None:
         self.call("POST", "/dev/briefing", {"status": "off"})
         brief = self.call("GET", "/v1/desktop/briefing")[1]
-        self.assertEqual((brief["available"], brief["reason"]), (False, "gmail_not_connected"))
+        self.assertEqual((brief["available"], brief["reason"]), (False, "briefing_turned_off"))
+        self.call("POST", "/dev/briefing", {"status": "waiting"})
+        brief = self.call("GET", "/v1/desktop/briefing")[1]
+        self.assertEqual((brief["available"], brief["status"], "sections" in brief), (False, "waiting", False))
+        self.assertEqual(self.call("GET", "/v1/desktop/summary")[1]["briefing"]["headline"], None)
         self.call("POST", "/dev/briefing", {"status": "ready", "fail": "draft_reply"})
         item = self.call("GET", "/v1/desktop/briefing")[1]["sections"][0]["items"][0]
         status, body = self.call("POST", "/v1/desktop/briefing/items/%s/act" % item["id"], {"action": "draft_reply"})

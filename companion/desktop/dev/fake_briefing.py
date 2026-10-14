@@ -1,19 +1,26 @@
 """The bridge's morning briefing routes (CONTRACTS-WAVE8 §A3), from ``samples/briefing.json``, for
 ``fake_sync_server.py`` (behind the desktop token and the loopback check the server already does). It reads no mail,
-makes no Gmail draft, starts no T3 task and puts nothing on a calendar: each action only answers as the bridge would.
+makes no Gmail draft, starts no T3 task and puts nothing on a calendar: each action only answers as the bridge
+(``companion/mac-bridge/samrabbit_briefing.py``) would.
 
-* ``GET /v1/desktop/briefing?after=<revision>&wait=0..25`` -> the brief (``{available, status, date, revision,
-  updatedAt, headline, spoken, needsYou, sections: [{kind, title, items: [{id, kind, account?, accountEmail?, title,
-  why, suggestion?, actions: [{type, label}], state, url?, startsAt?, endsAt?, conflict?, inboxItemId?}]}]}``). The
-  sample is moved to today (its clock times stay); with ``after`` equal to the current revision it waits up to
+* ``GET /v1/desktop/briefing?after=<revision>&wait=0..25`` -> the brief, as the bridge's ``view()``: ``{revision,
+  date, building, available, status: ready | building | waiting | failed | off, generatedAt, headline, spoken,
+  needsYou, sections: [{id: doFirst | today | agents | fyi, title, items: [{id, section, kind, title, why,
+  actions: [{type, label}], can, state, updatedAt, account?, url?, suggestion?, draft?, startsAt?, endsAt?,
+  conflict?, itemId?, source?, result?}]}], accounts, counts, composed}`` (``reason`` instead when there is none).
+  The sample is moved to today (its clock times stay); with ``after`` equal to the current revision it waits up to
   ``wait`` seconds for a newer one.
-* ``POST /v1/desktop/briefing/refresh`` -> 202 ``{status: "building"}``; about a second later the revision goes up
-  (at most once in 5 minutes, as on the bridge; sooner it answers 200 ``{status, revision, throttled: true}``).
-* ``POST /v1/desktop/briefing/items/<id>/act {action, at?}`` -> ``{ok, state, result}``: ``draft_reply`` ->
-  ``{draftId, url}`` (a Gmail drafts link in the item's account), ``make_task`` -> ``{itemId}``, ``block_time`` ->
-  ``{eventId, startsAt, endsAt}``, ``remind`` -> ``{until}``, ``done`` / ``dismiss`` -> ``{}``, ``open`` -> ``{url}``.
-* Dev controls: ``POST /dev/briefing {status?: ready|building|failed|off, fail?: <action>}`` (a brief that isn't
-  there, an action that fails with 502 ``gmail_failed``), ``GET /dev/briefing`` (the actions that arrived and how
+* ``POST /v1/desktop/briefing/refresh`` -> 202 ``{status: "building", revision}``; about a second later the revision
+  goes up. At most once in 5 minutes, as on the bridge: sooner it answers 429 ``refresh_too_soon`` with
+  ``retryAfter``.
+* ``POST /v1/desktop/briefing/items/<id>/act {action, …}`` -> ``{ok, item, result, revision}``, only for an action in
+  the item's ``can`` (else 409 ``unsupported_action``): ``draft_reply`` -> ``{draftId, url, account, say}`` (a Gmail
+  drafts link in the item's account), ``make_task`` -> ``{threadId, itemId, title, say}``, ``block_time`` ->
+  ``{eventId, startsAt, endsAt, say}``, ``remind`` (``in: 1h | 2pm | tonight | tomorrow`` or ``at``) -> ``{eventId,
+  until, say}``, ``done`` / ``dismiss`` -> ``{}``, ``open`` -> ``{url, itemId}`` (no change). A second tap of a done
+  action answers what the first did.
+* Dev controls: ``POST /dev/briefing {status?: ready|building|waiting|failed|off, fail?: <action>}`` (a brief that
+  isn't there, an action that fails with 502 ``gmail_failed``), ``GET /dev/briefing`` (the actions that arrived and how
   often the brief was read), ``POST /dev/briefing/reset``.
 
 Stdlib only.
@@ -28,13 +35,14 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SAMPLE = os.path.join(HERE, "samples", "briefing.json")
 ACTIONS = ("draft_reply", "make_task", "block_time", "remind", "done", "dismiss", "open")
-STATES = {"draft_reply": "drafted", "make_task": "tasked", "block_time": "blocked", "remind": "snoozed",
+STATES = {"draft_reply": "drafted", "make_task": "tasked", "block_time": "blocked", "remind": "reminded",
           "done": "done", "dismiss": "dismissed"}
+STATUSES = ("ready", "building", "waiting", "failed", "off")
 REFRESH_EVERY = 300
 
 
@@ -92,6 +100,7 @@ class FakeBriefing:
             self.acts: List[Dict[str, Any]] = []
             self.reads = 0
             self.made = 0
+            self.refreshes = 0
 
     @staticmethod
     def handles(path: str) -> bool:
@@ -111,7 +120,8 @@ class FakeBriefing:
                 self.only(method, "GET")
                 with self.lock:
                     return handler.json(200, {"fake": True, "status": self.status, "reads": self.reads,
-                                              "revision": self.brief["revision"], "acts": list(self.acts)})
+                                              "revision": self.brief["revision"], "acts": list(self.acts),
+                                              "refreshes": self.refreshes})
             if path == "/v1/desktop/briefing":
                 self.only(method, "GET")
                 params = parse_qs(query)
@@ -155,14 +165,17 @@ class FakeBriefing:
     # ------------------------------------------------------------------ the brief
 
     def current(self) -> Dict[str, Any]:
-        """The answer (called with the lock held)."""
-        if self.status in ("off", "failed") or (self.status == "building" and not self.brief.get("sections")):
-            reason = {"off": "gmail_not_connected", "failed": "compose_failed"}.get(self.status, "building")
-            return {"available": False, "status": self.status, "date": self.brief["date"],
-                    "revision": self.brief["revision"], "reason": reason}
+        """The answer (called with the lock held), as the bridge's ``view()``."""
+        base = {"revision": self.brief["revision"], "date": self.brief["date"], "building": self.status == "building"}
+        if self.status in ("off", "failed", "waiting"):
+            value = dict(base, available=False, status=self.status)
+            if self.status != "waiting":
+                value["reason"] = {"off": "briefing_turned_off", "failed": "compose_failed"}[self.status]
+            return value
         brief = copy.deepcopy(self.brief)
+        brief.update(base)
         brief["status"] = self.status
-        brief["needsYou"] = sum(1 for section in brief["sections"] if section["kind"] in ("doFirst", "agents")
+        brief["needsYou"] = sum(1 for section in brief["sections"] if section["id"] in ("doFirst", "agents")
                                 for item in section["items"] if item.get("state", "open") == "open")
         return brief
 
@@ -181,15 +194,19 @@ class FakeBriefing:
 
     def bump(self) -> None:
         self.brief["revision"] += 1
-        self.brief["updatedAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
         self.changed.notify_all()
 
     def refresh(self) -> Any:
         with self.lock:
+            if self.status == "building":
+                return 202, {"status": "building", "revision": self.brief["revision"]}
             now = time.time()
-            if now - self.refreshed_at < REFRESH_EVERY:
-                return 200, {"status": self.status, "revision": self.brief["revision"], "throttled": True}
+            left = REFRESH_EVERY - (now - self.refreshed_at)
+            if left > 0:
+                return 429, {"error": {"code": "refresh_too_soon", "retryable": True, "retryAfter": int(left) + 1,
+                                       "message": "The brief was made a moment ago. Try again in a few minutes."}}
             self.refreshed_at = now
+            self.refreshes += 1
             self.status = "building"
             self.changed.notify_all()
 
@@ -197,10 +214,11 @@ class FakeBriefing:
             time.sleep(1.0)
             with self.lock:
                 self.status = "ready"
+                self.brief["generatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 self.bump()
 
         threading.Thread(target=done, daemon=True).start()
-        return 202, {"status": "building"}
+        return 202, {"status": "building", "revision": self.brief["revision"]}
 
     def find(self, item_id: str) -> Dict[str, Any]:
         for section in self.brief["sections"]:
@@ -209,51 +227,93 @@ class FakeBriefing:
                     return item
         raise Refusal(404, "item_not_found", "That item is not in today's brief.")
 
+    @staticmethod
+    def account_of(item: Dict[str, Any]) -> Optional[str]:
+        """The mailbox an email item is in: the ``authuser`` the bridge put on its Gmail link."""
+        query = urlsplit(str(item.get("url") or "")).query
+        values = parse_qs(query).get("authuser") or []
+        return values[0] if values and "@" in values[0] else None
+
+    @staticmethod
+    def remind_at(body: Dict[str, Any]) -> Optional[datetime]:
+        """The bridge's choices (``in``: 1h, 2pm, tonight, tomorrow; else ``at``, ISO with an offset)."""
+        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        if isinstance(body.get("at"), str):
+            at = parse_iso(body["at"])
+            return at if at is not None and at.tzinfo is not None else None
+        choice = str(body.get("in") or "1h")
+        if choice == "2pm":
+            at = now.replace(hour=14, minute=0)
+        elif choice == "tonight":
+            at = now.replace(hour=18, minute=0)
+        elif choice == "tomorrow":
+            at = (now + timedelta(days=1)).replace(hour=9, minute=0)
+        elif choice == "1h":
+            return now + timedelta(hours=1)
+        else:
+            return None
+        return at if at > now else at + timedelta(days=1)
+
     def act(self, item_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
         action = body.get("action") or body.get("type")
         if action not in ACTIONS:
             raise Refusal(400, "invalid_action", "action must be one of %s." % ", ".join(ACTIONS))
         with self.lock:
             item = self.find(item_id)
-            self.acts.append({"id": item_id, "action": action, "at": body.get("at")})
+            if action not in item.get("can", []):
+                raise Refusal(409, "unsupported_action", "That item can't do that.")
+            self.acts.append({"id": item_id, "action": action, "at": body.get("at"), "in": body.get("in")})
             if self.fail == action:
                 raise Refusal(502, "gmail_failed", "Gmail didn't answer. Nothing was changed.", True)
+            if action == "open":
+                return {"ok": True, "item": dict(item), "result": {"url": item.get("url"), "itemId": item.get("itemId")},
+                        "revision": self.brief["revision"]}
+            if item.get("state") == STATES[action] and item.get("result"):
+                return {"ok": True, "item": dict(item), "result": item["result"], "revision": self.brief["revision"]}
             self.made += 1
             result: Dict[str, Any] = {}
             if action == "draft_reply":
                 draft = "r-%d%04d" % (int(time.time()) % 100000, self.made)
-                account = item.get("accountEmail")
-                user = "?authuser=%s" % quote(account, safe="") if account else ""
-                result = {"draftId": draft, "url": "https://mail.google.com/mail/u/0/%s#drafts/%s" % (user, draft)}
+                account = self.account_of(item)
+                result = {"draftId": draft, "account": item.get("account"),
+                          "url": "https://mail.google.com/mail/%s#drafts?compose=%s"
+                                 % ("?authuser=%s" % account if account else "", draft),
+                          "say": "Saved as a draft in Gmail. Open it to send."}
             elif action == "make_task":
-                result = {"itemId": "t3:th_brief_%d" % self.made}
+                thread = "th_brief_%d" % self.made
+                result = {"threadId": thread, "itemId": "t3:" + thread, "title": item.get("title"),
+                          "say": "Started it as a T3 task."}
             elif action == "block_time":
                 start = datetime.now().astimezone().replace(second=0, microsecond=0) + timedelta(minutes=30)
+                end = start + timedelta(minutes=45)
                 result = {"eventId": "blk_brief_%d" % self.made, "startsAt": start.isoformat(),
-                          "endsAt": (start + timedelta(minutes=45)).isoformat()}
+                          "endsAt": end.isoformat(), "say": "Blocked 45 min at %s." % start.strftime("%I:%M %p").lstrip("0")}
             elif action == "remind":
-                until = body.get("at") if isinstance(body.get("at"), str) else \
-                    (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                result = {"until": until}
-            elif action == "open":
-                result = {"url": item.get("url")} if item.get("url") else {}
-            if action in STATES:
-                item["state"] = STATES[action]
-                self.bump()
-            return {"ok": True, "state": item.get("state", "open"), "result": result}
+                at = self.remind_at(body)
+                if at is None or at <= datetime.now().astimezone():
+                    raise Refusal(400, "invalid_time", "in must be 1h, 2pm, tonight or tomorrow (or give at).")
+                result = {"eventId": "rem_brief_%d" % self.made, "until": at.isoformat(timespec="seconds"),
+                          "say": "I'll remind you at %s." % at.strftime("%I:%M %p").lstrip("0")}
+            item["state"] = STATES[action]
+            item["updatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if result:
+                item["result"] = result
+            self.bump()
+            return {"ok": True, "item": dict(item), "result": result, "revision": self.brief["revision"]}
 
     def summary(self) -> Dict[str, Any]:
+        """``summary.briefing``, as the bridge's ``summary_part()``."""
         with self.lock:
             brief = self.current()
-        return {"available": bool(brief.get("available", True)), "date": brief.get("date"), "status": brief.get("status"),
-                "revision": brief.get("revision"), "headline": brief.get("headline"), "needsYou": brief.get("needsYou", 0),
-                "updatedAt": brief.get("updatedAt")}
+        return {"available": bool(brief.get("available")), "date": brief.get("date"), "status": brief.get("status"),
+                "revision": brief.get("revision"), "headline": brief.get("headline") if brief.get("available") else None,
+                "needsYou": int(brief.get("needsYou") or 0)}
 
     # ------------------------------------------------------------------ dev controls
 
     def dev(self, body: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
-            if body.get("status") in ("ready", "building", "failed", "off"):
+            if body.get("status") in STATUSES:
                 self.status = body["status"]
                 self.changed.notify_all()
             if "fail" in body:

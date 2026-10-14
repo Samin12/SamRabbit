@@ -1,17 +1,20 @@
 """The bridge's voice-note capture routes (CONTRACTS-WAVE8 §A2), with canned outcomes, for ``fake_sync_server.py``
 (behind the desktop token and the loopback check the server already does). Nothing is transcribed, journaled, filed
-in T3 or put on a calendar: it only says it did.
+in T3 or put on a calendar: it only says it did, in the bridge's words (``companion/mac-bridge/samrabbit_capture.py``).
 
 * ``POST /v1/desktop/capture``: a recording (``audio/wav``, ``audio/mp4``, ``audio/x-m4a`` or ``audio/aac``; at most
   16 MiB and 300 s) or JSON ``{text}``, with ``X-SamRabbit-Capture`` (a UUID, required: the same id with the same bytes
   is the same note, with other bytes 409 ``capture_conflict``), ``X-SamRabbit-Captured-At`` and
-  ``X-SamRabbit-Source`` -> 202 ``{captureId, state: "received"}``.
-* ``GET /v1/desktop/capture/<id>?wait=0..10`` -> ``{captureId, state, heard, outcome: {kind, title, detail,
-  threadId?, eventId?, noteId?}, suggestion?, receivedAt, updatedAt}``: "received" until ``delay`` seconds after it
-  came (a wait blocks until then), then what the script says it heard and did (in turn: a journal line, a T3 task, a
-  note with a suggestion, a calendar entry).
+  ``X-SamRabbit-Source`` (``r1`` | ``iphone`` | ``watch`` | ``mac``) -> 202 with the note as below (``state:
+  "received"``).
+* ``GET /v1/desktop/capture/<id>?wait=0..10`` -> ``{captureId, state: received | transcribed | done | failed, source,
+  kind: audio | text, capturedAt, receivedAt, updatedAt, heard, outcome: {kind: journal | task | event | note | nothing
+  | failed, title, detail, threadId?, eventId?, noteId?, journalDate?}, suggestion?: {action, label}, say, seen,
+  dismissed, error?}``: "received" until ``delay`` seconds after it came (a wait blocks until then), then what the
+  script says it heard and did (in turn: a journal line, a T3 task, a note with a suggestion, a calendar entry).
 * ``GET /v1/desktop/captures?limit=`` (newest first) and ``POST /v1/desktop/captures/<id>/act {action}`` (``task``,
-  ``journal``, ``note``, ``dismiss``, ``undo``).
+  ``journal``, ``event``, ``note``, ``undo``, ``dismiss``, ``seen``, ``retry``; a note not done yet 409
+  ``capture_not_ready``, undoing a journal line or a task 409 ``cannot_undo``).
 * Dev controls: ``POST /dev/capture {mode?, delay?, script?}`` (modes ``ok``, ``outdated`` (404: a bridge without
   voice notes), ``busy`` (503), ``refuse`` (401), ``no_speech``, ``fail``; ``script``: ``[{heard, kind, title?,
   detail?, suggestion?}]``), ``GET /dev/capture`` (what arrived: ids, sources, times, content types, byte counts and
@@ -41,19 +44,33 @@ MAX_SECONDS = 300.5
 MAX_TEXT = 8000
 AUDIO_TYPES = ("audio/wav", "audio/x-wav", "audio/wave", "audio/mp4", "audio/x-m4a", "audio/aac")
 MODES = ("ok", "outdated", "busy", "refuse", "no_speech", "fail")
-ACTIONS = ("task", "journal", "note", "dismiss", "undo")
+ACTIONS = ("task", "journal", "event", "note", "undo", "dismiss", "seen", "retry")
+SOURCES = ("r1", "iphone", "watch", "mac")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 SCRIPT: List[Dict[str, Any]] = [
     {"heard": "Put this in my journal: shipped the voice notes on the Mac today.", "kind": "journal",
-     "title": "Journal", "detail": "shipped the voice notes on the Mac today."},
-    {"heard": "Make a new task: fix the flaky long-poll test in the bridge suite.", "kind": "t3_task",
-     "title": "Fix the flaky long-poll test in the bridge suite", "detail": "SamRabbit"},
-    {"heard": "Call the bank about the replacement card.", "kind": "note", "title": "Voice note",
-     "detail": "Call the bank about the replacement card.",
-     "suggestion": {"label": "Start it as a T3 task?", "action": "task"}},
-    {"heard": "Remind me tomorrow at nine to send Dana the SOW.", "kind": "calendar_event",
-     "title": "Reminder: send Dana the SOW", "detail": "Tomorrow 9:00 AM"},
+     "title": "Journal", "detail": "Added to your journal."},
+    {"heard": "Make a new task: fix the flaky long-poll test in the bridge suite.", "kind": "task",
+     "title": "Fix the flaky long-poll test in the bridge suite",
+     "detail": "Started “Fix the flaky long-poll test in the bridge suite” in SamRabbit."},
+    {"heard": "Call the bank about the replacement card.", "kind": "note",
+     "title": "Call the bank about the replacement card.", "detail": "Saved as a note.",
+     "suggestion": {"action": "task", "label": "Start it as a T3 task?"}},
+    {"heard": "Remind me tomorrow at nine to send Dana the SOW.", "kind": "event",
+     "title": "Send Dana the SOW", "detail": "Added “Send Dana the SOW” for tomorrow 9:00 AM."},
 ]
+
+
+def title_from(text: str, limit: int = 60) -> str:
+    """The bridge's ``t3.title_from_prompt``."""
+    flat = " ".join(str(text).split())
+    if len(flat) <= limit:
+        return flat or "New task"
+    cut = flat[:limit]
+    space = cut.rfind(" ")
+    if space > limit * 0.5:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:-.") + "…"
 
 
 class Refusal(Exception):
@@ -208,6 +225,9 @@ class FakeCapture:
                     raise Refusal(400, "audio_too_long", "Five minutes at most.")
         else:
             raise Refusal(415, "unsupported_audio", "Send audio/wav, audio/mp4, audio/aac or JSON {text}.")
+        source = (handler.headers.get("X-SamRabbit-Source") or "").strip().lower()
+        if source and source not in SOURCES:
+            raise Refusal(400, "invalid_source", "X-SamRabbit-Source must be r1, iphone, watch or mac.")
         digest = hashlib.sha256(body).hexdigest()
         with self.lock:
             known = self.captures.get(capture_id)
@@ -215,14 +235,17 @@ class FakeCapture:
                 if known["digest"] != digest:
                     raise Refusal(409, "capture_conflict", "This id already has another note.")
                 known["repeats"] += 1
-                return 200, self.public(known)
+                view = self.public(known)
+                return (200 if view["state"] in ("done", "failed") else 202), view
             now = time.time()
             entry = self.script[self.turn % len(self.script)] if self.script else {"heard": text or "", "kind": "note"}
             self.turn += 1
             capture = {
                 "captureId": capture_id, "digest": digest, "receivedAt": now, "readyAt": now + self.delay,
                 "receivedIso": iso_now(), "mode": self.mode, "entry": dict(entry), "text": text, "repeats": 0,
-                "acted": None,
+                "acted": None, "source": source or "mac", "kind": "text" if text is not None else "audio",
+                "capturedAt": handler.headers.get("X-SamRabbit-Captured-At") or iso_now(), "seen": False,
+                "dismissed": False,
             }
             self.captures[capture_id] = capture
             self.order.insert(0, capture_id)
@@ -237,37 +260,49 @@ class FakeCapture:
                 with open(os.path.join(self.save, "capture-%d.wav" % len(self.log)), "wb") as out:
                     out.write(body)
             self.changed.notify_all()
-            return 202, {"captureId": capture_id, "state": "received", "receivedAt": capture["receivedIso"]}
+            return 202, self.public(capture)
 
     def public(self, capture: Dict[str, Any]) -> Dict[str, Any]:
+        """The note as the bridge's ``view()`` shows it."""
         now = time.time()
-        base = {"captureId": capture["captureId"], "receivedAt": capture["receivedIso"], "updatedAt": iso_now()}
+        base = {"captureId": capture["captureId"], "source": capture["source"], "kind": capture["kind"],
+                "capturedAt": capture["capturedAt"], "receivedAt": capture["receivedIso"], "updatedAt": iso_now(),
+                "seen": capture["seen"], "dismissed": capture["dismissed"]}
         if now < capture["readyAt"]:
-            return dict(base, state="received", heard=None, outcome=None)
+            state = "transcribed" if capture["text"] is not None else "received"
+            return dict(base, state=state, heard=capture["text"], outcome=None, suggestion=None, say="Sent.")
         entry = capture["entry"]
         heard = capture["text"] or entry.get("heard") or ""
         if capture["mode"] == "no_speech":
-            return dict(base, state="no_speech", heard=None, outcome=None, say="I didn't catch anything.")
+            outcome = {"kind": "nothing", "title": "Nothing heard", "detail": "I didn't catch anything."}
+            return dict(base, state="done", heard="", outcome=outcome, suggestion=None, say=outcome["detail"])
         if capture["mode"] == "fail":
-            return dict(base, state="failed", heard=heard, outcome={"kind": "failed", "title": "Not done",
-                                                                     "detail": "T3 Code isn't connected."},
-                        error={"code": "t3_not_connected"})
+            outcome = {"kind": "failed", "title": "Voice note", "detail": "Couldn't save it: T3 Code isn't connected."}
+            return dict(base, state="failed", heard=heard, outcome=outcome, suggestion=None, say=outcome["detail"],
+                        error={"code": "t3_not_connected", "message": "T3 Code isn't connected."})
         kind = capture["acted"] or entry.get("kind") or "note"
-        outcome: Dict[str, Any] = {"kind": kind, "title": entry.get("title") or "", "detail": entry.get("detail") or ""}
+        outcome: Dict[str, Any] = {"kind": kind, "title": entry.get("title") or title_from(heard),
+                                   "detail": entry.get("detail") or ""}
         if capture["acted"] and capture["acted"] != entry.get("kind"):
-            # Done another way on Samin's tap: named by what he said.
-            outcome.update(title=heard[:80], detail="")
-        if kind == "t3_task":
-            outcome["threadId"] = "th_note_%s" % capture["captureId"][:8]
-        elif kind == "calendar_event":
+            # Done another way on Samin's tap: named by what he said, in the bridge's words.
+            title = title_from(heard)
+            outcome = {"kind": kind, "title": title, "detail": {
+                "task": "Started “%s” in SamRabbit." % title, "journal": "Added to your journal.",
+                "event": "Added “%s” for tomorrow 9:00 AM." % title,
+                "note": "Saved as a note."}.get(kind, "")}
+            if kind == "journal":
+                outcome["title"] = "Journal"
+        if kind == "task":
+            outcome.update(threadId="th_note_%s" % capture["captureId"][:8], projectName="SamRabbit")
+        elif kind == "event":
             outcome["eventId"] = "ev_note_%s" % capture["captureId"][:8]
         elif kind == "note":
             outcome["noteId"] = "note:%s" % capture["captureId"]
+        elif kind == "journal":
+            outcome.update(journalDate=capture["capturedAt"][:10], time=capture["capturedAt"][11:16])
         suggested = kind == "note" and entry.get("suggestion") and not capture["acted"]
-        payload = dict(base, state="needs_you" if suggested else "done", heard=heard, outcome=outcome)
-        if suggested:
-            payload["suggestion"] = dict(entry["suggestion"])
-        return payload
+        return dict(base, state="done", heard=heard, outcome=outcome,
+                    suggestion=dict(entry["suggestion"]) if suggested else None, say=outcome["detail"] or None)
 
     def status(self, capture_id: str, wait: float) -> Dict[str, Any]:
         deadline = time.time() + wait
@@ -281,25 +316,61 @@ class FakeCapture:
 
     def recent(self, limit: int) -> Dict[str, Any]:
         with self.lock:
-            items = [self.public(self.captures[i]) for i in self.order[:limit]]
-        return {"captures": items, "failed": sum(1 for c in items if c["state"] == "failed")}
+            every = [self.public(self.captures[i]) for i in self.order]
+        return {"captures": every[:limit], "pending": sum(1 for c in every if c["state"] not in ("done", "failed")),
+                "updatedAt": iso_now()}
 
     def act(self, capture_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """As the bridge's ``act``: the note done another way (``task``, ``journal``, ``event``, ``note``), ``undo``,
+        ``dismiss``, ``seen``, ``retry``; the answer is the note."""
         action = body.get("action")
         if action not in ACTIONS:
             raise Refusal(400, "invalid_action", "action must be one of %s." % ", ".join(ACTIONS))
         with self.lock:
-            capture = self.captures.get(capture_id.lower().split(":", 1)[-1])
+            capture = self.captures.get(capture_id.lower())
             if capture is None:
-                raise Refusal(404, "capture_not_found", "No such capture.")
-            capture["acted"] = {"task": "t3_task", "journal": "journal", "note": "note"}.get(action, capture["acted"])
+                raise Refusal(404, "capture_not_found", "There is no such voice note.")
             self.acts.append({"captureId": capture["captureId"], "action": action})
-            return {"ok": True, **self.public(capture)}
+            if action in ("seen", "dismiss"):
+                capture["seen"] = True
+                capture["dismissed"] = capture["dismissed"] or action == "dismiss"
+                return self.public(capture)
+            view = self.public(capture)
+            if action == "retry":
+                if view["state"] != "failed":
+                    raise Refusal(409, "not_failed", "Only a note that failed can be tried again.")
+                capture["mode"] = "ok"
+                capture["readyAt"] = time.time() + self.delay
+                return self.public(capture)
+            if view["state"] != "done" or not view["heard"]:
+                raise Refusal(409, "capture_not_ready", "That note isn't finished yet.", True)
+            kind = (view["outcome"] or {}).get("kind")
+            if action == "undo":
+                if kind == "journal":
+                    raise Refusal(409, "cannot_undo", "A journal line can't be taken back from here: remove it in Heptabase.")
+                if kind == "task":
+                    raise Refusal(409, "cannot_undo", "A task that started can't be taken back from here: stop it in Tasks.")
+                if kind == "event":
+                    capture["acted"] = "note"
+                else:
+                    capture["dismissed"] = capture["seen"] = True
+                return self.public(capture)
+            if action != kind:
+                capture["acted"] = action
+            capture["seen"] = True
+            return self.public(capture)
 
     def summary(self) -> Dict[str, Any]:
+        """``summary.captures``, as the bridge's ``summary_part()``."""
         with self.lock:
-            states = [self.public(self.captures[i])["state"] for i in self.order[:20]]
-        return {"recent": len(states), "failed": states.count("failed")}
+            every = [self.public(self.captures[i]) for i in self.order]
+        recent = [{"captureId": c["captureId"], "state": c["state"], "kind": (c["outcome"] or {}).get("kind"),
+                   "title": (c["outcome"] or {}).get("title"), "say": (c["outcome"] or {}).get("detail"),
+                   "at": c["capturedAt"]} for c in every[:3]]
+        return {"available": True, "recent": recent,
+                "failed": sum(1 for c in every if c["state"] == "failed" and not c["dismissed"]),
+                "pending": sum(1 for c in every if c["state"] not in ("done", "failed")),
+                "notes": sum(1 for c in every if (c["outcome"] or {}).get("kind") == "note" and not c["dismissed"])}
 
     # ------------------------------------------------------------------ dev controls
 
