@@ -34,6 +34,8 @@ working folder). A live session cannot be continued from here (``409 session_liv
 it where it runs); one that is not live is continued in a new Terminal window running ``claude --resume <id> --
 <text>`` or ``codex resume <id> -- <text>`` in its folder, so Samin keeps the CLI's own permission prompts. A session
 just resumed that way counts as live for 15 s (before ``ps`` can see it), so a second press never starts a second CLI.
+When ``ps`` fails nobody can tell, so nothing starts a CLI either: no ``reply`` in ``can``, a reply answers 503
+``session_check_failed`` (retryable) and ``open`` only brings Terminal forward.
 A Claude or Codex session that failed needs Samin until he marked it seen; then it is idle ("Hit an error").
 
 Routes (loopback peer + the desktop token only: the desktop sync API's rule, through ``samrabbit_mobile``):
@@ -1803,7 +1805,8 @@ class InboxService:
         if status in (NEEDS_APPROVAL, NEEDS_INPUT):
             can = ["open"]  # the CLI owns its prompt: only the terminal can answer it
         else:
-            can = (["open"] if is_live else ["reply", "open"]) + (["seen"] if unread else [])
+            # A reply resumes the session in a new CLI: only when nobody runs it (``ps`` failed: nobody can tell).
+            can = (["reply", "open"] if is_live is False else ["open"]) + (["seen"] if unread else [])
         return {
             "id": item_id, "source": "claude", "agent": "claude", "title": self.claude.title(record),
             "project": os.path.basename(record.cwd.rstrip("/")) if record.cwd else None, "cwd": record.cwd,
@@ -1835,8 +1838,8 @@ class InboxService:
         status = _settled(status, unread)
         if record.desktop:
             can = ["open"]  # the app owns its threads
-        elif status in (NEEDS_APPROVAL, NEEDS_INPUT) or is_live:
-            can = ["open"]
+        elif status in (NEEDS_APPROVAL, NEEDS_INPUT) or is_live is not False:
+            can = ["open"]  # a CLI runs it, or ``ps`` failed and nobody can tell: no reply that starts a second one
         else:
             can = ["reply", "open"]
         if unread:
@@ -2164,7 +2167,7 @@ class InboxService:
                     return {"opened": True, "how": "deeplink", **dry}
                 self.launcher.app(CHATGPT_BUNDLE_ID)
                 return {"opened": True, "how": "app", **dry}
-        pid = self._owner(source, key)
+        pid, known = self._owner(source, key)
         if pid is not None:
             app = self.processes.app_of(pid)
             if app:
@@ -2173,9 +2176,10 @@ class InboxService:
                 self.launcher.app(TERMINAL_BUNDLE_ID)
             _LOG.info("inbox opened a live %s session", source)
             return {"opened": True, "how": "terminal", **dry}
-        if self._just_launched(source + ":" + key):  # its Terminal window is still starting: never a second CLI
+        if self._just_launched(source + ":" + key) or not known:
+            # Its Terminal window is still starting, or ``ps`` failed (a CLI may run it): never a second CLI.
             self.launcher.app(TERMINAL_BUNDLE_ID)
-            _LOG.info("inbox opened a %s session just resumed", source)
+            _LOG.info("inbox opened Terminal for a %s session (just resumed, or ps failed)", source)
             return {"opened": True, "how": "terminal", **dry}
         cwd = self._folder_of(item)
         argv = [self._tool("claude"), "--resume", key] if source == "claude" else [self._tool("codex"), "resume", key]
@@ -2187,7 +2191,8 @@ class InboxService:
     def _reply(self, source: str, key: str, item: Dict[str, Any], body: Dict[str, Any],
                mobile: bool = False) -> Tuple[int, Dict[str, Any]]:
         """A Claude or Codex CLI session nobody runs: continued in a new Terminal window on the Mac (from the phone
-        too, and then the answer says so); a live one is answered where it runs, so nothing opens."""
+        too, and then the answer says so); a live one is answered where it runs, so nothing opens, nor when ``ps``
+        failed and nobody can tell."""
         text = _reply_text(body)
         if source == "chat":
             raise _unsupported("This is a SamRabbit conversation: answer it in Chats." if mobile else
@@ -2197,9 +2202,20 @@ class InboxService:
             if record is not None and record.desktop:
                 raise _unsupported("Codex Desktop owns this thread: reply in the ChatGPT app on the Mac." if mobile
                                    else "Codex Desktop owns this thread: open it there to reply.")
-        if item.get("live") or self._just_launched(source + ":" + key) or self._owner(source, key) is not None:
-            raise InboxError(409, "session_live", "It's open in a terminal on the Mac: answer it there." if mobile
-                             else "It's open in a terminal: open it to answer there.")
+        live = InboxError(409, "session_live", "It's open in a terminal on the Mac: answer it there." if mobile
+                          else "It's open in a terminal: open it to answer there.")
+        if item.get("live") or self._just_launched(source + ":" + key):
+            raise live
+        pid, known = self._owner(source, key)
+        if pid is not None:
+            raise live
+        if not known:
+            # ``ps`` failed: a CLI may run it right now, and a second one on the same session file would garble it.
+            raise InboxError(503, "session_check_failed",
+                             ("Can't tell right now whether it's open in a terminal on the Mac. Try again in a moment."
+                              if mobile else
+                              "Can't tell right now whether it's open in a terminal. Try again in a moment, or open "
+                              "it."), retryable=True)
         cwd = self._folder_of(item)
         # ``--`` ends the options: a reply that starts with "-" (a list, "-p ...") is the prompt, never a flag.
         argv = [self._tool("claude"), "--resume", key, "--", text] if source == "claude" else \
@@ -2230,16 +2246,18 @@ class InboxService:
             at = self._launched.get(item_id)
             return at is not None and self._monotonic() - at < LAUNCH_GRACE_SECONDS
 
-    def _owner(self, source: str, key: str) -> Optional[int]:
-        """The pid of the CLI that owns a Claude or Codex session right now (looked up again: Samin may just have
-        closed it), or None."""
+    def _owner(self, source: str, key: str) -> Tuple[Optional[int], bool]:
+        """(The pid of the CLI that owns a Claude or Codex session right now, or None; whether that is known: False
+        when ``ps`` failed and nothing else claimed the session). Looked up again: Samin may just have closed it."""
         if source == "claude":
             records: List[Any] = self.claude.scan(self._clock())
         else:
             records = [record for record in self.codex.scan(self._clock()) if not record.desktop]
         owners = self._owners(records, source, fresh=True)
         owner = owners[0].get(key)
-        return owner[1] if owner and owner[1] else None
+        if owner and owner[1]:
+            return owner[1], True
+        return None, owners[1]
 
     def _folder_of(self, item: Dict[str, Any]) -> str:
         cwd = item.get("cwd")

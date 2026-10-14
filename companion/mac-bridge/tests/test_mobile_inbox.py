@@ -331,6 +331,21 @@ class PhoneSessionTest(PhoneInboxBase):
         self.assert_log_clean(REPLY, "5521", str(self.cwd))
         self.assertIn("inbox continued a claude session in Terminal (from the phone)", self.log.getvalue())
 
+    def test_when_the_mac_cannot_tell_what_runs_the_phone_starts_nothing(self) -> None:
+        # ps failed: the "busy" session's plain `claude` may still be running it.
+        self.processes.broken = True
+        with self.inbox._lock:  # noqa: SLF001
+            self.inbox._live = (-1e12, {})  # noqa: SLF001
+        self.inbox.refresh(force=True)
+        items = self.by_id(self.phone_inbox())
+        for item_id in ("claude:" + IDS["busy"], "claude:" + IDS["done"]):
+            with self.subTest(item=item_id):
+                self.assertNotIn("reply", items[item_id]["can"])
+                status, value = self.phone_act(item_id, "reply", {"text": REPLY})
+                self.assertEqual((503, "session_check_failed"), (status, value["error"]["code"]))
+                self.assertIn("on the Mac", value["error"]["message"])
+        self.assertEqual([], self.recorder.calls, "nothing came up on the Mac's screen")
+
     def test_a_copy_that_is_not_the_installed_one_says_nothing_was_opened(self) -> None:
         dry = inbox.make_service(installed=False)
         self.addCleanup(dry.close)

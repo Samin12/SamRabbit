@@ -937,6 +937,29 @@ class SessionActionTest(InboxBase):
         status, value = self.act(item_id, "open")
         self.assertEqual(2, len(self.recorder.scripts), "later (nobody owns it in ps): resumed again")
 
+    def test_when_ps_fails_no_second_cli_is_ever_started(self) -> None:
+        # "busy" runs in a plain `claude` that only `ps` shows: with ps down, nobody can tell it is live.
+        self.processes.broken = True
+        with self.inbox._lock:  # noqa: SLF001
+            self.inbox._live = (-1e12, {})  # noqa: SLF001
+        items = self.by_id(self.fresh())
+        for item_id in ("claude:" + IDS["busy"], "claude:" + IDS["done"], "codex:" + IDS["cli_done"]):
+            with self.subTest(item=item_id):
+                self.assertNotIn("reply", items[item_id]["can"], "no reply that would resume it in a new CLI")
+                status, value = self.act(item_id, "reply", {"text": REPLY})
+                self.assertEqual((503, "session_check_failed", True),
+                                 (status, value["error"]["code"], value["error"]["retryable"]))
+        self.assertEqual([], self.recorder.calls, "nothing was started")
+        status, value = self.act("claude:" + IDS["busy"], "open")
+        self.assertEqual((200, {"opened": True, "how": "terminal"}), (status, value))
+        self.assertEqual([["/usr/bin/open", "-b", "com.apple.Terminal"]], self.recorder.calls,
+                         "Open brings Terminal forward instead of resuming the session again")
+        self.assertEqual([], self.recorder.scripts)
+        self.processes.broken = False  # ps works again: a session nobody owns resumes as before
+        self.assertIn("reply", self.by_id(self.fresh())["claude:" + IDS["done"]]["can"])
+        self.assertEqual(202, self.act("claude:" + IDS["done"], "reply", {"text": REPLY})[0])
+        self.assertEqual(1, len(self.recorder.scripts))
+
     def test_a_live_codex_cli_is_answered_where_it_runs(self) -> None:
         self.processes.add(5100, "codex resume " + IDS["cli_done"], app="/Applications/Ghostty.app")
         self.processes.add(5200, "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/"
