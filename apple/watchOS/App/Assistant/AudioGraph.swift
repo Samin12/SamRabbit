@@ -455,19 +455,14 @@ final class AudioGraph {
         utterance.voice = Self.voice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.04
         let current = generation
-        synthesizer.write(utterance) { [weak self] buffer in
-            nonisolated(unsafe) let buffer = buffer
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, self.generation == current else { return }
-                    guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else {
-                        self.speechEnded(current) // the empty buffer that ends the speech
-                        return
-                    }
-                    if let converted = self.convert(pcm) { self.schedule(converted) }
-                    self.speechWatchdog(current, after: 1.5)
-                }
+        Self.write(utterance, with: synthesizer) { [weak self] buffer in
+            guard let self, self.generation == current else { return }
+            guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else {
+                self.speechEnded(current) // the empty buffer that ends the speech
+                return
             }
+            if let converted = self.convert(pcm) { self.schedule(converted) }
+            self.speechWatchdog(current, after: 1.5)
         }
         // A voice that never answers (or never says it is done) must not hang the conversation.
         speechWatchdog(current, after: 4)
@@ -528,8 +523,18 @@ final class AudioGraph {
         if !player.isPlaying { player.play() }
     }
 
-    /// AVFoundation calls the completion back on its own queue. Nonisolated, so the closure doesn't inherit the main
-    /// actor: Swift 6 traps a main-actor closure that runs anywhere else (it ended every reply on a real iPhone).
+    /// The synthesizer's buffers (it delivers them on the main queue today, which isn't documented): nonisolated, like
+    /// the tap, so the closure never inherits the main actor and can't trap if that changes.
+    private nonisolated static func write(_ utterance: AVSpeechUtterance, with synthesizer: AVSpeechSynthesizer,
+                                          heard: @escaping @MainActor @Sendable (AVAudioBuffer) -> Void) {
+        synthesizer.write(utterance) { buffer in
+            nonisolated(unsafe) let buffer = buffer
+            DispatchQueue.main.async { MainActor.assumeIsolated { heard(buffer) } }
+        }
+    }
+
+    /// AVFoundation calls the completion back on its own queue. Nonisolated, so the closure never inherits the main
+    /// actor (the SDK marks this handler `sending` today, so it doesn't; kept like the tap so it can't start to).
     private nonisolated static func schedule(_ buffer: AVAudioPCMBuffer, on player: AVAudioPlayerNode,
                                              played: @escaping @MainActor @Sendable () -> Void) {
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
