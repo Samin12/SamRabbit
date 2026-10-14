@@ -97,7 +97,8 @@ The inbox (CONTRACTS-WAVE6 §A, the phone's twin of WAVE7: every agent on the Ma
 * ``POST /v1/mobile/inbox/items/<id>/dismiss | undismiss`` (every item lists ``dismiss``): as the real bridge, seen and
   out of the list and its counts (``counts.dismissed``) until it changes (status, requests, a newer ``updatedAt``; a
   working item's steps don't count), ``{ok, dismissed, revision}``; the undo puts back what was unread.
-  ``?include=dismissed`` lists them after the rest with ``dismissed: true``.
+  ``?include=dismissed`` lists them after the rest with ``dismissed: true``. A dismissed T3 thread is left out of the
+  summary's ``t3`` and of ``/v1/mobile/t3/threads`` too until it changes (``?include=dismissed`` marks it there).
 * ``POST /__fake/inbox {missing?, id?, live?, unread?, unsure?, status?, clear?, refuse?}`` / ``GET /__fake/inbox``:
   ``missing`` makes every inbox route 404 (an older bridge); ``id`` with ``live`` / ``unread`` / ``status`` changes a
   session, ``unsure`` as when the Mac's process list didn't answer (the real bridge then sends neither ``live`` nor
@@ -1118,6 +1119,11 @@ class FakeBridge:
             del self.inbox_dismissed[item["id"]]
         return not changed
 
+    def t3_hidden(self, t: Dict[str, Any]) -> bool:
+        """A T3 thread dismissed in the inbox that has not changed since: out of the summary and the thread list."""
+        with self.lock:
+            return self.still_dismissed(self.t3_inbox_item(t))
+
     def inbox(self, include_dismissed: bool = False) -> Dict[str, Any]:
         """``GET /v1/mobile/inbox``: the revision grows by one whenever what the list shows changes."""
         with self.lock:
@@ -1317,7 +1323,7 @@ class FakeBridge:
         return [{k: v for k, v in ev.items() if not k.startswith("_")} for _, ev in items]
 
     def summary(self) -> Dict[str, Any]:
-        threads = self.sorted_threads()
+        threads = [t for t in self.sorted_threads() if not self.t3_hidden(t)]
         live = [c for c in self.conversations.values() if c["live"]]
         latest = max(self.conversations.values(), key=lambda c: c["lastAt"]) if self.conversations else None
         return {
@@ -1980,8 +1986,11 @@ class Handler(BaseHTTPRequestHandler):
         if rest == "t3/threads":
             if method == "GET":
                 flt = self.q1("filter")
+                include = {part.strip() for part in (self.q1("include") or "").split(",")}
                 with b.lock:
                     items = b.sorted_threads()
+                    if "dismissed" not in include:
+                        items = [t for t in items if not b.t3_hidden(t)]
                     if flt == "needs_you":
                         items = [t for t in items if t["status"] in ("needs_approval", "needs_input")]
                     elif flt == "working":
@@ -1991,7 +2000,8 @@ class Handler(BaseHTTPRequestHandler):
                                        key=lambda t: -t["updatedAt"])
                     elif flt:
                         raise ApiError(400, "invalid_filter", "filter must be needs_you, working or recent.")
-                    return self.send_json(200, {"threads": [b.thread_view(t) for t in items]})
+                    return self.send_json(200, {"threads": [dict(b.thread_view(t), dismissed=True) if b.t3_hidden(t)
+                                                            else b.thread_view(t) for t in items]})
             self.only(method, "POST")
             body = self.body()
             return self.send_json(202, b.t3_create(str(body.get("text") or ""), body.get("projectId")))

@@ -793,6 +793,24 @@ struct InboxBridgeTests {
         }
     }
 
+    /// A T3 thread dismissed in the inbox is out of the summary's `t3` and the thread lists too (what the watch, the
+    /// phone's background alerts and its fallback list read), as on the real bridge, until the undo.
+    @Test func aDismissedThreadLeavesTheThreadListsAndTheSummary() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, _) = try await bridge.pairedClient()
+        let before = try await client.summary()
+        #expect(Set(try await client.threads(filter: .needsYou).map(\.threadId)) == ["t_deploy24", "t_loginfix"])
+        _ = try await client.inboxDismiss("t3:t_deploy24")
+        #expect(try await client.threads(filter: .needsYou).map(\.threadId) == ["t_loginfix"])
+        #expect(!(try await client.threads()).contains { $0.threadId == "t_deploy24" })
+        let summary = try await client.summary()
+        #expect(summary.t3.needsYou == before.t3.needsYou - 1)
+        #expect(!summary.t3.threads.contains { $0.threadId == "t_deploy24" })
+        _ = try await client.inboxUndismiss("t3:t_deploy24")
+        #expect(Set(try await client.threads(filter: .needsYou).map(\.threadId)) == ["t_deploy24", "t_loginfix"])
+        #expect(try await client.summary().t3.needsYou == before.t3.needsYou)
+    }
+
     /// T3 Code down: the inbox still answers with the others; an older bridge has no inbox at all (404).
     @Test func t3DownAndAnOlderBridge() async throws {
         let bridge = try FakeBridgeProcess()
