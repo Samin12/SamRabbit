@@ -330,6 +330,10 @@ struct DockSourceGlyph: View {
                 .foregroundStyle(DockPalette.ink)
         case "samrabbit":
             DockOrbMark(size: size * 1.05)
+        case "note":
+            Image(systemName: "waveform")
+                .font(.system(size: size * 0.4, weight: .bold))
+                .foregroundStyle(DockPalette.ink)
         default:
             Image(systemName: "sparkle").font(.system(size: size * 0.42)).foregroundStyle(DockPalette.ink)
         }
@@ -437,7 +441,7 @@ struct DockRowDetail: View {
             VStack(alignment: .leading, spacing: 8 * p) {
                 ForEach(Array(detail.messages.suffix(3).enumerated()), id: \.offset) { _, message in
                     VStack(alignment: .leading, spacing: 2 * p) {
-                        Text(message.isUser ? "You" : (item.isChat ? "SamRabbit" : (item.agentLabel ?? "Agent")))
+                        Text(message.isUser ? "You" : (item.isChat || item.isVoiceNote ? "SamRabbit" : (item.agentLabel ?? "Agent")))
                             .font(.system(size: 10.5 * p, weight: .semibold))
                             .foregroundStyle(message.isUser ? DockPalette.accentText : DockPalette.tertiary)
                         Text(message.text)
@@ -463,6 +467,11 @@ struct DockRowDetail: View {
 
     private func actions(_ p: CGFloat) -> some View {
         HStack(spacing: 6 * p) {
+            // A voice note: what the bridge suggested ("Start as task"), or "Try again" when it failed.
+            if let act = item.noteAct {
+                DockCapsuleButton(title: act.title, symbol: act.action == nil ? "arrow.clockwise" : "arrow.turn.down.right",
+                                  style: .accent, scale: p, disabled: store.busy[item.id] != nil) { store.actOnNote(item) }
+            }
             if item.supports("open") {
                 DockCapsuleButton(title: openTitle, symbol: "arrow.up.forward.app", style: .plain, scale: p) { store.open(item) }
             }
@@ -497,6 +506,7 @@ struct DockRowDetail: View {
         case "reply": return "Replying…"
         case "stop": return "Stopping…"
         case "open": return "Opening…"
+        case "act": return "On it…"
         default: return "…"
         }
     }

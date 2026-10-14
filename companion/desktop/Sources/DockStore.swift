@@ -374,6 +374,17 @@ final class DockStore: ObservableObject {
         perform(item, "seen", optimistic: optimistic) { await DockAPI.seen(item.id) }
     }
 
+    /// A voice note's button (DockItem.noteAct): the bridge does its suggestion, or tries a failed note again. The row
+    /// leaves "Needs you" at once; the bridge takes it out of the inbox once it has done it.
+    func actOnNote(_ item: DockItem) {
+        guard let act = item.noteAct else { return }
+        var optimistic = item
+        optimistic.unread = false
+        optimistic.status = act.action == nil ? .working : .idle
+        optimistic.statusLabel = act.action == nil ? "Trying again…" : "\(act.title)…"
+        perform(item, "act", optimistic: optimistic) { await DockAPI.act(item.id, action: act.action) }
+    }
+
     func open(_ item: DockItem) {
         perform(item, "open", optimistic: nil) { await DockAPI.open(item.id) }
     }

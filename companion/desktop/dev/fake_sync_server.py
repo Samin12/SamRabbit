@@ -28,7 +28,9 @@ It serves, on 127.0.0.1 only:
   controls ``POST /dev/desktop {calendar?, chatgpt?, r1Online?, journal?}`` and ``POST /dev/desktop/reset``.
 * voice notes and the morning brief (CONTRACTS-WAVE8 §A2, §A3): ``POST /v1/desktop/capture``,
   ``GET /v1/desktop/capture/<id>?wait=``, ``GET /v1/desktop/captures``, ``POST …/captures/<id>/act``
-  (``fake_capture.py``: canned outcomes, nothing journaled or filed; dev ``/dev/capture``), and
+  (``fake_capture.py``: canned outcomes, nothing journaled or filed; dev ``/dev/capture``); ``POST /dev/inbox/notes``
+  puts two voice notes in the inbox as the bridge lists them (``note:<captureId>``: kept with a suggestion, failed),
+  whose ``act`` and ``seen`` answer as the bridge's capture service; and
   ``GET /v1/desktop/briefing``, ``POST …/briefing/refresh``, ``POST …/briefing/items/<id>/act`` (``fake_briefing.py``:
   ``samples/briefing.json`` moved to today, no mail read or drafted; dev ``/dev/briefing``); the summary carries
   ``briefing`` and ``captures``.
@@ -64,7 +66,7 @@ import samrabbit_app  # noqa: E402  (the real /app module of the bridge)
 
 from fake_assistant import FakeAssistant  # noqa: E402  (the desktop voice routes)
 from fake_briefing import FakeBriefing  # noqa: E402  (the morning brief)
-from fake_capture import FakeCapture  # noqa: E402  (voice notes)
+from fake_capture import FakeCapture, Refusal, note_inbox_action, note_items  # noqa: E402  (voice notes)
 from fake_desktop import FakeDesktop  # noqa: E402  (the window's summary, calendar, journal and devices)
 
 MINUTE = 60_000
@@ -800,6 +802,14 @@ def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str
         if method == "POST" and path == "/dev/inbox/reset":
             inbox.reset()
             return handler.json(200, {"ok": True})
+        if method == "POST" and path == "/dev/inbox/notes":
+            # Two voice notes as the bridge lists them (fake_capture.note_items): one kept with a suggestion, one failed.
+            with inbox.cond:
+                for item in note_items(now_ms()):
+                    inbox.details[item["id"]] = item.pop("_messages")
+                    inbox.items[item["id"]] = item
+                inbox.bump()
+            return handler.json(200, {"ok": True})
         if method == "GET" and path == "/v1/desktop/inbox":
             raw_after = (query.get("after") or [""])[0]
             after = int(raw_after) if raw_after.lstrip("-").isdigit() else None
@@ -828,12 +838,32 @@ def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str
                 return handler.json(200, inbox.item(unquote(rest)))
             if method == "POST" and rest.count("/") == 1:
                 item_id, action = rest.split("/")
+                if unquote(item_id).startswith("note:") and action in ("act", "seen"):
+                    return handle_note_action(handler, inbox, unquote(item_id), action, body)
                 status, payload = inbox.act(unquote(item_id), action, body)
                 return handler.json(status, payload)
         raise InboxError(404, "not_found", "Not found.")
     except InboxError as error:
         return handler.json(error.status, {"error": {"code": error.code, "message": error.message,
                                                      "retryable": error.status >= 500}})
+
+
+def handle_note_action(handler: "FakeHandler", inbox: InboxFixtures, item_id: str, action: str,
+                       body: Dict[str, Any]) -> None:
+    """A voice note's ``act`` or ``seen`` (``note:<captureId>``): as the bridge's capture service answers it."""
+    with inbox.cond:
+        item = inbox.items.get(item_id)
+        if not item:
+            raise InboxError(404, "item_not_found", "That is not in the inbox.")
+        try:
+            status, payload, gone = note_inbox_action(item, action, body)
+        except Refusal as refusal:
+            return handler.json(refusal.status, {"error": {"code": refusal.code, "message": refusal.message,
+                                                         "retryable": refusal.retryable}})
+        if gone:
+            del inbox.items[item_id]
+        inbox.bump()
+    return handler.json(status, payload)
 
 
 # --------------------------------------------------------------------------- HTTP

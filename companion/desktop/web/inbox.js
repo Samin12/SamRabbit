@@ -57,6 +57,12 @@ function normalizeInput(raw) {
   };
 }
 
+/** A voice note's suggestion (`note:` items): `{action, label}`, or null (anything else, or no action). */
+function normalizeSuggestion(raw) {
+  if (!raw || typeof raw !== 'object' || !text(raw.action)) return null;
+  return { action: text(raw.action).toLowerCase(), label: oneLine(raw.label) };
+}
+
 /** One InboxItem; a missing or odd field takes its default, an unknown status reads as idle. Null without an id. */
 export function normalizeItem(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -75,6 +81,7 @@ export function normalizeItem(raw) {
     status,
     statusLabel: oneLine(raw.statusLabel),
     summary: text(raw.summary),
+    suggestion: normalizeSuggestion(raw.suggestion),
     updatedAt: toMs(raw.updatedAt),
     unread: raw.unread === true,
     pending: {
@@ -125,13 +132,40 @@ export function isChat(item) {
   return item.source === 'samrabbit';
 }
 
+/**
+ * A voice note the bridge kept as a note (`note:<captureId>`, samrabbit_capture inbox_items, CONTRACTS-WAVE8 §A2):
+ * needs-input while its suggestion is unseen, error when it failed; `can` is act (the suggestion, or `{action}`; a
+ * failed note: try again), seen and dismiss.
+ */
+export function isVoiceNote(item) {
+  return item.source === 'note';
+}
+
+const NOTE_ACTS = { task: 'Start as task', journal: 'Add to journal', event: 'Put on calendar' };
+
+/**
+ * A voice note's button (the dock's DockItem.noteAct): its suggestion as the verb, or "Try again" for a failed note;
+ * null when there is nothing to do from here (no suggestion, a "Block the time?" one: the bridge has no act for it).
+ * `action` goes as `{action}`; null lets the bridge choose (the retry).
+ */
+export function noteAction(item) {
+  if (!item || !isVoiceNote(item) || !supports(item, 'act')) return null;
+  if (item.status === 'error') return { label: 'Try again', action: null };
+  const raw = item.suggestion && item.suggestion.action;
+  const action = ['task', 't3_task', 'make_task'].includes(raw) ? 'task' : raw === 'journal' ? 'journal'
+    : ['event', 'calendar', 'calendar_event', 'remind', 'reminder'].includes(raw) ? 'event' : null;
+  return action ? { label: NOTE_ACTS[action], action } : null;
+}
+
 /** "Needs you": waiting on an approval or an answer, failed, or finished and not yet seen. */
 export function needsYou(item) {
   switch (item.status) {
     case 'needs-approval':
     case 'needs-input':
-    case 'error':
       return true;
+    case 'error':
+      // A voice note that failed needs Samin until he has seen it (or tried it again, or dismissed it).
+      return !isVoiceNote(item) || item.unread;
     case 'done':
       return item.unread;
     default:
@@ -169,7 +203,7 @@ export function agentLabel(item) {
 }
 
 export function sourceLabel(source) {
-  return { t3: 'T3 Code', claude: 'Claude Code', codex: 'Codex', samrabbit: 'SamRabbit' }[source] || 'Agent';
+  return { t3: 'T3 Code', claude: 'Claude Code', codex: 'Codex', samrabbit: 'SamRabbit', note: 'SamRabbit' }[source] || 'Agent';
 }
 
 /** "SamRabbit · Claude": the parts that exist. */
@@ -365,6 +399,10 @@ export function optimisticItem(item, kind, body = {}) {
       return { ...next, statusLabel: 'Stopping…' };
     case 'seen':
       return { ...next, unread: false };
+    case 'act':
+      // A voice note: out of "Needs you" at once; the bridge takes it out of the inbox once done.
+      return body.action ? { ...next, unread: false, status: 'idle', statusLabel: 'On it…' }
+        : { ...next, unread: false, status: 'working', statusLabel: 'Trying again…' };
     default:
       return null;
   }

@@ -89,6 +89,11 @@ enum DockAPI {
         await call("POST", itemPath(id, "seen"), body: [:])
     }
 
+    /// A voice note's `act` (W8): its suggestion, `action` when given; a note that failed is tried again.
+    static func act(_ id: String, action: String?) async -> Result<Reply, Failure> {
+        await call("POST", itemPath(id, "act"), body: action.map { ["action": $0] } ?? [:])
+    }
+
     static func open(_ id: String) async -> Result<Reply, Failure> {
         await call("POST", itemPath(id, "open"), body: [:])
     }

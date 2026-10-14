@@ -148,6 +148,8 @@ struct DockItem: Identifiable, Equatable, Decodable {
     var status: DockStatus
     var statusLabel: String
     var summary: String
+    /// A voice note's suggestion (`note:` items, DockNoteSuggestion); nil for every other item.
+    var noteSuggestion: DockNoteSuggestion? = nil
     var updatedAt: Date?
     var unread: Bool
     var pending: DockPending
@@ -202,6 +204,7 @@ struct DockItem: Identifiable, Equatable, Decodable {
         status = text(.status).flatMap(DockStatus.init(rawValue:)) ?? .idle
         statusLabel = DockText.oneLine(text(.statusLabel) ?? "")
         summary = text(.summary) ?? ""
+        noteSuggestion = DockNoteSuggestion.decode(from: decoder)
         updatedAt = DockDate.parse(c, .updatedAt)
         unread = (try? c.decodeIfPresent(Bool.self, forKey: .unread)) ?? false
         pending = (try? c.decodeIfPresent(DockPending.self, forKey: .pending)) ?? DockPending()
@@ -216,7 +219,9 @@ struct DockItem: Identifiable, Equatable, Decodable {
     /// "Needs you": waiting on an approval or an answer, failed, or finished and not yet seen.
     var needsYou: Bool {
         switch status {
-        case .needsApproval, .needsInput, .error: return true
+        case .needsApproval, .needsInput: return true
+        // A voice note that failed needs Samin until he has seen it (or tried it again, or dismissed it).
+        case .error: return !isVoiceNote || unread
         case .done: return unread
         case .working, .idle: return false
         }
@@ -562,7 +567,8 @@ struct DockAttention: Equatable {
 
     /// The items to announce now. The first answer after launch only sets the baseline.
     mutating func update(_ items: [DockItem], now: Date) -> [DockItem] {
-        let needing = items.filter(\.needsYou)
+        // Voice notes say how they went themselves (the dock's bar, the phone, the R1): not announced again here.
+        let needing = items.filter { $0.needsYou && !$0.isVoiceNote }
         let keys = Set(needing.map(Self.key))
         defer {
             active = keys
@@ -683,5 +689,54 @@ enum DockSmokeGuard {
         guard let bundleId, !bundleId.isEmpty else { return "no bundle id" }
         if bundleId == installedBundleId { return "\(installedBundleId) is the installed app's: build a copy with --bundle-id" }
         return nil
+    }
+}
+
+// MARK: voice notes in the inbox
+
+/// A voice note the bridge kept as a note (`note:<captureId>`, samrabbit_capture `inbox_items`, CONTRACTS-WAVE8 §A2):
+/// needs-input while its suggestion ("Start it as a T3 task?") is unseen, error when it failed, idle once seen. `can`
+/// is `act` (the suggestion, or `{action}`; a failed note: try again), `seen` and `dismiss`.
+struct DockNoteSuggestion: Equatable, Decodable {
+    /// task | journal | event | block (the bridge has no act for a block: it stays words)
+    var action: String
+    var label: String
+
+    private enum CodingKeys: String, CodingKey { case action, label }
+
+    init(action: String, label: String) {
+        self.action = action
+        self.label = label
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        action = ((try? c.decodeIfPresent(String.self, forKey: .action)) ?? nil)?.lowercased() ?? ""
+        label = DockText.oneLine(((try? c.decodeIfPresent(String.self, forKey: .label)) ?? nil) ?? "")
+    }
+
+    private enum ItemKeys: String, CodingKey { case suggestion }
+
+    /// An inbox item's `suggestion`, read on its own keys (any other item, or an odd value: nil).
+    static func decode(from decoder: Decoder) -> DockNoteSuggestion? {
+        guard let c = try? decoder.container(keyedBy: ItemKeys.self),
+              let value = (try? c.decodeIfPresent(DockNoteSuggestion.self, forKey: .suggestion)) ?? nil,
+              !value.action.isEmpty else { return nil }
+        return value
+    }
+}
+
+extension DockItem {
+    var isVoiceNote: Bool { source == "note" }
+
+    /// A voice note's button: its suggestion as the verb ("Start as task", "Add to journal", "Put on calendar"), or
+    /// "Try again" for a note that failed; nil when there is nothing to do from here (no suggestion, a "Block the
+    /// time?" one, a bridge without `act`). `action` goes as `{action}`; nil lets the bridge choose (the retry).
+    var noteAct: (title: String, action: String?)? {
+        guard isVoiceNote, supports("act") else { return nil }
+        if status == .error { return ("Try again", nil) }
+        guard let suggestion = noteSuggestion, let action = VoiceNoteText.actAction(suggestion.action),
+              let title = VoiceNoteText.offer(CaptureSuggestion(label: suggestion.label, action: action)) else { return nil }
+        return (title, action)
     }
 }

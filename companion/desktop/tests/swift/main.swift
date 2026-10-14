@@ -11,4 +11,5 @@ exit(Harness.run([
     ("Shortcuts", ShortcutTests.all),
     ("VoiceNotes", VoiceNoteTests.all),
     ("Briefing", BriefingTests.all),
+    ("NoteInbox", NoteInboxTests.all),
 ], filter: filter))
