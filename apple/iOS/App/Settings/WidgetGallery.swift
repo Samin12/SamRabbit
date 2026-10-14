@@ -111,10 +111,14 @@ struct TalkPreview: View {
     var body: some View {
         VStack(spacing: 16) {
             HStack(spacing: 14) {
+                // Outside a widget `AccessoryWidgetBackground` draws nothing: the Lock Screen's backing, drawn here.
                 TalkCircularFace()
                     .frame(width: 66, height: 66)
+                    .background(Circle().fill(.white.opacity(0.12)))
                 TalkRectangularFace()
                     .frame(width: 168, height: 66)
+                    .padding(.horizontal, 6)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.08)))
             }
             TalkActivityLockFace(state: state, startedAt: .now.addingTimeInterval(-83))
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(hex: 0x0B1324).opacity(0.88)))
