@@ -25,6 +25,7 @@ struct WakeMatcherTests {
         takesOtherPhrases()
         theGateOpensForSpeechOnly()
         theRingKeepsTheLastSeconds()
+        bargeInNeedsSustainedLoudSpeech()
         print(failures == 0 ? "OK \(checks) checks" : "FAILED \(failures) of \(checks) checks")
         exit(failures == 0 ? 0 : 1)
     }
@@ -133,5 +134,38 @@ struct WakeMatcherTests {
         expect(ring.samples(from: 20).isEmpty, "nothing after the end")
         ring.append((15..<40).map { Int16($0) })
         expect(ring.samples(from: 0) == (30..<40).map { Int16($0) }, "more than it holds at once")
+    }
+}
+
+/// A voice-like buzz at `dbfs` (about), 16 kHz.
+func tone(_ seconds: Double, dbfs: Double) -> [Int16] {
+    let amplitude = pow(10, dbfs / 20) * 1.414 * 32767
+    return (0..<Int(seconds * 16_000)).map { Int16(clamping: Int(amplitude * sin(2 * .pi * 170 * Double($0) / 16_000))) }
+}
+
+extension WakeMatcherTests {
+    static func bargeInNeedsSustainedLoudSpeech() {
+        var detector = BargeInDetector()
+        expect(!detector.feed(tone(2, dbfs: -50), floor: -60), "echo left over at -50 dBFS doesn't stop the reply")
+        detector.reset()
+        expect(!detector.feed(tone(0.2, dbfs: -25), floor: -60), "a short word or a cough doesn't")
+        expect(!detector.feed(tone(0.3, dbfs: -70), floor: -60), "…and quiet after it starts over")
+        expect(!detector.feed(tone(0.25, dbfs: -25), floor: -60), "another short one doesn't add up")
+        detector.reset()
+        var heard = false
+        var fed = 0.0
+        while !heard, fed < 2 {
+            heard = detector.feed(tone(0.05, dbfs: -25), floor: -60)
+            fed += 0.05
+        }
+        expect(heard && abs(fed - 0.35) < 0.051, "talking over it for 0.35 s does (after \(fed) s)")
+        // Dips between syllables don't reset it.
+        detector.reset()
+        var syllables: [Int16] = []
+        for _ in 0..<4 { syllables += tone(0.12, dbfs: -25) + tone(0.04, dbfs: -70) }
+        expect(detector.feed(syllables, floor: -60), "syllables with short dips count as one stretch")
+        // A loud room needs louder speech.
+        detector.reset()
+        expect(!detector.feed(tone(1, dbfs: -36), floor: -45), "not 15 dB above a loud room")
     }
 }

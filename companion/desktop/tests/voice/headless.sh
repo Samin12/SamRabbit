@@ -2,8 +2,8 @@
 # The Mac voice end to end, headless and silent: MacVoice (Sources/Voice*.swift, with SamRabbitKit) in fixture mode
 # against the fake sync server's canned /v1/desktop/assistant/* routes, one scenario at a time.
 #
-#   companion/desktop/tests/voice/headless.sh [turns] [wake] [bargein] [listen <seconds>] [listen-speech <seconds>]
-#                                                 (default: the first three)
+#   companion/desktop/tests/voice/headless.sh [turns] [wake] [bargein] [talkover] [listen <seconds>]
+#                                             [listen-speech <seconds>]          (default: the first four)
 #
 # * No microphone: the fixture microphone "says" WAV files rendered with `say -o` (to a file, never out loud) and
 #   converted to 16 kHz with afconvert. No speaker: the conversation's audio is rendered into memory.
@@ -29,7 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake bargein)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake bargein talkover)
 
 # 1. Build: SamRabbitKit (cached next to build.sh's default output) and the harness.
 KIT=${SAMRABBIT_KIT_CACHE:-$DESKTOP/build/SamRabbitKit}
@@ -109,6 +109,11 @@ elif scenario == "wake":
     first = audio[0]["seconds"] if audio else 0
     # "Hey Rabbit, what's on my calendar this afternoon?" is about 3 s; what followed the phrase about 2 s.
     good &= ok(1.2 <= first <= 2.8, "the first utterance is what followed the phrase (%.2f s)" % first)
+elif scenario == "talkover":
+    good &= ok([t["kind"] for t in turns] == ["audio", "audio"], "two utterances: %s" % [t["kind"] for t in turns])
+    good &= ok(any(c["cancelled"] for c in cancels) and turns[0].get("interrupted") is True,
+               "talking over the reply cancelled it on the bridge")
+    print("  utterances: %s s" % [t["seconds"] for t in audio])
 elif scenario == "bargein":
     good &= ok([t["kind"] for t in turns] == ["audio", "announce"], "an utterance, then the announcement: %s"
                % [t["kind"] for t in turns])
@@ -146,7 +151,7 @@ EOF
 run() {
   local scenario=$1 fixture wake=0
   case "$scenario" in
-    turns|bargein) fixture="$WORK/ask.wav,$WORK/bye.wav" ;;
+    turns|bargein|talkover) fixture="$WORK/ask.wav,$WORK/bye.wav" ;;
     wake) fixture="$WORK/hey.wav,$WORK/bye.wav"; wake=1 ;;
     listen) fixture="$WORK/bye.wav" ;;
     listen-speech) fixture="$WORK/talk.wav"; wake=1 ;;
@@ -163,6 +168,7 @@ run() {
   : > "$WORK/speech-samples.txt"
   SAMRABBIT_APP_URL="http://127.0.0.1:$PORT/app/" SAMRABBIT_DESKTOP_TOKEN_FILE="$WORK/token" \
     SAMRABBIT_VOICE_FIXTURE="$fixture" SAMRABBIT_VOICE_FIXTURE_WAKE=$wake SAMRABBIT_VOICE_IDLE=45 \
+    SAMRABBIT_VOICE_BARGE_IN=$([ "$scenario" = talkover ] && echo 1 || echo 0) \
     "$WORK/voice-harness" "$harness" "${@:2}" -VoiceWakeEnabled "$enabled" > "$WORK/out.txt" 2> "$WORK/harness.log" &
   pid=$!
   sample_speech "$pid" &
@@ -175,18 +181,21 @@ run() {
     echo "  localspeechrecognition CPU meanwhile: $(speech_cpu)"
   elif [ "$status" = 0 ]; then
     check_log "$scenario" || status=1
-    if [ "$scenario" = wake ] && [ -x "$WORK/transcribe" ]; then
-      # What went up first is the question that followed "Hey Rabbit", without the phrase.
+    if [ -x "$WORK/transcribe" ] && { [ "$scenario" = wake ] || [ "$scenario" = talkover ]; }; then
+      # wake: what went up first is the question that followed "Hey Rabbit", without the phrase.
+      # talkover: what was said over the reply went up whole, from its first word.
+      local turn=1 expect="what's" refuse="rabbit"
+      [ "$scenario" = talkover ] && { turn=2; expect="thanks"; refuse="calendar"; }
       local words
-      words=$("$WORK/transcribe" --file "$WORK/sent/turn-1.wav" | /usr/bin/python3 -I -c \
+      words=$("$WORK/transcribe" --file "$WORK/sent/turn-$turn.wav" | /usr/bin/python3 -I -c \
         'import json, sys; print(json.load(sys.stdin).get("text", ""))')
-      echo "  the first utterance transcribes as: “${words}”"
+      echo "  utterance $turn transcribes as: “${words}”"
       /usr/bin/python3 -I -c '
 import re, sys
 words = re.sub(r"[^a-z\x27 ]", "", sys.argv[1].lower())
-good = "calendar" in words and "rabbit" not in words
-print(("  ok: " if good else "  FAILED: ") + "the question, not the wake phrase")
-sys.exit(0 if good else 1)' "$words" || status=1
+good = words.split()[:1] == [sys.argv[2]] and sys.argv[3] not in words
+print(("  ok: " if good else "  FAILED: ") + "it starts with “%s” and has no “%s”" % (sys.argv[2], sys.argv[3]))
+sys.exit(0 if good else 1)' "$words" "$expect" "$refuse" || status=1
     fi
   fi
   stop_server

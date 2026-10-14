@@ -11,7 +11,9 @@ import SamRabbitKit
 ///   Samin speaking), sends each utterance as a 16 kHz WAV, plays the reply as it streams in (`say.delta` is the live
 ///   caption), and listens again. A reply without audio is said with the Mac's own voice.
 /// * `stopSpeaking()` barges in (the reply stops on the Mac and here, and it listens), `end()` ends it; it also ends
-///   when the assistant says so ("bye", "that's all") or after 90 s without anything said.
+///   when the assistant says so ("bye", "that's all") or after 90 s without anything said. Talking over a reply
+///   barges in too when `VoiceBargeIn` is on (off by default: `defaults write com.samrabbit.desktop VoiceBargeIn
+///   -bool true`), and only while echo cancellation runs (`BargeInDetector`).
 /// * T3 announcements (a task finished or needs Samin) are polled about every 20 s and said between turns.
 /// * The "Hey Rabbit" listener (`VoiceWake`, on device) runs whenever no conversation does, unless it is turned off
 ///   or the microphone is muted.
@@ -59,6 +61,7 @@ final class MacVoice: ObservableObject {
 
     static let wakeEnabledKey = "VoiceWakeEnabled"
     static let wakePhrasesKey = "WakePhrases"
+    static let bargeInKey = "VoiceBargeIn"
 
     private var machine: ConversationMachine
     private let audio: VoiceAudio
@@ -80,12 +83,18 @@ final class MacVoice: ObservableObject {
     private var wakeTask: Task<Void, Never>?
     private var cursor: String?
     private var storedLevel: Double = 0
+    /// Talking over a reply (opt-in): the detector, and the last second of the microphone meanwhile.
+    private var barge = BargeInDetector()
+    private var overReply = SampleRing(capacity: 16_000)
+    /// `SAMRABBIT_VOICE_BARGE_IN=1`: on in fixture mode too (no echo cancellation there), for the tests.
+    private let forceBargeIn: Bool
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let idle = Double(environment["SAMRABBIT_VOICE_IDLE"] ?? "").map { max(5, $0) } ?? 90
         machine = ConversationMachine(idleTimeout: idle, device: .mac)
         let fixture = FixtureMicrophone.shared
         noMicrophone = fixture == nil && environment["SAMRABBIT_NO_MIC"] == "1"
+        forceBargeIn = environment["SAMRABBIT_VOICE_BARGE_IN"] == "1"
         audio = VoiceAudio(input: fixture.map { FixtureInput($0) } ?? MacMicrophone())
         let defaults = UserDefaults.standard
         wakeEnabled = defaults.object(forKey: Self.wakeEnabledKey) == nil ? true : defaults.bool(forKey: Self.wakeEnabledKey)
@@ -210,6 +219,8 @@ final class MacVoice: ObservableObject {
         case .closeMic:
             micOpen = false
             detector.reset()
+            barge.reset()
+            overReply = SampleRing(capacity: 16_000)
         case .flushMic:
             for event in detector.flush() { detected(event) }
         case .send(let request):
@@ -289,8 +300,29 @@ final class MacVoice: ObservableObject {
     // MARK: - Listening
 
     private func heardSamples(_ samples: [Int16]) {
-        guard micOpen, !micMuted else { return }
-        feed(samples)
+        guard !micMuted else { return }
+        if micOpen {
+            feed(samples)
+            return
+        }
+        guard machine.phase == .speaking, bargeInByVoice else { return }
+        overReply.append(samples)
+        if barge.feed(samples, floor: detector.floor) { bargedIn() }
+    }
+
+    /// Talking over a reply stops it (opt-in, and only with echo cancellation, or forced for the tests).
+    private var bargeInByVoice: Bool {
+        forceBargeIn || (audio.voiceProcessing && UserDefaults.standard.bool(forKey: Self.bargeInKey))
+    }
+
+    private func bargedIn() {
+        Log.write("voice: barge-in by voice")
+        // What was said over the reply (the last 0.8 s) is the start of the next utterance.
+        let said = overReply.samples(from: overReply.end - 12_800)
+        barge.reset()
+        overReply = SampleRing(capacity: 16_000)
+        carry = said
+        handle(.tap)
     }
 
     private func feed(_ samples: [Int16]) {

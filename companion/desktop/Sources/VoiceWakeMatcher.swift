@@ -1,8 +1,9 @@
 import Foundation
 
-// The pure parts of the "Hey Rabbit" listener (`VoiceWake`): which words count as the phrase, when the room is loud
-// enough to be worth transcribing, and the last seconds of sound kept for what followed the phrase. Foundation only,
-// so `companion/desktop/tests/voice/run.sh` tests them without a microphone.
+// The pure parts of the Mac voice: for the "Hey Rabbit" listener (`VoiceWake`) which words count as the phrase, when
+// the room is loud enough to be worth transcribing and the last seconds of sound kept for what followed the phrase;
+// for the conversation when talking over a reply counts as barging in. Foundation only, so
+// `companion/desktop/tests/voice/run.sh` tests them without a microphone.
 
 /// Finds a wake phrase ("hey rabbit", "hey sam rabbit", "okay rabbit") in the words of an on-device transcript.
 ///
@@ -206,5 +207,59 @@ struct SampleRing: Equatable {
             out.append(storage[(head - back + capacity * 2) % capacity])
         }
         return out
+    }
+}
+
+/// Hears Samin talk over a reply (opt-in, `VoiceBargeIn`): with voice processing the reply's own voice is taken out of
+/// the microphone, so what is left is the room and him. Stricter than the speech detector: sustained speech
+/// (`sustain`, short dips between syllables allowed) well above the room and loud in itself, so a cough, a laugh,
+/// someone across the room or what is left of the echo doesn't stop the reply.
+struct BargeInDetector: Equatable {
+    var margin = 15.0
+    var quietest = -40.0
+    var sustain: TimeInterval = 0.35
+    /// Dips this long inside speech don't reset it.
+    var gap: TimeInterval = 0.08
+    var sampleRate = 16_000
+
+    private var loud = 0
+    private var quiet = 0
+    private var pending: [Int16] = []
+
+    /// Starts over (a reply begins).
+    mutating func reset() {
+        loud = 0
+        quiet = 0
+        pending.removeAll(keepingCapacity: true)
+    }
+
+    /// Feeds microphone samples while a reply plays; true once speech over it went on long enough. `floor` is the
+    /// room's level while it listened (dBFS).
+    mutating func feed(_ samples: [Int16], floor: Double?) -> Bool {
+        pending.append(contentsOf: samples)
+        let window = sampleRate / 50
+        let threshold = max((floor ?? -60) + margin, quietest)
+        var start = 0
+        var heard = false
+        while pending.count - start >= window {
+            var sum = 0.0
+            for sample in pending[start..<(start + window)] {
+                let value = Double(sample) / 32768
+                sum += value * value
+            }
+            let rms = (sum / Double(window)).squareRoot()
+            let power = rms > 0 ? 20 * log10(rms) : -160
+            if power >= threshold {
+                loud += window
+                quiet = 0
+            } else {
+                quiet += window
+                if Double(quiet) > gap * Double(sampleRate) { loud = 0 }
+            }
+            if Double(loud) >= sustain * Double(sampleRate) { heard = true }
+            start += window
+        }
+        pending.removeFirst(start)
+        return heard
     }
 }

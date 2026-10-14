@@ -121,6 +121,10 @@ with the dock's mic button, **⌃⌥Space** from any app (Carbon `RegisterEventH
   barge-in (`stopSpeaking()`), `/end` on `end()`, and `/announcements` about every 20 s (T3 tasks that finished or
   need you, said between turns as `{"announce": id}` turns). Loopback, the desktop token. It listens again after
   each reply and ends when the assistant says so ("bye", "that's all"), on ⌃⌥Space or after 90 s without speech.
+- **Talking over a reply** stops it too when turned on (`defaults write com.samrabbit.desktop VoiceBargeIn -bool
+  true`; off by default until it has been tried with real speakers): with echo cancellation running, sustained speech
+  well above the room (`BargeInDetector`: 0.35 s, 15 dB over the room and above -40 dBFS) cancels the reply, and what
+  was said over it is the start of the next question.
 - **Audio** (`VoiceAudio.swift`): one `AVAudioEngine` per conversation with voice processing on the microphone (echo
   cancellation: the assistant's voice through the speakers never counts as you speaking; other apps are ducked as
   little as macOS allows). Muting the microphone uses voice processing's own mute and pauses the quiet end.
@@ -138,7 +142,8 @@ with the dock's mic button, **⌃⌥Space** from any app (Carbon `RegisterEventH
 Development: `SAMRABBIT_VOICE_FIXTURE=/tmp/a.wav,/tmp/b.wav` makes the microphone "say" those files (one each time it
 opens; `SAMRABBIT_VOICE_FIXTURE_WAKE=1` plays the first to the wake listener) and renders all playback silently into
 memory: nothing is recorded and nothing plays out loud. `SAMRABBIT_NO_MIC=1` keeps the microphone off altogether.
-`SAMRABBIT_VOICE_IDLE=<s>` changes the quiet end. The fake sync server answers `/v1/desktop/assistant/*` with canned
+`SAMRABBIT_VOICE_IDLE=<s>` changes the quiet end; `SAMRABBIT_VOICE_BARGE_IN=1` turns on talking over a reply even
+without echo cancellation (fixture mode). The fake sync server answers `/v1/desktop/assistant/*` with canned
 streamed turns (`dev/fake_assistant.py`: `POST /dev/assistant {mode}`, `POST /dev/announce {say}`).
 
 ## Developing the UI
@@ -186,4 +191,5 @@ companion/desktop/tests/voice/headless.sh listen 60         # the wake listener'
 its own fake server (a free port, a temp token): `turns` (⌃⌥Space, two turns, the assistant ends it), `wake` ("Hey
 Rabbit, what's on my calendar this afternoon?" in one breath: the first utterance sent is transcribed again by the
 bridge's on-device transcriber and must be the question without the phrase), `bargein` (barge-in, an announcement,
-`end()`). Fixture voices come from `say -o` (written to a file, never played).
+`end()`), `talkover` (the next question said over the reply, voice barge-in forced on: it must arrive whole).
+Fixture voices come from `say -o` (written to a file, never played).

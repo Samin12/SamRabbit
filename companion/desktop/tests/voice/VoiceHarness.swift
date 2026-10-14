@@ -8,6 +8,7 @@ import Foundation
 ///     voice-harness turns     ⌃⌥Space, two turns, the assistant ends the conversation
 ///     voice-harness wake      "Hey Rabbit, what's on my calendar this afternoon?" in one breath, then a second turn
 ///     voice-harness bargein   a turn, barge-in while it speaks, an announcement, then end()
+///     voice-harness talkover  a turn, then the next question said over the reply (SAMRABBIT_VOICE_BARGE_IN=1)
 ///     voice-harness listen N  only the wake listener, for N seconds (for its CPU use)
 ///
 /// The wake phrase setting comes from the arguments (`-VoiceWakeEnabled YES|NO`, the argument domain), so nothing is
@@ -67,6 +68,17 @@ struct VoiceHarness {
             voice.end()
             ok = check(voice.state == .idle, "end() ends it at once") && ok
             try? await Task.sleep(for: .seconds(1)) // its POST /end goes out meanwhile
+        case "talkover":
+            voice.activate(shortcut: false)
+            voice.start(reason: "button")
+            ok = await waitUntil(within: 30) { voice.state == .speaking }
+            ok = ok && check(voice.state == .speaking, "speaking")
+            // Samin talks over the reply: the fixture says its next file now.
+            FixtureMicrophone.shared?.opened()
+            ok = await waitUntil(within: 5) { voice.state == .listening } && ok
+            ok = ok && check(voice.state == .listening, "talking over the reply stopped it")
+            ok = await waitForEnd(voice, within: 30) && ok
+            ok = ok && check(heard == ["What's on my calendar this afternoon?", "Thanks, that's all."], "the second turn heard")
         case "listen":
             let seconds = Double(arguments.dropFirst().first ?? "60") ?? 60
             voice.activate(shortcut: false)
