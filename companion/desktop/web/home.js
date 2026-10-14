@@ -8,10 +8,11 @@ import { h } from './dom.js';
 import { icon } from './icons.js';
 import { needsYou, recommendedOption, supports } from './inbox.js';
 import { approvalCard, itemRow, shortAgo } from './items.js';
+import { createOrb } from './orb.js';
+// The morning brief and the voice note (Wave 8).
 import { createMorning } from './morning.js';
 import { nativeState, onNative, postNative } from './native.js';
 import { normalizeNote, quickAction as noteAction } from './note.js';
-import { createOrb } from './orb.js';
 import { deviceRows, greeting, headline, summaryDevices } from './status.js';
 import { openExternal, redrawWhenFree, reportDragExclusions, toast } from './ui.js';
 

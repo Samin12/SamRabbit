@@ -231,8 +231,9 @@ Say something and it is dealt with, no back and forth (CONTRACTS-WAVE8 §D1; `So
   dock's menu and the Dock icon's menu, and Home's **Voice note**.
 - **The bar**: the pill becomes "Voice note 0:07 · Recording… ⌃⌥N to send" with the level, × (throw it away, or Esc once
   the bar has the keys) and ↑ (send now, or ↩); then "Sending…", then "Sent ✓ — Added to your journal" (or "Started a T3
-  task", "On your calendar", "Saved as a note" with the bridge's suggestion as a button, "Start as task"). Like the voice
-  bar it shows through every hide. It never speaks, and nothing plays.
+  task", "On your calendar", "Saved as a note" with the bridge's suggestion as a button, "Start as task", "Add to
+  journal" or "Put on calendar": only what the bridge's act takes; a "Block the time?" stays words). Like the voice bar
+  it shows through every hide. It never speaks, and nothing plays.
 - **The bridge does the work**: `POST /v1/desktop/capture` (a 16 kHz WAV, `X-SamRabbit-Capture` a UUID made when the
   note started, so a retry is never a second note; `X-SamRabbit-Captured-At` with its offset; `X-SamRabbit-Source: mac`)
   answers 202 at once; `GET /v1/desktop/capture/<id>?wait=8` says what it heard and did; a kept note's suggestion is
@@ -255,16 +256,21 @@ The bridge builds one brief a day from Gmail, the calendar and the agents (CONTR
 noon: on Home (`web/morning.js`, the rules in `web/briefing.js`) and at the top of the Agent Dock's list
 (`Sources/DockMorning.swift`, the rules in `DockBriefing.swift`, the same as the page's).
 
-- The headline ("3 things need you · 4 meetings, first at 9:30 · 1 agent waiting"), **Do first** (each item's verbs are
-  its buttons: **Draft reply**, **Make task**, **Block time**, **Remind me** (in an hour, 2 PM, tonight, tomorrow 9 AM),
-  **Open**, plus Done and Dismiss), **Today** (the next events, a clash flagged), **Agents** (they open in Tasks or in the
-  dock's list) and **FYI**; Home also says what was read ("Read 105 emails · skipped 182 promotions").
+- The headline ("3 things need you · 4 meetings, first at 09:30 · 1 agent waiting"), **Do first** (each item's verbs
+  are its buttons: **Draft reply**, **Make task**, **Block time**, **Remind me** (in an hour, 2 PM, tonight, tomorrow
+  9 AM: the bridge puts a 15-minute reminder on the calendar; the item then says "Reminder set for 4:40 PM"), **Open**,
+  plus Done and Dismiss), **Today** (the next events, a clash flagged, **Join** on a meeting with a
+  link), **Agents** (they open in Tasks or in the dock's list) and **FYI**; Home also says what was read ("Read 105
+  emails · 12 worth a look", the brief's `counts`).
 - `GET /v1/desktop/briefing` (the window every 5 minutes while it is on screen and when the summary's `briefing.revision`
   moves; the dock from 05:00 to noon every 5 minutes and when its list opens), `POST …/briefing/items/<id>/act {action,
-  at?}`, `POST …/briefing/refresh` (Refresh / ↻). A result shows at once and rolls back with a note when the bridge says no.
+  at?}` (only the verbs the item `can`; the answer `{ok, item, result, revision}`, the item's state in the bridge's
+  words: drafted, tasked, blocked, reminded, done, dismissed), `POST …/briefing/refresh` (Refresh / ↻; at most once in
+  5 minutes, else 429 `refresh_too_soon`). A result shows at once and rolls back with a note when the bridge says no.
 - **Draft reply** makes a Gmail **draft** on the bridge and opens it in the browser, in the item's own Google account
-  (`authuser`, so a personal thread doesn't open in the business mailbox). Nothing is ever sent from here: there is no
-  send.
+  (the bridge's links carry `authuser=<that mailbox>`, so a personal thread doesn't open in the business one; a link
+  without it gets the item's address). The draft stays on the item (`result.url`), so "Open draft" works after a
+  reload. Nothing is ever sent from here: there is no send.
 - Only today's brief, only before noon. `?morning=1` on the page's URL (dev shots) shows it at any hour.
 
 ## Agent Dock
@@ -375,11 +381,8 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
 - `--render-dock-snapshots <dir> [--dock-fixture dev/samples/inbox.json] [--dock-backdrop <image>]` draws the pill, its
   states, the list, an open approval, a question, the compose menus, the voice bar, a terminal session, a white page,
   the offline state, the orb, the "–", the dock on a screen at the top left (list below) and minimized in the bottom
-  right corner (list above), the Settings sheet (at rest, recording, after a combination that went elsewhere), the voice
-  note's bar (recording tapped and held, sending, sent, kept with a suggestion, saved on this Mac, too short) and the
-  list's Morning section at 8:20 AM (`dev/samples/briefing.json`; then drafted, tasked, Remind me open and a failed
-  try) to PNGs from the fixtures and quits (no window, no screen access; the glass is simulated by blurring the
-  backdrop). Run it with `SAMRABBIT_NO_MIC=1`.
+  right corner (list above), and the Settings sheet (at rest, recording, after a combination that went elsewhere) to PNGs from the fixtures and quits (no window, no screen access;
+  the glass is simulated by blurring the backdrop). Run it with `SAMRABBIT_NO_MIC=1`.
 - `SAMRABBIT_DOCK_SMOKE=<dir>` walks a running dev copy through open → expand → approve → new prompt → voice → hide →
   back without any synthetic click, logs what AppKit says about the windows at each step and draws each live state.
   It approves and creates a task, so it refuses to run unless the app points at the fake server: not the default
@@ -391,6 +394,10 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
   spot, the orb and the hide as a real move would; at the end the copy's own are put back. Give the dev copy other
   shortcuts first (`defaults write <dev bundle id> AgentDockShortcuts -dict talk "⌃⌥⇧F17" compose "⌃⌥⇧F18" showHide
   "⌃⌥⇧F19" minimize "⌃⌥⇧F20" voiceNote "⌃⌥⇧F16"`) so it never takes the installed app's or anyone's ⌃⌥D / ⌃⌥M / ⌃⌥N.
+- The same `--render-dock-snapshots` also draws Wave 8's `dock-19-note.png` (the voice note's bar: recording tapped and
+  held, sending, sent with what the bridge did, kept with a suggestion, saved on this Mac, too short, not finished),
+  `dock-20-morning.png` (the list's Morning section at 8:20 AM from `dev/samples/briefing.json`) and
+  `dock-21-morning-acted.png` (drafted, tasked, Remind me open, a failed try).
 - `SAMRABBIT_DOCK_FIXTURE_WAKE=1` makes the voice placeholder report the wake listener as armed (the mic's dot).
 
 ## Developing the UI
@@ -428,14 +435,17 @@ The fake also answers the window's desktop routes (`dev/fake_desktop.py`): `GET 
 `GET /dev/desktop` counts the window's reads (`reads`) and `GET /dev/inbox/fake` its inbox polls (`polls`).
 
 Voice notes and the morning brief (`dev/fake_capture.py`, `dev/fake_briefing.py`; nothing is transcribed, journaled,
-filed, drafted or sent): `POST /v1/desktop/capture` (the id idempotent, 409 for other bytes), `GET
-/v1/desktop/capture/<id>?wait=` (received, then in turn a journal line, a T3 task, a note with a suggestion, a calendar
-entry), `GET /v1/desktop/captures`, `POST …/captures/<id>/act`; `POST /dev/capture {mode: ok|outdated|busy|refuse|
-no_speech|fail, delay, script}`, `GET /dev/capture` (what arrived: ids, sources, sizes and lengths, never the audio;
-`$SAMRABBIT_FAKE_CAPTURE_SAVE` keeps the WAVs for the tests). `GET /v1/desktop/briefing` (`dev/samples/briefing.json`
-moved to today), `POST …/briefing/refresh`, `POST …/briefing/items/<id>/act` (a draft answers a Gmail drafts link in
-the item's account); `POST /dev/briefing {status: ready|building|failed|off, fail: <action>}`, `GET /dev/briefing`. The
-summary carries `briefing` and `captures`.
+filed, drafted or sent), in the bridge's own shapes (`companion/mac-bridge/samrabbit_capture.py`,
+`samrabbit_briefing.py`): `POST /v1/desktop/capture` (the id idempotent, 409 for other bytes), `GET
+/v1/desktop/capture/<id>?wait=` (received, then done with in turn a journal line, a T3 task, a note with a suggestion,
+a calendar event; `nothing` heard and `failed` too), `GET /v1/desktop/captures`, `POST …/captures/<id>/act {action:
+task|journal|event|note|undo|dismiss|seen|retry}`; `POST /dev/capture {mode: ok|outdated|busy|refuse|no_speech|fail,
+delay, script}`, `GET /dev/capture` (what arrived: ids, sources, sizes and lengths, never the audio;
+`$SAMRABBIT_FAKE_CAPTURE_SAVE` keeps the WAVs for the tests). `GET /v1/desktop/briefing` (`dev/samples/briefing.json`,
+the bridge's `view()`, moved to today), `POST …/briefing/refresh` (429 within 5 minutes), `POST
+…/briefing/items/<id>/act` (only what the item `can`; a draft answers a Gmail drafts link in the item's account);
+`POST /dev/briefing {status: ready|building|waiting|failed|off, fail: <action>}`, `GET /dev/briefing`. The summary
+carries `briefing` and `captures` as the bridge's.
 
 Event types the UI renders (`web/store.js`): `message.user`, `message.assistant.delta|done|interrupted`,
 `card.shown|updated|dismissed`, `host.t3_update`, `host.note`, `host.completion`, `ui.event`, `image`,
