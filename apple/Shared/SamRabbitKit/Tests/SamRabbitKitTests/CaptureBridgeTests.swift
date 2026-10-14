@@ -328,6 +328,17 @@ struct CaptureBridgeTests {
         // Make task with the words the phone showed (`taskPrompt`), Block, Dismiss, Open on an agent (its inbox item).
         let acme = try #require(brief.items(in: .doFirst).first { $0.id == "bi_acme" })
         #expect(acme.taskPrompt == "Look into Acme's checkout errors. Two customers saw 500s since last night")
+        // Without the words he saw, it never goes: the Mac would start the agent with its own, from an email.
+        let taps = try await fakeGet(bridge, "briefing")["acts"].array?.count ?? 0
+        for options: [String: JSONValue] in [[:], ["text": .string("  \n ")], ["text": .number(1)]] {
+            do {
+                _ = try await client.briefingAct("bi_acme", action: "make_task", options: options)
+                Issue.record("refused before it went")
+            } catch let error as BridgeError {
+                #expect(error.code == "task_text_required")
+            }
+        }
+        #expect(try await fakeGet(bridge, "briefing")["acts"].array?.count ?? 0 == taps, "nothing reached the Mac")
         let tasked = try await client.briefingAct("bi_acme", action: "make_task",
                                                   options: ["text": .string(acme.taskPrompt + " Logs first.")])
         #expect(tasked.threadId != nil)
@@ -341,7 +352,7 @@ struct CaptureBridgeTests {
         #expect(try await client.briefingAct("bi_agent_deploy", action: "open").itemId == "t3:t_deploy24")
         // A verb the item doesn't offer is refused.
         do {
-            _ = try await client.briefingAct("bi_fyi_renewal", action: "make_task")
+            _ = try await client.briefingAct("bi_fyi_renewal", action: "make_task", options: ["text": .string("Renew it")])
             Issue.record("refused")
         } catch let error as BridgeError {
             #expect(error.code == "unsupported_action")
@@ -353,10 +364,10 @@ struct CaptureBridgeTests {
         #expect(danaAfter.draftUrl == drafted.url)
         #expect(danaAfter.resultLine == "Saved as a draft in Gmail. Open it to send.")
         #expect(after.toDo == 1, "only the deploy is left")
-        let taps = try await fakeGet(bridge, "briefing")["acts"].array ?? []
-        #expect(taps.compactMap { $0["action"].string } == ["remind", "draft_reply", "draft_reply", "make_task", "dismiss",
+        let tapped = try await fakeGet(bridge, "briefing")["acts"].array ?? []
+        #expect(tapped.compactMap { $0["action"].string } == ["remind", "draft_reply", "draft_reply", "make_task", "dismiss",
                                                             "block_time", "open"])
-        #expect(taps.first?["in"].string == "tomorrow", "when, as he chose it")
+        #expect(tapped.first?["in"].string == "tomorrow", "when, as he chose it")
 
         // Refresh: a new revision, picked up by the long-poll; another right away is too soon (one every 5 min).
         try await client.refreshBriefing()

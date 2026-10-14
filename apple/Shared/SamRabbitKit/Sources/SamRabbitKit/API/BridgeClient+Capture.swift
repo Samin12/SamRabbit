@@ -182,9 +182,17 @@ extension BridgeClient {
 
     /// `POST /v1/mobile/briefing/items/<id>/act {action, …}`: one of the item's buttons, by his tap. A draft reply
     /// becomes a Gmail draft (never sent) and comes back with its link. `options`: the verb's own words (Remind me's
-    /// `in`: `1h`, `2pm`, `tonight`, `tomorrow`; Block's `minutes`).
+    /// `in`: `1h`, `2pm`, `tonight`, `tomorrow`; Block's `minutes`; Make task's `text`).
+    ///
+    /// Make task goes only with its `text`, the words he was shown (`BriefingItem.taskPrompt`): without it the Mac
+    /// would start the agent with words its model wrote from an email that nobody read. Refused here, before any
+    /// request, with `task_text_required`.
     public func briefingAct(_ itemId: String, action: String, options: [String: JSONValue] = [:]) async throws
         -> BriefingActResult {
+        if BriefingAction.Kind(raw: action) == .makeTask, options["text"]?.text == nil {
+            throw BridgeError.server(status: 400, code: "task_text_required",
+                                     message: "Read the words the task starts with first.", retryable: false)
+        }
         var fields = options
         fields["action"] = .string(action)
         let body = try await data(.post("/v1/\(api.rawValue)/briefing/items/\(Self.segment(itemId))/act",

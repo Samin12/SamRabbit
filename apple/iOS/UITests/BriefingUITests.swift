@@ -43,6 +43,11 @@ final class BriefingUITests: XCTestCase {
         let headline = app.staticTexts["brief-headline"]
         XCTAssertTrue(headline.waitForExistence(timeout: 15), "the brief at the top of Home")
         XCTAssertTrue(headline.label.contains("things need you"), headline.label)
+        // Its times as every other time on the brief ("4:00 PM"), though the Mac writes "first at 16:00".
+        if headline.label.contains("first at") {
+            XCTAssertNotNil(headline.label.range(of: #"first at \d{1,2}:\d{2}\s?(AM|PM)"#, options: .regularExpression),
+                            headline.label)
+        }
         XCTAssertTrue(app.staticTexts["Reply to Dana about the SOW"].exists)
         snap("phone-brief-0-home")
 
@@ -116,6 +121,9 @@ final class BriefingUITests: XCTestCase {
         scrollTo(today)
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Overlaps Dentist'")).firstMatch.exists,
                       "the conflict, flagged")
+        // An event without a meeting link isn't "Join …" (Lunch); one with a link is (Standup, beside its Join).
+        let lunch = app.staticTexts.matching(NSPredicate(format: "label ENDSWITH 'Lunch with Maya'")).firstMatch
+        if lunch.exists { XCTAssertEqual(lunch.label, "Lunch with Maya") }
         snap("phone-brief-3-today")
 
         // FYI, folded: open it and dismiss one; what it read.

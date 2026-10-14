@@ -84,8 +84,12 @@ final class WatchVoiceNoteTests: XCTestCase {
     func test4_MakeTaskShowsItsWordsFirst() throws {
         let app = try launch(page: "brief")
         XCTAssertTrue(app.staticTexts["brief-headline"].waitForExistence(timeout: 20), "the Brief page")
+        // Down the page with the crown (a swipe up goes to the next page).
         let verb = app.buttons["brief-verb-bi_acme"]
-        for _ in 0..<6 where !(verb.exists && verb.isHittable) { app.swipeUp() }
+        for _ in 0..<10 where !(verb.exists && verb.isHittable) {
+            XCUIDevice.shared.rotateDigitalCrown(delta: 0.2)
+            Thread.sleep(forTimeInterval: 0.4)
+        }
         XCTAssertTrue(verb.waitForExistence(timeout: 5))
         XCTAssertEqual(verb.label, "Make task")
         verb.tap()
@@ -96,7 +100,10 @@ final class WatchVoiceNoteTests: XCTestCase {
         XCTAssertTrue(acts().isEmpty, "nothing started yet")
         snap("watch-brief-3-task-words")
         let start = app.buttons["brief-task-start"]
-        for _ in 0..<4 where !(start.exists && start.isHittable) { app.swipeUp() }
+        for _ in 0..<8 where !(start.exists && start.isHittable) {
+            XCUIDevice.shared.rotateDigitalCrown(delta: 0.2)
+            Thread.sleep(forTimeInterval: 0.4)
+        }
         start.tap()
         XCTAssertTrue(waitUntil(timeout: 10) {
             acts().last == ["itemId": "bi_acme", "action": "make_task",

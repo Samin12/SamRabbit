@@ -348,6 +348,14 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
     /// Where Open goes: its own link, else the Open verb's.
     public var openURL: URL? { url ?? actions.first { $0.kind == .open }?.url }
 
+    /// The title as a row shows it: an event without a meeting link can't be joined, so the Mac's "Join Lunch with
+    /// Maya" is "Lunch with Maya" (one with a link keeps it, beside its Join button).
+    public var shownTitle: String {
+        guard section == .today || kind == "event", openURL == nil, title.hasPrefix("Join ") else { return title }
+        let rest = title.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        return rest.isEmpty ? title : rest
+    }
+
     /// Whether it takes `action` (`can`; an item that doesn't list them takes Done, Dismiss and its own verbs).
     public func allows(_ action: BriefingAction.Kind) -> Bool {
         guard !can.isEmpty else { return true }
@@ -440,7 +448,7 @@ public struct Briefing: Codable, Sendable, Equatable {
     public var date: String?
     public var revision: Int64
     public var status: Status
-    /// At most 90 characters: "3 things need you · 4 meetings, first at 10:00".
+    /// At most 90 characters: "3 things need you · 4 meetings, first at 10:00 AM" (its times in the device's style).
     public var headline: String
     /// At most 400 characters, for reading it out (only when asked).
     public var spoken: String?
@@ -480,7 +488,8 @@ public struct Briefing: Codable, Sendable, Equatable {
         date = c.text("date", "day")
         revision = c.int64("revision")
         status = Status(raw: outerStatus)
-        headline = Formatting.clip(c.text("headline", "title") ?? "", 120)
+        // Its times as every other time shows ("first at 16:00" from the Mac: "first at 4:00 PM").
+        headline = Formatting.clockTimes(in: Formatting.clip(c.text("headline", "title") ?? "", 120))
         spoken = c.text("spoken", "say")
         updatedAt = c.date("updatedAt", "builtAt", "generatedAt")
         footer = c.text("footer", "skipped") ?? Self.footer(counts: c.json("counts"), accounts: c.json("accounts"))
@@ -511,10 +520,18 @@ public struct Briefing: Codable, Sendable, Equatable {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// By part, then as the brief listed them; each part at its cap.
+    /// By part, then as the brief listed them (Today by when each starts; one without a time after the others, as
+    /// listed); each part at its cap.
     static func ordered(_ items: [BriefingItem]) -> [BriefingItem] {
         BriefingSection.allCases.flatMap { section in
-            items.filter { $0.section == section }.prefix(section.limit)
+            var part = items.filter { $0.section == section }
+            if section == .today {
+                part = part.enumerated().sorted { a, b in
+                    let (x, y) = (a.element.startsAt ?? .distantFuture, b.element.startsAt ?? .distantFuture)
+                    return x != y ? x < y : a.offset < b.offset
+                }.map(\.element)
+            }
+            return Array(part.prefix(section.limit))
         }
     }
 
@@ -632,7 +649,7 @@ public struct BriefingOverview: Codable, Sendable, Equatable {
         date = c.text("date", "day")
         status = Briefing.Status(raw: c.text("status"))
         revision = c.int64("revision")
-        headline = Formatting.clip(c.text("headline") ?? "", 120)
+        headline = Formatting.clockTimes(in: Formatting.clip(c.text("headline") ?? "", 120))
         needsYou = c.optionalInt("needsYou") ?? c.optionalInt("toDo") ?? 0
         updatedAt = c.date("updatedAt", "builtAt")
         items = Array(c.list(BriefingItem.self, "items").prefix(6))

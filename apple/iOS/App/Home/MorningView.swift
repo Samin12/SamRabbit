@@ -378,7 +378,7 @@ struct BriefEventRow: View {
             RoundedRectangle(cornerRadius: 2).fill(item.conflict ? SamTheme.amber : SamTheme.accent)
                 .frame(width: 3, height: 34)
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(SamTheme.ink).lineLimit(1)
+                Text(item.shownTitle).font(.system(size: 15, weight: .semibold)).foregroundStyle(SamTheme.ink).lineLimit(1)
                 if item.conflict {
                     Label(item.why.isEmpty ? "Overlaps another event" : item.why, systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 12.5))

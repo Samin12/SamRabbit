@@ -73,7 +73,8 @@ struct BriefingTests {
         #expect(brief.status == .ready)
         #expect(brief.revision == 12)
         #expect(brief.updatedAt == BridgeDates.date(from: "2026-10-14T10:41:07Z"), "generatedAt")
-        #expect(brief.headline == "3 things need you · 4 meetings, first at 10:00 · 1 agent waiting")
+        #expect(brief.headline == Formatting.clockTimes(in: "3 things need you · 4 meetings, first at 10:00 · 1 agent waiting"),
+                "its time as the device shows times")
         #expect(brief.items.map(\.id) == [dana, acme, clash, "bi_e100000000000001", "bi_e100000000000002",
                                           "bi_a100000000000001", "bi_f100000000000001"],
                 "in the parts' order, Do first at its cap of three")
@@ -274,6 +275,61 @@ struct BriefingTests {
         #expect(again.taskText == proposed.taskText)
         let long = try BridgeJSON.decode(BriefingItem.self, from: Data(#"{"id":"bi_y","title":"T","taskText":"\#(String(repeating: "a", count: 900))"}"#.utf8))
         #expect((long.taskText?.count ?? 0) <= BriefingItem.maxTaskText)
+    }
+
+    /// The Mac writes the headline's time with `%H:%M` ("first at 16:00") while every other time is "4:00 PM": the
+    /// headline reads like the rest, wherever it shows (Home, the watch, the widgets, the complication), and a
+    /// 24-hour clock keeps its own style.
+    @Test func theHeadlinesTimesReadLikeEveryOtherTime() throws {
+        let us = Locale(identifier: "en_US")
+        func shown(_ text: String, _ locale: Locale = us) -> String {
+            Formatting.clockTimes(in: text, locale: locale).replacingOccurrences(of: "\u{202F}", with: " ")
+        }
+        #expect(shown("3 things need you · 4 meetings, first at 16:00 · 1 agent waiting")
+                == "3 things need you · 4 meetings, first at 4:00 PM · 1 agent waiting")
+        #expect(shown("first at 09:05") == "first at 9:05 AM")
+        #expect(shown("first at 00:30") == "first at 12:30 AM")
+        #expect(shown("first at 12:00, then 23:59") == "first at 12:00 PM, then 11:59 PM")
+        // Already in the device's style, or not a clock time: as it was.
+        for text in ["first at 4:00 PM", "Both at 10:00 AM", "at 10:00am", "9:30", "build 16:00:30", "v2.16:00",
+                     "Nothing urgent this morning", "ratio 3:2", "24:00"] {
+            #expect(shown(text) == text, "\(text)")
+        }
+        // Again: nothing changes.
+        let once = Formatting.clockTimes(in: "first at 16:00", locale: us)
+        #expect(Formatting.clockTimes(in: once, locale: us) == once)
+        // A 24-hour clock keeps it.
+        #expect(shown("first at 16:00", Locale(identifier: "de_DE")) == "first at 16:00")
+        // Decoded: the brief and the summary's part alike.
+        let brief = try decode(#"{"available":true,"date":"2026-10-14","headline":"2 meetings, first at 16:20"}"#)
+        #expect(brief.headline == Formatting.clockTimes(in: "2 meetings, first at 16:20"))
+        let part = try BridgeJSON.decode(BriefingOverview.self, from: Data(#"{"available":true,"headline":"first at 16:20"}"#.utf8))
+        #expect(part.headline == Formatting.clockTimes(in: "first at 16:20"))
+    }
+
+    /// Today in the order of the day, whatever order the Mac listed it in (one without a time last); an event without
+    /// a meeting link isn't "Join …".
+    @Test func todayIsInTheOrderOfTheDay() throws {
+        let brief = try decode("""
+        {"available":true,"date":"2026-10-14","sections":[{"id":"today","items":[
+          {"id":"e1","section":"today","kind":"event","title":"Join Design review","startsAt":"2026-10-14T23:40:00Z",
+           "actions":[{"type":"open","label":"Join"}],"url":"https://zoom.us/j/1"},
+          {"id":"e2","section":"today","kind":"event","title":"Join Lunch with Maya","startsAt":"2026-10-14T21:40:00Z",
+           "actions":[{"type":"done","label":"Got it"}]},
+          {"id":"e3","section":"today","kind":"event","title":"Join Untimed"},
+          {"id":"e4","section":"today","kind":"conflict","title":"Join Standup","startsAt":"2026-10-14T19:40:00Z",
+           "conflict":true,"url":"https://meet.google.com/abc-defg-hij"},
+          {"id":"e5","section":"today","kind":"event","title":"Join Gym","startsAt":"2026-10-14T21:40:00Z"}]}]}
+        """)
+        #expect(brief.items(in: .today).map(\.id) == ["e4", "e2", "e5", "e1", "e3"], "by start; a tie as listed")
+        let titles = Dictionary(uniqueKeysWithValues: brief.items.map { ($0.id, $0.shownTitle) })
+        #expect(titles["e2"] == "Lunch with Maya", "no link: nothing to join")
+        #expect(titles["e5"] == "Gym")
+        #expect(titles["e1"] == "Join Design review", "a link: Join it")
+        #expect(titles["e4"] == "Join Standup")
+        #expect(BriefingItem(id: "x", section: .doFirst, title: "Join the beta list").shownTitle == "Join the beta list",
+                "an email's verb stays")
+        #expect(BriefingItem(id: "x", section: .today, kind: "event", title: "Join ").shownTitle == "Join ")
     }
 
     @Test func anItemSurvivesTheWidgetsCache() throws {

@@ -41,7 +41,7 @@ struct BriefPage: View {
                                     Text(Formatting.time(item.startsAt))
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundStyle(item.conflict ? SamTheme.amber : SamTheme.orbPale)
-                                    Text(item.title).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+                                    Text(item.shownTitle).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
                                     if item.conflict {
                                         Image(systemName: "exclamationmark.triangle.fill")
                                             .font(.system(size: 10)).foregroundStyle(SamTheme.amber)
