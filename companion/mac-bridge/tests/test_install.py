@@ -92,7 +92,7 @@ class InstallTest(unittest.TestCase):
                          "no --cli: the installed copy's marker, not a flag, makes it use the real Heptabase CLI")
         for module in ("samrabbit_mobile.py", "samrabbit_t3.py", "samrabbit_transcribe.py", "samrabbit_installed.py",
                        "samrabbit_assistant.py", "samrabbit_assistant_mcp.py", "samrabbit_chatgpt.py",
-                       "samrabbit_realtime.py", "samrabbit_realtime_profile.py",
+                       "samrabbit_realtime.py", "samrabbit_realtime_profile.py", "samrabbit_inbox.py",
                        "realtime/samrabbit_realtime_peer.py", "realtime/requirements.txt"):
             self.assertTrue((script.parent / module).is_file(), module)
         self.assertIn("realtime helper: off (venv skipped: SAMRABBIT_SKIP_REALTIME_VENV=1)", output)

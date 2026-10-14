@@ -29,6 +29,10 @@ The iPhone app, its widgets and the Apple Watch (``samrabbit_mobile.py``, T3 thr
 ``samrabbit_assistant_mcp.py``, its realtime voice ``samrabbit_realtime.py`` on the Mac's own ChatGPT login
 ``samrabbit_chatgpt.py``); ``/health`` reports ``mobile`` and ``assistant``.
 
+The desktop app's Agent Dock (``samrabbit_inbox.py``): ``/v1/desktop/inbox*`` lists the T3 Code threads, Claude Code and
+Codex sessions and SamRabbit chats that wait for Samin, and acts on them; the dock's voice is
+``/v1/desktop/assistant/*`` (the watch assistant's routes as the device "mac"). Loopback + the desktop token only.
+
 Every route needs ``Authorization: Bearer <token>`` (the token lives in
 ``~/.config/samrabbit/bridge-token``, mode 0600). Journal text and the token are
 never logged. Stdlib only; runs on the macOS system Python 3.9+.
@@ -98,6 +102,11 @@ try:  # the watch's voice assistant (/v1/mobile/assistant/*); optional so the br
     import samrabbit_assistant as assistant  # noqa: E402
 except Exception:  # noqa: BLE001  # pragma: no cover
     assistant = None  # type: ignore[assignment]
+
+try:  # the desktop app's Agent Dock (/v1/desktop/inbox*); optional so the bridge runs without it
+    import samrabbit_inbox as inbox  # noqa: E402
+except Exception:  # noqa: BLE001  # pragma: no cover
+    inbox = None  # type: ignore[assignment]
 
 VERSION = "1.2.0"
 SERVICE = "samrabbit-bridge"
@@ -526,7 +535,8 @@ class BridgeServer(ThreadingHTTPServer):
                  mac_control: Optional[mac.MacControl] = None, sync_dir: Optional[str] = None,
                  desktop_token_file: Optional[str] = None,
                  genui_service: Optional[genui.GenUiService] = None,
-                 calendar_writer: Any = None, mobile_service: Any = None, installed_copy: bool = False) -> None:
+                 calendar_writer: Any = None, mobile_service: Any = None, installed_copy: bool = False,
+                 inbox_service: Any = None) -> None:
         self.token = token
         self.installed_copy = installed_copy  # the installed LaunchAgent copy (``is_installed_copy``), else a dev copy
         self.cli = cli
@@ -544,9 +554,12 @@ class BridgeServer(ThreadingHTTPServer):
         if self.calendar is None and gcal is not None:
             self.calendar = gcal.make_writer_or_unavailable() if installed_copy else _dev_calendar()
         self.mobile: Any = mobile_service  # samrabbit_mobile.MobileService (its worker starts in main() or tests)
+        self.inbox: Any = inbox_service  # samrabbit_inbox.InboxService (its refresher starts in main() or tests)
         super().__init__(address, BridgeHandler)
         if self.mobile is not None:
             self.mobile.attach(self)
+        if self.inbox is not None:
+            self.inbox.attach(self)
         if sync is not None and sync_dir:
             try:
                 self.sync = sync.SyncService(sync_dir, desktop_token_file or sync.DEFAULT_DESKTOP_TOKEN_FILE,
@@ -564,6 +577,8 @@ class BridgeServer(ThreadingHTTPServer):
             self.calendar.close()
         if self.mobile is not None:
             self.mobile.close()
+        if self.inbox is not None:
+            self.inbox.close()
         self.genui.stop()
 
     @property
@@ -619,6 +634,12 @@ class BridgeServer(ThreadingHTTPServer):
             except Exception:  # the assistant must never break the journal's health check
                 _LOG.warning("assistant health failed")
                 assistant_health = {"available": False, "reason": "check_failed"}
+            try:
+                inbox_health: Dict[str, Any] = self.inbox.health() if self.inbox is not None \
+                    else {"available": False}
+            except Exception:  # the desktop inbox must never break the journal's health check
+                _LOG.warning("inbox health failed")
+                inbox_health = {"available": False}
             value: Dict[str, Any] = {
                 "ok": True, "service": SERVICE, "version": VERSION,
                 "cli": {"available": version is not None, "version": version,
@@ -632,6 +653,7 @@ class BridgeServer(ThreadingHTTPServer):
                 "calendarWrite": calendar_write,
                 "mobile": mobile_health,
                 "assistant": assistant_health,
+                "inbox": inbox_health,
                 "checkedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             }
             self._health = (time.monotonic(), value)
@@ -715,6 +737,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # /v1/mobile/*: per-device tokens from LAN or Tailscale peers (its own auth, errors and logging).
             status, code = self.server.mobile.serve(self, method, route)
             _LOG.info("%s %s %s %dms%s", method, self.server.mobile.route_label(route), status,
+                      int((time.monotonic() - started) * 1000), f" {code}" if code else "")
+            return
+        if self.server.inbox is not None and self.server.inbox.handles(route):
+            # /v1/desktop/inbox*: the Agent Dock (loopback + desktop token; its own errors and logging).
+            status, code = self.server.inbox.serve(self, method, route)
+            _LOG.info("%s %s %s %dms%s", method, self.server.inbox.route_label(route), status,
                       int((time.monotonic() - started) * 1000), f" {code}" if code else "")
             return
         if self.server.sync is not None and self.server.sync.handles(route):
@@ -905,7 +933,9 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
                 elevenlabs_key_file: Optional[str] = None, elevenlabs_url: Optional[str] = None,
                 assistant_settings_file: Optional[str] = None, assistant_brain: Optional[str] = None,
                 chatgpt_auth_file: Optional[str] = None, chatgpt_issuer: Optional[str] = None,
-                realtime_python: Optional[str] = None, realtime_api: Optional[str] = None) -> BridgeServer:
+                realtime_python: Optional[str] = None, realtime_api: Optional[str] = None,
+                inbox_dir: Optional[str] = None, inbox_launch: bool = False,
+                inbox_service: Any = None) -> BridgeServer:
     """Conversation sync runs only with a ``sync_dir`` (the command line passes the default one). ``cli`` is a
     path, ``auto`` or ``dry-run``; only the installed copy uses the real CLI without a path (``cli_for``). T3 for the
     mobile API: the installed copy pairs with T3 Code itself; any other copy (a checkout, a test, a copy in a temp
@@ -914,7 +944,9 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
     ``transcribe_helper``: the speech-to-text helper for ``/v1/mobile/transcribe`` (default: ``samrabbit-transcribe``
     next to this script, which install.sh builds). The watch's assistant (``samrabbit_assistant.make_service``): a dev
     copy runs it only with an explicit ``claude``, speaks with ElevenLabs only with an explicit ``elevenlabs_key_file``,
-    and uses the realtime voice only with an explicit ``chatgpt_auth_file`` and ``realtime_python``."""
+    and uses the realtime voice only with an explicit ``chatgpt_auth_file`` and ``realtime_python``. The desktop
+    inbox (``samrabbit_inbox.make_service``): a dev copy keeps what was seen in memory unless given ``inbox_dir`` and
+    opens no app or Terminal window unless ``inbox_launch``."""
     installed_copy = is_installed_copy()  # decided once: the journal, T3 and the calendar agree
     if calendar_writer is None and gcal is not None and composio is None and not installed_copy:
         # A dev copy (a checkout, a test, a temp HOME) never changes the real Google Calendar unless given --composio.
@@ -941,6 +973,11 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
                                               google_account=google_account, hosts=mobile_hosts,
                                               bridge_version=VERSION, transcribe_helper=transcribe_helper,
                                               assistant=helper)
+    if inbox_service is None and inbox is not None:
+        try:
+            inbox_service = inbox.make_service(installed=installed_copy, state_dir=inbox_dir, launch=inbox_launch)
+        except OSError:  # an unusable folder turns the dock's list off, never the bridge
+            _LOG.warning("desktop inbox unavailable")
     return BridgeServer((host, port), token=TokenFile(token_file),
                         cli=cli_for(cli, installed=installed_copy),
                         cli_timeout=cli_timeout, allow_any_client=allow_any_client,
@@ -950,7 +987,7 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
                             artifacts_dir or genui.DEFAULT_ARTIFACTS_DIR, claude=claude,
                             agent_browser=agent_browser, model=genui_model),
                         calendar_writer=calendar_writer, mobile_service=mobile_service,
-                        installed_copy=installed_copy)
+                        installed_copy=installed_copy, inbox_service=inbox_service)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1027,6 +1064,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help=argparse.SUPPRESS)  # a stand-in ChatGPT login (tests)
     parser.add_argument("--realtime-api-url", default=os.environ.get("SAMRABBIT_REALTIME_API_URL") or None,
                         help=argparse.SUPPRESS)  # a stand-in OpenAI signaling server (tests)
+    parser.add_argument("--inbox-dir", default=os.environ.get("SAMRABBIT_INBOX_DIR") or None,
+                        help="the Agent Dock inbox's state folder (what was seen; default ~/Library/Application "
+                             "Support/SamRabbit/inbox for the installed copy; any other copy keeps it in memory)")
+    parser.add_argument("--inbox-launch", action="store_true",
+                        help="let a copy that is not the installed one open apps and Terminal windows for the dock")
     options = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     try:
@@ -1044,7 +1086,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                              elevenlabs_key_file=options.elevenlabs_key_file, elevenlabs_url=options.elevenlabs_url,
                              assistant_brain=options.assistant_brain, chatgpt_auth_file=options.chatgpt_auth_file,
                              chatgpt_issuer=options.chatgpt_issuer, realtime_python=options.realtime_python,
-                             realtime_api=options.realtime_api_url)
+                             realtime_api=options.realtime_api_url, inbox_dir=options.inbox_dir,
+                             inbox_launch=options.inbox_launch)
     except (OSError, ValueError) as error:
         _LOG.error("cannot start: %s", error)
         return 2
@@ -1058,6 +1101,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     server.genui.start()
     if server.mobile is not None:
         server.mobile.start()
+    if server.inbox is not None:
+        server.inbox.start()
     cli_path = server.cli.executable()
     if server.dry_run:
         _LOG.warning("heptabase CLI: dry-run, journal writes stay in this process and never reach Heptabase "

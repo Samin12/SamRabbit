@@ -14,10 +14,12 @@ before the next try (doubling up to 10 minutes); a token this process minted tha
 (or within a minute of being minted) means T3 is not taking the bridge's credentials, so no new pairing for 5 minutes
 (doubling up to 1 hour); and there are never more than ``MAX_PAIRINGS_PER_HOUR`` pairings in an hour.
 
-Reads: ``GET /api/orchestration/shell`` (a cached snapshot) and ``GET /api/orchestration/threads/<id>``. Writes:
+Reads: ``GET /api/orchestration/shell`` (a cached snapshot) and ``GET /api/orchestration/threads/<id>``, plus
+``server.getConfig`` (the providers T3 offers and their models, for the desktop inbox's new tasks), which only T3's
+WebSocket RPC answers: one ``Request`` over ``GET /ws`` with the same bearer token, cached for 10 minutes. Writes:
 ``POST /api/orchestration/dispatch`` with ``thread.create`` + ``thread.turn.start`` (new task),
 ``thread.turn.start`` (message), ``thread.approval.respond``, ``thread.user-input.respond`` and
-``thread.turn.interrupt``. Status, pending requests, commands and project placement follow
+``thread.turn.interrupt``. Status, seen markers, pending requests, commands and project placement follow
 ``runtime/sam_runtime/domains/t3/`` (status.py, commands.py, placement.py), ported to stdlib Python 3.9.
 
 Thread text, prompts, the token and pairing credentials are never logged.
@@ -40,6 +42,7 @@ import base64
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import hashlib
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
 import ipaddress
 import json
@@ -47,7 +50,9 @@ import logging
 import os
 import re
 import signal
+import socket
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -92,6 +97,13 @@ MAX_MESSAGES = 60
 SHELL_MAX_AGE = 3.0  # seconds a route may reuse the snapshot
 DETAIL_TTL = 1.5
 TURN_START_GRACE = 45.0
+# ``server.getConfig`` (the providers and their models) has no HTTP route, only T3's WebSocket RPC: read it once in a
+# while (a few hundred KB) and keep the parts a new task needs.
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_TIMEOUT_SECONDS = 5.0
+MAX_WS_MESSAGE_BYTES = 8 * 1024 * 1024
+CONFIG_MAX_AGE = 10 * 60.0
+CONFIG_RETRY_SECONDS = 60.0  # after a failed read, the thread list stands in for this long
 # The orchestration project's default name: T3's built-in agent project (a project-name value, not code).
 DEFAULT_ORCHESTRATION_TITLE = "Hermes"
 DEFAULT_MODEL_SELECTION = {"instanceId": "claudeAgent", "model": "claude-opus-5-5"}
@@ -247,6 +259,142 @@ class T3Http:
             reason = value.get("reason") if isinstance(value, dict) else None
             raise _RequestFailed(status, str(code) if code else None, str(reason) if reason else None)
         return value
+
+    def rpc(self, tag: str, payload: Dict[str, Any], *, token: str, timeout: float = WS_TIMEOUT_SECONDS) -> Any:
+        """One call of T3's Effect RPC over ``GET /ws`` (``server.getConfig`` has no HTTP route): the bearer token on
+        the upgrade, one ``Request``, then the ``Exit`` value. Pings are answered; anything else is ignored. Raises
+        like ``request`` (401 on the upgrade: ``_Unauthorized``; a ``Failure`` exit: ``_RequestFailed``)."""
+        deadline = time.monotonic() + timeout
+        try:
+            raw = socket.create_connection((self.host, self.port), timeout=timeout)
+        except OSError:
+            raise _Unavailable() from None
+        connection = raw
+        try:
+            if self.scheme == "https":
+                connection = ssl.create_default_context().wrap_socket(raw, server_hostname=self.host)
+            channel = _WebSocket(connection, deadline)
+            channel.handshake(self.host, self.port, token)
+            channel.send_json({"_tag": "Request", "id": "1", "tag": tag, "payload": payload, "headers": []})
+            while True:
+                for message in channel.messages():
+                    kind = message.get("_tag")
+                    if kind == "Ping":
+                        channel.send_json({"_tag": "Pong"})
+                    elif kind == "Chunk" and message.get("requestId") is not None:
+                        channel.send_json({"_tag": "Ack", "requestId": message["requestId"]})
+                    elif kind == "Exit" and str(message.get("requestId")) == "1":
+                        exit_value = _dict(message.get("exit"))
+                        if exit_value.get("_tag") == "Success":
+                            return exit_value.get("value")
+                        raise _RequestFailed(500, "rpc_failed", None)
+        except (OSError, ValueError, ssl.SSLError):
+            raise _Unavailable() from None
+        finally:
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+
+class _WebSocket:
+    """Just enough of RFC 6455 for one RPC: a client handshake, masked text frames out, (fragmented) frames in."""
+
+    def __init__(self, connection: socket.socket, deadline: float) -> None:
+        self.connection = connection
+        self.deadline = deadline
+        self.buffer = b""
+
+    def _remaining(self) -> float:
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise _Unavailable()
+        return left
+
+    def _fill(self, size: int) -> bytes:
+        while len(self.buffer) < size:
+            self.connection.settimeout(self._remaining())
+            chunk = self.connection.recv(65536)
+            if not chunk:
+                raise _Unavailable()
+            self.buffer += chunk
+        out, self.buffer = self.buffer[:size], self.buffer[size:]
+        return out
+
+    def handshake(self, host: str, port: int, token: str) -> None:
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        shown = f"[{host}]" if ":" in host else host
+        request = (f"GET /ws HTTP/1.1\r\nHost: {shown}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer {token}\r\n"
+                   "User-Agent: SamRabbit-Bridge/1\r\n\r\n")
+        self.connection.settimeout(self._remaining())
+        self.connection.sendall(request.encode("ascii"))
+        while b"\r\n\r\n" not in self.buffer:
+            if len(self.buffer) > 16 * 1024:
+                raise _Unavailable()
+            self.connection.settimeout(self._remaining())
+            chunk = self.connection.recv(4096)
+            if not chunk:
+                raise _Unavailable()
+            self.buffer += chunk
+        head, self.buffer = self.buffer.split(b"\r\n\r\n", 1)
+        lines = head.decode("latin-1").split("\r\n")
+        parts = lines[0].split(" ")
+        status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        if status == 401:
+            raise _Unauthorized()
+        if status != 101:
+            raise _RequestFailed(status or 502, "websocket_refused", None)
+        headers = {name.strip().lower(): value.strip() for name, _, value in
+                   (line.partition(":") for line in lines[1:])}
+        expected = base64.b64encode(hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
+        if headers.get("sec-websocket-accept") != expected:
+            raise _Unavailable()
+
+    def _send(self, opcode: int, data: bytes) -> None:
+        head = bytearray([0x80 | opcode])
+        if len(data) < 126:
+            head.append(0x80 | len(data))
+        elif len(data) < 65536:
+            head += bytes([0x80 | 126]) + struct.pack(">H", len(data))
+        else:
+            head += bytes([0x80 | 127]) + struct.pack(">Q", len(data))
+        mask = os.urandom(4)
+        self.connection.settimeout(self._remaining())
+        self.connection.sendall(bytes(head) + mask + bytes(byte ^ mask[index % 4] for index, byte in enumerate(data)))
+
+    def send_json(self, value: Dict[str, Any]) -> None:
+        self._send(0x1, json.dumps(value, separators=(",", ":")).encode("utf-8"))
+
+    def messages(self) -> List[Dict[str, Any]]:
+        """The next complete text message as JSON objects (Effect RPC may batch several in one array)."""
+        message = b""
+        while True:
+            first, second = self._fill(2)
+            opcode, size = first & 0x0F, second & 0x7F
+            if size == 126:
+                size = struct.unpack(">H", self._fill(2))[0]
+            elif size == 127:
+                size = struct.unpack(">Q", self._fill(8))[0]
+            if size + len(message) > MAX_WS_MESSAGE_BYTES:
+                raise _Unavailable()
+            mask = self._fill(4) if second & 0x80 else b""  # a server never masks; tolerated anyway
+            data = self._fill(size)
+            if mask:
+                data = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
+            if opcode == 0x8:
+                raise _Unavailable()
+            if opcode == 0x9:
+                self._send(0xA, data[:125])
+                continue
+            if opcode == 0xA:
+                continue
+            message += data
+            if first & 0x80:
+                break
+        value = json.loads(message.decode("utf-8"))
+        items = value if isinstance(value, list) else [value]
+        return [item for item in items if isinstance(item, dict)]
 
 
 def _gunzip(raw: bytes) -> bytes:
@@ -792,6 +940,45 @@ def mobile_status(thread: Dict[str, Any]) -> str:
     return MOBILE_STATUS[status]
 
 
+# Seen markers (port of status.py ``completed_at``/``unread_marker``/``seen_marker``/``is_unread``): a thread is unread
+# when its marker is newer than the one stored when Samin last looked at it (the desktop inbox keeps them).
+
+
+def completed_at(thread: Dict[str, Any]) -> Optional[str]:
+    latest = _dict(thread.get("latestTurn"))
+    if latest.get("state") in ("completed", "error", "interrupted"):
+        value = latest.get("completedAt")
+        return str(value) if value else None
+    return None
+
+
+def unread_marker(thread: Dict[str, Any], status: str) -> Optional[str]:
+    """Compared against the stored seen marker; None means never unread (a thread that is working)."""
+    if status == WORKING:
+        return None
+    if status in NEEDS_YOU:
+        return str(thread.get("updatedAt") or "") or None
+    return completed_at(thread)
+
+
+def seen_marker(thread: Dict[str, Any]) -> str:
+    """Stored when Samin looks at a thread (covers both done and needs-you): the later of completedAt and updatedAt."""
+    parsed = [(parse_time(value), str(value)) for value in (completed_at(thread), thread.get("updatedAt")) if value]
+    stamped = [item for item in parsed if item[0] is not None]
+    return max(stamped, key=lambda item: item[0])[1] if stamped else ""
+
+
+def is_unread(marker: Optional[str], seen: Optional[str]) -> bool:
+    if not marker:
+        return False
+    if not seen:
+        return True
+    marker_time, seen_time = parse_time(marker), parse_time(seen)
+    if marker_time is None or seen_time is None:
+        return marker != seen
+    return marker_time > seen_time
+
+
 @dataclass(frozen=True)
 class PendingApproval:
     request_id: str
@@ -1199,6 +1386,31 @@ def project_records(shell: Dict[str, Any]) -> List[Dict[str, Any]]:
     return records
 
 
+def trim_server_config(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The providers T3 offers (``ServerProvider``: instanceId, driver, enabled, installed, status, availability,
+    models) and ``settings.defaultModelSelection``, without everything else in ``server.getConfig``."""
+    providers = []
+    for raw in config.get("providers") or []:
+        if not isinstance(raw, dict) or not isinstance(raw.get("instanceId"), str) or not raw["instanceId"]:
+            continue
+        usable = raw.get("enabled") is True and raw.get("installed") is not False and \
+            raw.get("availability") != "unavailable" and raw.get("status") not in ("disabled", "error")
+        models = [{"slug": str(model["slug"]), "name": str(model.get("name") or model["slug"]),
+                   "isDefault": model.get("isDefault") is True}
+                  for model in raw.get("models") or []
+                  if isinstance(model, dict) and isinstance(model.get("slug"), str) and model["slug"]
+                  and model.get("isLegacy") is not True]
+        providers.append({"instanceId": raw["instanceId"], "driver": str(raw.get("driver") or raw["instanceId"]),
+                          "displayName": str(raw.get("displayName") or raw["instanceId"]), "usable": usable,
+                          "models": models})
+    if not providers:
+        return None
+    default = _dict(_dict(config.get("settings")).get("defaultModelSelection"))
+    return {"providers": providers,
+            "defaultModelSelection": {"instanceId": str(default["instanceId"]), "model": str(default["model"])}
+            if isinstance(default.get("instanceId"), str) and isinstance(default.get("model"), str) else None}
+
+
 @dataclass
 class _Snapshot:
     at: float
@@ -1228,6 +1440,8 @@ class T3Hub:
         self._details: Dict[Tuple[str, int], Tuple[float, Dict[str, Any]]] = {}
         self._pending: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {}  # thread id -> (updatedAt, view)
         self._turn_requests: Dict[str, Tuple[float, Optional[str]]] = {}
+        self._config: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None  # (read at, trimmed config or None)
+        self._config_lock = threading.Lock()
         self.shell_fetches = 0  # tests: how often the shell was read from T3
 
     # ------------------------------------------------------------------ snapshot
@@ -1389,6 +1603,31 @@ class T3Hub:
                               "orchestration": orchestration is not None and record["id"] == orchestration["id"]}
                              for record in snapshot.records if not record.get("scratch")],
                 "orchestrationProjectId": orchestration["id"] if orchestration else None}
+
+    def cached_server_config(self) -> Optional[Dict[str, Any]]:
+        """The provider list as last read (never a T3 call)."""
+        with self._config_lock:
+            return self._config[1] if self._config is not None else None
+
+    def server_config(self) -> Optional[Dict[str, Any]]:
+        """``server.getConfig`` trimmed to what a new task needs: ``{providers: [{instanceId, driver, displayName,
+        usable, models: [{slug, name, isDefault}]}], defaultModelSelection}`` (legacy models left out), read over T3's
+        WebSocket RPC and cached for ``CONFIG_MAX_AGE``; None when T3 does not answer it (a failure is remembered for
+        ``CONFIG_RETRY_SECONDS``), so callers fall back to the selections the thread list shows."""
+        with self._config_lock:
+            cached = self._config
+            if cached is not None and self._monotonic() - cached[0] < (
+                    CONFIG_MAX_AGE if cached[1] is not None else CONFIG_RETRY_SECONDS):
+                return cached[1]
+            try:  # never through ``session.call``: a T3 without this RPC must not mark the session as failing
+                raw = self.session.http.rpc("server.getConfig", {}, token=self.session.token())
+            except (T3Error, _Unavailable, _Unauthorized, _RequestFailed):
+                raw = None
+            value = trim_server_config(raw) if isinstance(raw, dict) else None
+            if value is None:
+                _LOG.info("t3 provider list unavailable")
+            self._config = (self._monotonic(), value)
+            return value
 
     # ------------------------------------------------------------------ details
     def detail(self, thread_id: str, *, turns: int = 2, fresh: bool = False) -> Dict[str, Any]:
@@ -1578,7 +1817,10 @@ class T3Hub:
         _LOG.info("t3 stop sent")
         return {"ok": True, "threadId": str(thread["id"]), "wasWorking": True}
 
-    def create(self, text: Any, *, project_id: Optional[str] = None, title: Optional[str] = None) -> Dict[str, Any]:
+    def create(self, text: Any, *, project_id: Optional[str] = None, title: Optional[str] = None,
+               model_selection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """``thread.create`` + ``thread.turn.start``. The model: ``model_selection`` when given (the desktop inbox's
+        chosen provider instance and model), else the project's most recent thread's, else the project default."""
         prompt = _prompt(text, "Say what the new task should do.")
         snapshot = self.snapshot(max_age=10.0)
         records = snapshot.records
@@ -1594,10 +1836,10 @@ class T3Hub:
         floor = datetime.min.replace(tzinfo=timezone.utc)
         siblings.sort(key=lambda thread: parse_time(activity_time(thread)) or floor, reverse=True)
         recent = siblings[0] if siblings else None
-        selection: Optional[Dict[str, Any]] = None
-        if recent is not None and _dict(recent.get("modelSelection")).get("model"):
+        selection: Optional[Dict[str, Any]] = dict(model_selection) if model_selection else None
+        if selection is None and recent is not None and _dict(recent.get("modelSelection")).get("model"):
             selection = dict(recent["modelSelection"])
-        elif _dict(chosen.get("defaultModelSelection")).get("model"):
+        elif selection is None and _dict(chosen.get("defaultModelSelection")).get("model"):
             selection = dict(chosen["defaultModelSelection"])
         selection = selection or dict(DEFAULT_MODEL_SELECTION)
         mode = str(recent.get("runtimeMode")) if recent is not None and recent.get("runtimeMode") in RUNTIME_MODES \
