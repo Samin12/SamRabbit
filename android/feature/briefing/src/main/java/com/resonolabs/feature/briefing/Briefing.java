@@ -107,7 +107,10 @@ public final class Briefing {
             List<Action> out = new ArrayList<>();
             for (Action action : actions) {
                 if (out.size() == 2) break;
-                if (!"done".equals(action.type) && !"dismiss".equals(action.type)) out.add(action);
+                if ("done".equals(action.type) || "dismiss".equals(action.type)) continue;
+                String after = stateAfter(action.type);
+                if (!"open".equals(after) && state.equals(after)) continue; // already drafted, tasked, blocked, snoozed
+                out.add(action);
             }
             if (open()) {
                 out.add(new Action("done", "Done"));
@@ -269,6 +272,19 @@ public final class Briefing {
             return copy;
         } catch (Exception invalid) {
             return view;
+        }
+    }
+
+    /** The state an action leaves an item in (open for Open). */
+    public static String stateAfter(String action) {
+        switch (action == null ? "" : action) {
+            case "draft_reply": return "drafted";
+            case "make_task": return "tasked";
+            case "block_time": return "blocked";
+            case "remind": return "snoozed";
+            case "done": return "done";
+            case "dismiss": return "dismissed";
+            default: return "open";
         }
     }
 

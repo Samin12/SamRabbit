@@ -345,7 +345,8 @@ public final class BriefingPageView extends View implements AutoCloseable {
         if (fixture != null) {
             handler.postDelayed(() -> {
                 acting = false;
-                fixture = Briefing.withItemState(fixture, item.id, stateAfter(action.type, item.state));
+                String next = Briefing.stateAfter(action.type);
+                fixture = Briefing.withItemState(fixture, item.id, "open".equals(next) ? item.state : next);
                 apply(fixture);
                 feedback(fixtureSay(action.type), SUCCESS);
             }, 500L);
@@ -380,18 +381,6 @@ public final class BriefingPageView extends View implements AutoCloseable {
         handler.removeCallbacks(expire);
         handler.postDelayed(expire, FEEDBACK_MS + 50L);
         invalidate();
-    }
-
-    private static String stateAfter(String action, String current) {
-        return switch (action) {
-            case "draft_reply" -> "drafted";
-            case "make_task" -> "tasked";
-            case "block_time" -> "blocked";
-            case "remind" -> "snoozed";
-            case "done" -> "done";
-            case "dismiss" -> "dismissed";
-            default -> current;
-        };
     }
 
     private static String fixtureSay(String action) {
@@ -482,7 +471,7 @@ public final class BriefingPageView extends View implements AutoCloseable {
         if (item == null) return;
         String section = Briefing.defaultSectionTitle(item.section);
         detailEyebrow = section + (item.account.isEmpty() ? "" : " · " + item.account)
-                + (item.open() ? "" : " · " + item.chip());
+                + ("open".equals(item.state) ? "" : " · " + item.chip());
         detailTitle = TextFit.firstLines(measure, item.title, 404f, 3, 26f, medium);
         String why = item.why;
         if (!item.time.isEmpty()) why = why.isEmpty() ? item.time : item.time + " · " + why;

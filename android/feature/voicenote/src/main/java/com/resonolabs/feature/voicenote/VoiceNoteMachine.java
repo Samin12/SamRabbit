@@ -105,7 +105,7 @@ public final class VoiceNoteMachine {
         String text = say == null ? "" : say.trim();
         switch (state == null ? "" : state) {
             case "done", "sent" -> show(Phase.SENT, text.isEmpty() ? "Sent to your Mac." : text, now, RESULT_MS);
-            case "queued" -> show(Phase.QUEUED, text.isEmpty() ? "Saved. It goes to your Mac when it's back." : text,
+            case "queued" -> show(Phase.QUEUED, text.isEmpty() ? "On the R1 until your Mac is back." : text,
                     now, LONG_RESULT_MS);
             default -> show(Phase.FAILED, text.isEmpty() ? "Couldn't save that note." : text, now, LONG_RESULT_MS);
         }

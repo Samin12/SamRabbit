@@ -56,6 +56,7 @@ public final class BriefingTest {
         Briefing.Item dana = brief.find("bi_dana");
         assertTrue(dana.open());
         assertEquals("Drafted", dana.chip());
+        assertEquals("no second draft once it is drafted", List.of("remind", "done", "dismiss"), types(dana.buttons()));
         Briefing done = Briefing.parse(view("2026-10-14", "done"));
         assertFalse(done.find("bi_dana").open());
         assertEquals(List.of("draft_reply", "remind"), types(done.find("bi_dana").buttons()));

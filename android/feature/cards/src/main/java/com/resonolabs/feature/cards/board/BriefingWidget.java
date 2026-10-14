@@ -40,6 +40,7 @@ public final class BriefingWidget implements BoardWidget {
         String why = "";
         String chip = "";
         float chipWidth;
+        boolean twoLines;
         String[] lines = new String[0];
     }
 
@@ -157,9 +158,12 @@ public final class BriefingWidget implements BoardWidget {
             row.id = item.id;
             row.chip = BoardPaint.fit(paint, item.chip(), 120f, 14f, BoardPaint.MEDIUM);
             row.chipWidth = row.chip.isEmpty() ? 0f : BoardPaint.width(paint, row.chip, 14f, BoardPaint.MEDIUM) + 24f;
-            float right = width - PAD - (row.chipWidth > 0f ? row.chipWidth + 10f : 0f);
-            row.title = BoardPaint.fit(paint, item.title, right - TEXT_X, 18f, BoardPaint.MEDIUM);
-            row.why = BoardPaint.fit(paint, item.why, right - TEXT_X, 14f, BoardPaint.REGULAR);
+            float besideChip = width - PAD - (row.chipWidth > 0f ? row.chipWidth + 10f : 0f);
+            // With a why line the title gets the full width and the chip sits beside the why.
+            row.twoLines = !item.why.isEmpty();
+            row.title = BoardPaint.fit(paint, item.title, (row.twoLines ? width - PAD : besideChip) - TEXT_X, 18f,
+                    BoardPaint.MEDIUM);
+            row.why = BoardPaint.fit(paint, item.why, besideChip - TEXT_X, 14f, BoardPaint.REGULAR);
             y += ROW;
             shown++;
         }
@@ -229,18 +233,18 @@ public final class BriefingWidget implements BoardWidget {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(ACCENT);
         canvas.drawCircle(DOT_X, cy, 5f, paint);
-        boolean twoLines = !row.why.isEmpty();
-        BoardPaint.text(canvas, paint, row.title, TEXT_X, twoLines ? row.top + 28f : cy + 6f, 18f, SamTheme.INK,
+        BoardPaint.text(canvas, paint, row.title, TEXT_X, row.twoLines ? row.top + 27f : cy + 6f, 18f, SamTheme.INK,
                 Paint.Align.LEFT, BoardPaint.MEDIUM);
-        if (twoLines) {
+        if (row.twoLines) {
             BoardPaint.text(canvas, paint, row.why, TEXT_X, row.top + 50f, 14f, SamTheme.MUTED, Paint.Align.LEFT,
                     BoardPaint.REGULAR);
         }
         if (row.chipWidth > 0f) {
-            rect.set(width - PAD - row.chipWidth, cy - 15f, width - PAD, cy + 15f);
+            float chipMid = row.twoLines ? row.top + 45f : cy;
+            rect.set(width - PAD - row.chipWidth, chipMid - 13f, width - PAD, chipMid + 13f);
             paint.setColor(SamTheme.withAlpha(ACCENT, 44));
-            canvas.drawRoundRect(rect, 15f, 15f, paint);
-            BoardPaint.text(canvas, paint, row.chip, rect.centerX(), cy + 5f, 14f, OrbGlyph.pale(ACCENT),
+            canvas.drawRoundRect(rect, 13f, 13f, paint);
+            BoardPaint.text(canvas, paint, row.chip, rect.centerX(), chipMid + 5f, 14f, OrbGlyph.pale(ACCENT),
                     Paint.Align.CENTER, BoardPaint.MEDIUM);
         }
     }

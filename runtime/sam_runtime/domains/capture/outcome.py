@@ -12,10 +12,11 @@ KINDS = {"journal": "journal", "t3_task": "task", "task": "task", "t3": "task", 
          "calendar_event": "calendar", "calendar_block": "calendar", "reminder": "calendar", "note": "note"}
 MAX_LINE = 120
 
-QUEUED_LINE = "Saved. It goes to your Mac when it's back."
-QUEUED_OUTDATED_LINE = "Saved on the R1. Update the Mac bridge to send notes."
-QUEUED_UNAUTHORIZED_LINE = "Saved on the R1. Connect the Mac bridge again."
-QUEUED_UNPAIRED_LINE = "Saved on the R1. Connect your Mac to send it."
+# Shown under "Saved ✓": the note is safe on the R1 and goes by itself.
+QUEUED_LINE = "On the R1 until your Mac is back."
+QUEUED_OUTDATED_LINE = "On the R1 until the Mac bridge is updated."
+QUEUED_UNAUTHORIZED_LINE = "On the R1 until the Mac bridge is connected again."
+QUEUED_UNPAIRED_LINE = "On the R1 until you connect your Mac."
 SENT_LINE = "Sent to your Mac."
 FAILED_LINE = "Couldn't save that note."
 

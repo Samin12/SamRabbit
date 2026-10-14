@@ -76,7 +76,7 @@ public final class VoiceNoteOverlay extends View {
     /** A later outcome ("Voice note · Added to your journal"); {@code ok} false tints it amber. */
     public void showChip(String text, boolean ok) {
         if (text == null || text.isBlank()) return;
-        chipText = TextFit.line(measure, "Voice note · " + text.trim(), 360f, 17f, medium);
+        chipText = TextFit.line(measure, "Voice note · " + text.trim(), 350f, 17f, medium);
         chipColor = ok ? SUCCESS : SamTheme.AMBER;
         chipUntil = SystemClock.uptimeMillis() + CHIP_MS;
         bringToFront();
@@ -200,7 +200,7 @@ public final class VoiceNoteOverlay extends View {
 
     private void drawChip(Canvas canvas) {
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(SamTheme.withAlpha(SamTheme.PANEL, 235));
+        paint.setColor(SamTheme.PANEL);
         canvas.drawRoundRect(chipRect, 31f, 31f, paint);
         glass.draw(canvas, paint, chipRect, 31f, false);
         paint.setColor(chipColor);
