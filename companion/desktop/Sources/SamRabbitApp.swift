@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
         window = controller
         controller.start()
         if showWindow { controller.show() }
+        DockController.shared.start()
         Task { await refreshList() }
         monitor.start()
         listTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
@@ -239,6 +240,7 @@ struct MenuContent: View {
         }
         Button("Open SamRabbit") { model.openMainWindow() }
             .keyboardShortcut("o")
+        Button("Show Agent Dock") { DockController.shared.showFromMenu() }
         Button("Pair iPhone…") { model.openPairing() }
         Button("Connect ChatGPT…") { model.openChatGPT() }
         if !model.notificationsAllowed {
@@ -254,6 +256,10 @@ struct MenuContent: View {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Dev only: draw the Agent Dock's states to PNGs from fixtures and quit (DockSnapshots.swift).
+        if let directory = Config.argument("--render-dock-snapshots") {
+            MainActor.assumeIsolated { exit(DockSnapshots.render(to: directory)) }
+        }
         NSApp.setActivationPolicy(.regular)
         NSApp.appearance = NSAppearance(named: .darkAqua)
         let atLogin = CommandLine.arguments.contains("--login")
@@ -297,6 +303,8 @@ struct SamRabbitApp: App {
                 Button("Pair iPhone…") { model.openPairing() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Connect ChatGPT…") { model.openChatGPT() }
+                Button("Show Agent Dock") { DockController.shared.showFromMenu() }
+                    .keyboardShortcut("k", modifiers: [.control, .option])
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload") { model.reload() }
