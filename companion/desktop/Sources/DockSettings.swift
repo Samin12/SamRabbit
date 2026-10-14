@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// "Agent Dock Settings…" (the dock's menu, the menu bar extra): the four shortcuts, each recorded anew with a click
@@ -25,10 +26,15 @@ final class DockSettingsModel: ObservableObject {
     private let live: Bool
     private var monitor: Any?
     private var noteTasks: [DockShortcutAction: Task<Void, Never>] = [:]
+    private var folded: AnyCancellable?
 
     init() {
         center = DockShortcutCenter.shared
         live = true
+        // ⌃⌥M, the "–" or a click on the orb while the window is open: the switch follows.
+        folded = DockController.shared.ui.$minimized.removeDuplicates().sink { [weak self] value in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.minimized = value } }
+        }
     }
 
     /// Snapshots: a fixed state, nothing recorded or changed.
@@ -386,6 +392,9 @@ final class DockSettingsWindowController: NSWindowController, NSWindowDelegate {
 
     // A recording never outlives the window having the keys: the shortcuts come back.
     func windowDidResignKey(_ notification: Notification) { model.cancelRecording() }
+
+    // Back to the window: the dock's switches as the menus left them.
+    func windowDidBecomeKey(_ notification: Notification) { model.reload() }
 
     func windowWillClose(_ notification: Notification) { model.cancelRecording() }
 }
