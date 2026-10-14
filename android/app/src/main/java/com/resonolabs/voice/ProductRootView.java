@@ -1058,9 +1058,13 @@ final class ProductRootView extends FrameLayout {
     boolean voiceNoteFromSideButton(String trigger) {
         if (voiceNote.recording()) {
             voiceNote.finish();
+            Log.i(SideButtonGesture.LOG_TAG, trigger + " -> voice note finished, sending");
             return false;
         }
-        if (voiceNote.active()) return false; // already sending
+        if (voiceNote.active()) {
+            Log.i(SideButtonGesture.LOG_TAG, trigger + " -> the last voice note is still sending");
+            return false;
+        }
         if (ComposeSheet.anyOpen() || DictationSession.anyActive()) {
             // A text sheet is a window of its own above HOME: the note would record hidden behind it,
             // BACK would close the sheet instead of cancelling, and its dictation would share the mic.

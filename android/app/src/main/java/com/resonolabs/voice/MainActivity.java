@@ -267,7 +267,7 @@ public final class MainActivity extends Activity {
         }
         root.post(() -> {
             boolean started = root.voiceNoteFromSideButton(trigger);
-            Log.i(SideButtonGesture.LOG_TAG, trigger + " -> " + (started ? "voice note" : "voice note sent"));
+            Log.i(SideButtonGesture.LOG_TAG, trigger + " -> " + (started ? "voice note" : "no new voice note"));
         });
     }
 
@@ -321,7 +321,7 @@ public final class MainActivity extends Activity {
             root.post(() -> {
                 boolean started = root.voiceNoteFromSideButton(trigger);
                 Log.i(SideButtonGesture.LOG_TAG, trigger + " (after resume) -> "
-                        + (started ? "voice note" : "voice note sent"));
+                        + (started ? "voice note" : "no new voice note"));
             });
         }
     }

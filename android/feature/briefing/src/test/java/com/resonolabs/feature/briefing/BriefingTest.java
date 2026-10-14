@@ -27,7 +27,7 @@ public final class BriefingTest {
                 + "{\"type\":\"remind\",\"label\":\"Remind 4 pm\"}]},"
                 + "{\"id\":\"bi_pay\",\"kind\":\"email\",\"title\":\"Payout failed\",\"actions\":[{\"type\":\"open\"}]}]},"
                 + "{\"id\":\"today\",\"items\":[{\"id\":\"bi_standup\",\"kind\":\"event\",\"title\":\"Standup\","
-                + "\"time\":\"10:00\",\"conflict\":true,\"actions\":[]}]},"
+                + "\"time\":\"10:00 AM\",\"conflict\":true,\"actions\":[]}]},"
                 + "{\"id\":\"agents\",\"items\":[{\"id\":\"bi_agent\",\"kind\":\"agent\",\"title\":\"Fix login\","
                 + "\"threadId\":\"t-1\",\"actions\":[{\"type\":\"open\",\"label\":\"Open\"}]}]}]}}");
     }
@@ -42,7 +42,7 @@ public final class BriefingTest {
         assertEquals(List.of("draft_reply", "remind", "done", "dismiss"), types(dana.buttons()));
         assertEquals(List.of("open", "done", "dismiss"), types(brief.find("bi_pay").buttons()));
         assertEquals("Open", brief.find("bi_pay").actions.get(0).label);
-        assertEquals("10:00", brief.find("bi_standup").chip());
+        assertEquals("10:00 AM", brief.find("bi_standup").chip());
         assertTrue(brief.find("bi_standup").conflict);
         assertEquals("t-1", brief.find("bi_agent").threadId);
         assertEquals(4, brief.openCount());
