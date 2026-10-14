@@ -58,6 +58,9 @@ final class CaptureModel {
     @ObservationIgnored private var closing: Task<Void, Never>?
     /// Each recording has its own number: what an earlier one finishes is ignored.
     @ObservationIgnored private var attempt = 0
+    /// The note the recorder is sending and will say itself (`deliver`); any other the uploader delivers refreshes
+    /// Tasks and Home (`uploaded`).
+    @ObservationIgnored private var delivering: String?
     /// Runs just before the microphone opens: Talk ends, dictation stops.
     @ObservationIgnored var willRecord: (@MainActor () -> Void)?
     /// A note reached the Mac (the app refreshes Tasks: a saved note shows there).
@@ -83,15 +86,19 @@ final class CaptureModel {
     // MARK: - Opening
 
     /// The recorder, from the Voice Note intent (`record`: it records at once) or a link from outside (it waits for a
-    /// tap). The intent again while recording: stop and send (a second press of the Action Button).
+    /// tap). The intent again while recording: stop and send (a second press of the Action Button). The intent while
+    /// the last note is still sending: the next note at once (that one is safe in the outbox and goes on by itself;
+    /// Home's line and Tasks say what it became).
     func open(record: Bool) {
         closing?.cancel()
         withAnimation(.smooth(duration: 0.3)) { presented = true }
         switch phase {
         case .recording:
             if record { stop() }
-        case .starting, .sending:
+        case .starting:
             break
+        case .sending:
+            if record { start() }
         case .idle, .ready, .finished, .problem:
             if record { start() } else { phase = .ready }
         }
@@ -106,6 +113,7 @@ final class CaptureModel {
         }
         reset()
         attempt += 1
+        delivering = nil
         let current = attempt
         phase = .starting
         willRecord?()
@@ -130,6 +138,7 @@ final class CaptureModel {
         guard account.isPaired, !recording, BackgroundNote.microphoneAllowed else { return false }
         reset()
         attempt += 1
+        delivering = nil
         phase = .starting
         willRecord?()
         record(with: makeSource())
@@ -217,6 +226,7 @@ final class CaptureModel {
             return
         }
         phase = .sending
+        delivering = entry.id
         Haptics.tap()
         activity.update(CaptureActivityState(phase: .sending, stoppedAt: .now))
         let current = attempt
@@ -246,8 +256,9 @@ final class CaptureModel {
                 status = await Self.outcome(of: status, client: client)
                 uploader.outbox.record(status)
             }
-            guard attempt == current else { return }
+            // Tasks and Home follow even when the next note started meanwhile (this one no longer says itself).
             onDelivered?(status)
+            guard attempt == current else { return }
             finish(status.notice, stoppedAt: stoppedAt)
         case .failure(let error):
             if error == .unauthorized {
@@ -290,6 +301,7 @@ final class CaptureModel {
 
     private func finish(_ notice: CaptureNotice, stoppedAt: Date) {
         phase = .finished(notice)
+        delivering = nil
         waiting = uploader.waiting
         switch notice.tone {
         case .sent: Haptics.success()
@@ -355,11 +367,11 @@ final class CaptureModel {
         waiting = uploader.waiting
     }
 
-    /// An upload ended (the recorder's or one in the background). The recorder's own note says itself once the Mac
-    /// answered (`deliver`); any other the Mac has now refreshes Tasks.
+    /// An upload ended (the recorder's or one in the background). The note the recorder is sending says itself once
+    /// the Mac answered (`deliver`); any other the Mac has now refreshes Tasks and Home.
     private func uploaded(_ status: CaptureStatus?) {
         waiting = uploader.waiting
-        guard let status, phase != .sending else { return }
+        guard let status, status.captureId != delivering else { return }
         onDelivered?(status)
     }
 

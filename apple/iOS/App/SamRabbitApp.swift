@@ -45,8 +45,8 @@ struct SamRabbitApp: App {
 
 extension SamRabbitApp {
     /// Debug builds: `-SamRabbitIntent note|talk` runs that intent at launch, as the Action Button would (the
-    /// simulator's button can't be set from a test); `-SamRabbitIntentAgain <seconds>` runs it once more after that
-    /// long (the second press: a voice note stops and sends).
+    /// simulator's button can't be set from a test); `-SamRabbitIntentAgain <seconds>[,<seconds>…]` runs it once more
+    /// after each pause (the second press: a voice note stops and sends; a third while it sends: the next note).
     @MainActor
     static func runIntentIfRequested() async {
         #if DEBUG
@@ -61,10 +61,12 @@ extension SamRabbitApp {
         }
         try? await Task.sleep(for: .seconds(1)) // the pairing and the first refresh first
         await run()
-        let again = defaults.double(forKey: "SamRabbitIntentAgain")
-        guard again > 0 else { return }
-        try? await Task.sleep(for: .seconds(again))
-        await run()
+        let pauses = (defaults.string(forKey: "SamRabbitIntentAgain") ?? "").split(separator: ",")
+            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 > 0 }
+        for pause in pauses {
+            try? await Task.sleep(for: .seconds(pause))
+            await run()
+        }
         #endif
     }
 }

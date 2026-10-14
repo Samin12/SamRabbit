@@ -174,6 +174,34 @@ final class VoiceNoteUITests: XCTestCase {
                       "the second press stopped and sent it (the voice never paused)")
     }
 
+    /// The Action Button again while the last note is still sending (the Mac takes its time to say what it did): the
+    /// next note records at once, and the first still reaches the Mac (two notes, two ids), as does the second.
+    func testTheIntentWhileSendingStartsTheNextNote() throws {
+        fake("capture", ["delay": 8.0])
+        let ids = { (self.fakeGet("capture")["uploads"] as? [[String: Any]] ?? []).compactMap { $0["captureId"] as? String } }
+        let before = ids().count
+        try launch(voice: "hold", extra: ["-SamRabbitIntent", "note", "-SamRabbitIntentAgain", "5,1.5"])
+        XCTAssertTrue(app.buttons["capture-stop"].waitForExistence(timeout: 8), "recording from the intent")
+        let state = app.staticTexts["capture-state"]
+        XCTAssertTrue(waitFor(state, containing: "Sending", timeout: 10), "the second press stopped and sends it")
+        XCTAssertTrue(waitUntil(timeout: 5) { ids().count == before + 1 }, "the first note is on its way")
+        snap("phone-note-13-sending")
+        // The third press, while the first still sends: the next note records at once.
+        XCTAssertTrue(waitFor(state, containing: "Recording", timeout: 8), "the next note records: \(state.label)")
+        XCTAssertTrue(app.staticTexts["capture-timer"].exists)
+        snap("phone-note-14-next-note")
+        let first = try XCTUnwrap(ids().last)
+        Thread.sleep(forTimeInterval: 1.2)
+        app.buttons["capture-stop"].tap()
+        XCTAssertTrue(waitFor(app.staticTexts["capture-result"], containing: "Sent", timeout: 25), "the second sent too")
+        let all = ids()
+        XCTAssertEqual(all.count, before + 2, "two notes went")
+        XCTAssertNotEqual(all.last, first, "each with its own id")
+        XCTAssertTrue(waitUntil(timeout: 15) {
+            (self.fakeGet("capture")["captures"] as? [[String: Any]] ?? []).contains { $0["captureId"] as? String == first }
+        }, "the first is on the Mac")
+    }
+
     /// A link from outside the app (`samrabbit://capture` from a web page or a message) opens the recorder but never
     /// turns the microphone on: it waits for a tap.
     func testALinkFromOutsideWaitsForATap() throws {

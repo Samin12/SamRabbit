@@ -99,7 +99,7 @@ change one session; `unsure`: the Mac's process list didn't answer, so neither `
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 261 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 263 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
@@ -135,10 +135,11 @@ itself after a pause ("Sent ✓ — Added to your journal", his words after the 
 the note's id, time and source, Home's voice-notes line); Stop & send of a note the Mac only saved, waiting in Tasks
 with its suggestion, Start task; nothing heard (Try again); the Mac out of reach (kept, Home says it waits, "Tap to
 try now" sends it at once with the same id and the line follows); the intent (`-SamRabbitIntent note`) and its second
-press; a `samrabbit://capture` link waits for a tap and a cancelled note is never sent; the Live Activity's Stop on
+press, and a third while it sends (`-SamRabbitIntentAgain 5,1.5`: the next note records at once, both reach the Mac); a `samrabbit://capture` link waits for a tap and a cancelled note is never sent; the Live Activity's Stop on
 the Lock Screen and the outcome there without his words. `BriefingUITests` (`-SamRabbitBriefAllDay
 YES` lifts the noon limit in debug builds): the brief at the top of Home, Draft reply (a draft, Open draft, the Mac's
 line), Remind me at 2 PM (the menu), Make task (its words first: Cancel starts nothing, Start sends what he typed),
+the headline's time in 12-hour style, Lunch (no link) not "Join Lunch",
 Block 30 min on the clash, Done, Today's conflict, FYI and Dismiss, what it read, an agent's Review
 opening its task, Refresh; no brief yet leaves Home as it was. `WatchVoiceNoteTests`: the Voice Note control's intent
 records and sends itself, Stop & send through the iPhone with the watch's token, the Brief page and Done, Make task's
@@ -481,7 +482,8 @@ waiting for a tap). `CaptureModel` + `CaptureView`: a full-screen recorder that 
 (`AVAudioRecorder`, AAC 16 kHz mono 32 kbps, the watch's `MicrophoneSource` now in `Shared/Voice`; the session claimed
 as `AudioSessionClaims.Holder.capture`, so Talk ends and dictation stops first), a timer and the orb following the
 level, and it stops on 2.5 s of quiet after speech, Stop, the intent again (a second press), a call, or 180 s; under
-0.4 s is dropped. The Live Activity (`CaptureActivityAttributes`, `CaptureLiveActivity`) shows the timer and Stop
+0.4 s is dropped. The intent while the last note still sends records the next one at once (the outbox has the first,
+which goes on by itself; Home and Tasks follow what it became). The Live Activity (`CaptureActivityAttributes`, `CaptureLiveActivity`) shows the timer and Stop
 (`StopVoiceNoteIntent`) on the Lock Screen and the Dynamic Island; with `UIBackgroundModes: audio` it keeps recording
 locked or in the background. The recording goes into the App Group outbox (`CaptureOutbox`: `<id>.m4a` + `<id>.json`,
 kept until the Mac says `received`, retried after 5 s, 30 s, 2 min, then every 10 min, and at once, whatever the
@@ -515,11 +517,14 @@ verb did) and `summary.briefing` (`BriefingOverview`, headline and count). Home 
 until noon (Hark-style: the verb is the button): Do first and Agents as cards with their verbs (Draft reply makes a
 Gmail **draft**, never sent, and offers Open draft in the right account; Make task first shows the words the task
 starts with, editable (`BriefTaskSheet`; the item's title and why, or the Mac's `taskText` when it sends it), and sends
-exactly those as `text`, since they come from an email; Block 30 min; Remind me: in an
+exactly those as `text`, since they come from an email (`BridgeClient.briefingAct` refuses Make task without
+`text`, `task_text_required`, before any request); Block 30 min; Remind me: in an
 hour, at 2 PM, tonight or tomorrow, the item keeping its verbs; Open / Join; an agent's Review opens its task in
-Tasks) and Done / Dismiss, Today's events with the conflict flagged, FYI
+Tasks) and Done / Dismiss, Today's events in the order of the day with the conflict flagged (an event without a
+meeting link isn't "Join …": `shownTitle`), FYI
 folded (a tap opens the email), what it read, and a refresh (one build every five minutes on the Mac). A handled item
-says what the Mac did ("Blocked 30 min at 10:05 AM."). The widgets draw the first open items the iPhone adds to the
+says what the Mac did ("Blocked 30 min at 10:05 AM."). The headline's times read like every other time
+(`Formatting.clockTimes`: the Mac's "first at 16:00" is "first at 4:00 PM" on a 12-hour clock). The widgets draw the first open items the iPhone adds to the
 summary (`with(briefing:)`; Done then Dismiss, in Home's order); the watch has a Brief page (headline, the first verb
 and Done; Make task shows its exact words on a confirm page first) and a complication
 (rectangular, inline). `samrabbit://brief[/<id>]` opens Home at the brief.
