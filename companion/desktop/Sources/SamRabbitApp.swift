@@ -66,6 +66,20 @@ final class AppModel: ObservableObject {
         window.openConversation(conversation)
     }
 
+    /// The window's views from the menus (⌘1–⌘5, Settings…): "home" | "tasks" | "chats" | "calendar" | "settings".
+    func showView(_ view: String) {
+        guard let window else { return }
+        window.show()
+        window.showView(view)
+    }
+
+    /// New Task (⌘N): the window's Tasks view with the composer open.
+    func newTask() {
+        guard let window else { return }
+        window.show()
+        window.newTask()
+    }
+
     /// "Pair iPhone…": the QR code and one-time code for the SamRabbit iPhone app, and the paired devices.
     func openPairing() {
         if pairing == nil { pairing = PairingWindowController() }
@@ -262,6 +276,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let directory = Config.argument("--render-dock-snapshots") {
             MainActor.assumeIsolated { exit(DockSnapshots.render(to: directory)) }
         }
+        // Dev only: load the window against a fake bridge, draw each view and a Talk conversation (MacVoice in
+        // fixture mode) to PNGs, and quit (MainWindowSnapshots.swift).
+        if let directory = Config.argument("--render-window-snapshots") {
+            MainActor.assumeIsolated { MainWindowSnapshots.run(to: directory) }
+            return
+        }
         NSApp.setActivationPolicy(.regular)
         NSApp.appearance = NSAppearance(named: .darkAqua)
         let atLogin = CommandLine.arguments.contains("--login")
@@ -295,20 +315,40 @@ struct SamRabbitApp: App {
     @ObservedObject private var model = AppModel.shared
 
     var body: some Scene {
-        MenuBarExtra {
+        // Not in the window snapshots (a dev run that draws the window to PNGs and quits).
+        MenuBarExtra(isInserted: .constant(!MainWindowSnapshots.requested)) {
             MenuContent(model: model)
         } label: {
             Image(nsImage: model.menuIcon)
         }
         .menuBarExtraStyle(.menu)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { model.showView("settings") }
+                    .keyboardShortcut(",")
+            }
             CommandGroup(replacing: .newItem) {
+                Button("New Task") { model.newTask() }
+                    .keyboardShortcut("n")
                 Button("Open SamRabbit Window") { model.openMainWindow() }
                     .keyboardShortcut("0")
                 Button("Pair iPhone…") { model.openPairing() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Connect ChatGPT…") { model.openChatGPT() }
                 DockAppMenuItems()
+            }
+            CommandGroup(before: .toolbar) {
+                Button("Home") { model.showView("home") }
+                    .keyboardShortcut("1")
+                Button("Tasks") { model.showView("tasks") }
+                    .keyboardShortcut("2")
+                Button("Chats") { model.showView("chats") }
+                    .keyboardShortcut("3")
+                Button("Calendar") { model.showView("calendar") }
+                    .keyboardShortcut("4")
+                Button("Settings") { model.showView("settings") }
+                    .keyboardShortcut("5")
+                Divider()
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload") { model.reload() }

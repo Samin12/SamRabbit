@@ -2,6 +2,8 @@
 # Headless screenshots of the desktop web UI against the fake sync server (dev only).
 #   companion/desktop/dev/shoot.sh <out-dir> [port]
 # Needs a running fake_sync_server.py and its token file in $SR_TOKEN_FILE (never printed).
+# STEPS: shot:<name> open:<conversation> view:<home|tasks|chats|calendar|settings> eval:<file.js> click:<selector>
+#        key:<key> type:<search text> post:<path> viewport:<WxH> wait:<ms> top bottom scroll:<px> errors
 set -euo pipefail
 OUT=${1:?out dir}; PORT=${2:-3790}
 AB=${AGENT_BROWSER:-$HOME/.hermes/tools/agent-browser-0.26.0-darwin-arm64/bin/agent-browser-darwin-arm64}
@@ -31,6 +33,8 @@ for step in ${STEPS:-shot:main}; do
     type) ab fill '#search' "$arg"; ab wait 700 ;;
     post) curl -s -X POST -H "X-SamRabbit-Desktop: $(cat "$TOKEN_FILE")" "$BASE$arg" >/dev/null ;;
     viewport) ab set viewport "${arg%x*}" "${arg#*x}"; ab wait 500 ;;
+    view) js "SamRabbitApp.show('$arg')" >/dev/null; ab wait 900 ;;
+    eval) js "$(cat "$arg")" >/dev/null; ab wait 700 ;;
     errors) "$AB" --session "$S" errors || true ;;
   esac
 done

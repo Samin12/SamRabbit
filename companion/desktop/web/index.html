@@ -7,36 +7,48 @@
   <title>SamRabbit</title>
   <link rel="icon" href="orb.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="views.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
   <div class="backdrop" aria-hidden="true"></div>
   <div class="app" id="app">
-    <aside class="sidebar" aria-label="Conversations">
-      <header class="sidebar-head titlebar">
-        <div class="brand">
-          <img class="brand-orb" src="orb.svg" alt="">
-          <span class="brand-name">SamRabbit</span>
-        </div>
-        <button class="icon-btn pair-btn" id="pair-phone" type="button" title="Pair iPhone…" aria-label="Pair iPhone" hidden></button>
-      </header>
-      <label class="search">
-        <span class="search-icon" id="search-icon"></span>
-        <input id="search" type="search" placeholder="Search conversations" autocomplete="off" spellcheck="false" aria-label="Search conversations">
-        <kbd class="search-kbd">⌘K</kbd>
-      </label>
-      <nav class="conv-list" id="conversation-list" aria-label="Conversation list"></nav>
-      <footer class="sidebar-foot" id="sync-status" aria-live="polite"></footer>
-    </aside>
-    <main class="main">
-      <header class="main-head titlebar" id="main-head"></header>
-      <div class="scroller" id="scroller">
-        <div class="timeline" id="timeline" aria-live="polite"></div>
-        <div class="state" id="state" hidden></div>
-      </div>
-      <button class="jump" id="jump" type="button" hidden>New activity</button>
-      <footer class="main-foot" id="main-foot"></footer>
-    </main>
+    <nav class="nav" id="nav" aria-label="SamRabbit">
+      <header class="nav-head titlebar"></header>
+      <div class="nav-brand" id="nav-brand"></div>
+      <div class="nav-talk" id="nav-talk"></div>
+      <div class="nav-items" id="nav-items" role="tablist" aria-orientation="vertical"></div>
+      <footer class="sidebar-foot nav-foot" id="sync-status" aria-live="polite"></footer>
+    </nav>
+    <div class="views" id="views">
+      <section class="view" id="view-home" data-view="home" aria-label="Home" hidden></section>
+      <section class="view" id="view-tasks" data-view="tasks" aria-label="Tasks" hidden></section>
+      <section class="view view-chats" id="view-chats" data-view="chats" aria-label="Chats" hidden>
+        <aside class="sidebar" aria-label="Conversations">
+          <header class="sidebar-head titlebar">
+            <h1 class="view-title">Chats</h1>
+          </header>
+          <label class="search">
+            <span class="search-icon" id="search-icon"></span>
+            <input id="search" type="search" placeholder="Search conversations" autocomplete="off" spellcheck="false" aria-label="Search conversations">
+            <kbd class="search-kbd">⌘K</kbd>
+          </label>
+          <nav class="conv-list" id="conversation-list" aria-label="Conversation list"></nav>
+        </aside>
+        <main class="main">
+          <header class="main-head titlebar" id="main-head"></header>
+          <div class="scroller" id="scroller">
+            <div class="timeline" id="timeline" aria-live="polite"></div>
+            <div class="state" id="state" hidden></div>
+          </div>
+          <button class="jump" id="jump" type="button" hidden>New activity</button>
+          <footer class="main-foot" id="main-foot"></footer>
+        </main>
+      </section>
+      <section class="view" id="view-calendar" data-view="calendar" aria-label="Calendar" hidden></section>
+      <section class="view" id="view-settings" data-view="settings" aria-label="Settings" hidden></section>
+      <div class="voice-root" id="voice-root" aria-live="polite"></div>
+    </div>
   </div>
   <div class="overlay-root" id="overlay-root"></div>
   <div class="toast-root" id="toast-root" aria-live="polite"></div>

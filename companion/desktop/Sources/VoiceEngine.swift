@@ -34,6 +34,8 @@ final class MacVoice: ObservableObject {
     @Published private(set) var state: State = .idle
     /// The last thing Samin said (its transcript).
     @Published private(set) var heard = ""
+    /// The exchange `heard` belongs to (saying "Yes." twice is two exchanges with the same words).
+    @Published private(set) var heardId: String?
     /// What the assistant says in the current or last reply (streams in).
     @Published private(set) var caption = ""
     /// 0...1: the microphone while listening, the reply while speaking.
@@ -322,8 +324,9 @@ final class MacVoice: ObservableObject {
         case .speaking: state = .speaking
         }
         let exchanges = machine.exchanges
-        let lastHeard = exchanges.last { !$0.heard.isEmpty }?.heard ?? ""
-        if heard != lastHeard { heard = lastHeard }
+        let lastHeard = exchanges.last { !$0.heard.isEmpty }
+        if heard != (lastHeard?.heard ?? "") { heard = lastHeard?.heard ?? "" }
+        if heardId != lastHeard?.id { heardId = lastHeard?.id }
         let say = (machine.live ?? exchanges.last)?.say ?? ""
         if caption != say { caption = say }
         if conversationId != machine.conversationId { conversationId = machine.conversationId }

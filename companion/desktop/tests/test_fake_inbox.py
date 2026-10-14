@@ -96,8 +96,13 @@ class FakeInboxTest(unittest.TestCase):
         self.assertEqual(self.call("GET", "/dev/inbox/fake", token=None)[0], 401)
 
     def test_says_it_is_the_fake(self) -> None:
-        # The dock's smoke driver (it approves and creates tasks) runs only against a server that answers this.
-        self.assertEqual(self.call("GET", "/dev/inbox/fake"), (200, {"fake": True}))
+        # The dock's smoke driver (it approves and creates tasks) runs only against a server that answers this; the
+        # window's tests count the inbox reads with it (a hidden window must not poll).
+        status, body = self.call("GET", "/dev/inbox/fake")
+        self.assertEqual((status, body["fake"]), (200, True))
+        self.call("GET", "/v1/desktop/inbox")
+        self.call("GET", "/v1/desktop/inbox?after=0&wait=0")
+        self.assertEqual(self.call("GET", "/dev/inbox/fake")[1]["polls"], body["polls"] + 2)
 
     def test_inbox_has_every_source_and_status_in_order(self) -> None:
         body = self.inbox()

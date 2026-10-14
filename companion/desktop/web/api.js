@@ -1,5 +1,6 @@
-// The bridge's desktop sync API (CONTRACTS-WAVE3 hop 3). Same origin; the desktop token travels
-// as the sr_desktop cookie that the native app sets before loading this page.
+// The bridge's desktop APIs: conversation sync (CONTRACTS-WAVE3 hop 3), the agent inbox (WAVE6 §A) and the
+// dashboard, calendar, journal and devices twins of the mobile routes (WAVE7 §A). Same origin; the desktop token
+// travels as the sr_desktop cookie that the native app sets before loading this page.
 
 export class ApiError extends Error {
   constructor(status, code, message, detail = '') {
@@ -16,12 +17,20 @@ export class ApiError extends Error {
 }
 
 async function getJSON(path, { signal } = {}) {
+  return requestJSON('GET', path, undefined, { signal });
+}
+
+async function requestJSON(method, path, body, { signal } = {}) {
   let response;
+  const headers = { Accept: 'application/json' };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
   try {
     response = await fetch(path, {
+      method,
       credentials: 'same-origin',
       cache: 'no-store',
-      headers: { Accept: 'application/json' },
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal,
     });
   } catch (error) {
@@ -98,6 +107,144 @@ export const api = {
     return response.text();
   },
 };
+
+/**
+ * `/v1/desktop/inbox/items/<id>[/<action>]`. Ids look like `t3:<id>`; everything outside a safe set is escaped (a `/`
+ * in an id must not become a path separator), the colon stays (as the dock sends it).
+ */
+export function itemPath(id, action) {
+  const escaped = encodeURIComponent(String(id ?? '')).replace(/%3A/gi, ':');
+  return `/v1/desktop/inbox/items/${escaped}${action ? `/${action}` : ''}`;
+}
+
+/** Before the bridge has the desktop twins, the mobile device list answers the desktop token too. */
+function orMobile(call, fallback) {
+  return call().catch((error) => {
+    if (error instanceof ApiError && error.status === 404 && error.code !== 'device_not_found') return fallback();
+    throw error;
+  });
+}
+
+export const desktop = {
+  inbox({ after, wait, signal } = {}) {
+    return getJSON(`/v1/desktop/inbox${query({ after, wait })}`, { signal });
+  },
+  item(id, { signal } = {}) {
+    return getJSON(itemPath(id), { signal });
+  },
+  /** approve {requestId, decision} · answer {requestId, answers} · reply {text} · stop · seen · open */
+  act(id, action, body = {}) {
+    return requestJSON('POST', itemPath(id, action), body);
+  },
+  targets() {
+    return getJSON('/v1/desktop/inbox/targets');
+  },
+  newTask(body) {
+    return requestJSON('POST', '/v1/desktop/inbox/new', body);
+  },
+  summary({ signal } = {}) {
+    return getJSON('/v1/desktop/summary', { signal });
+  },
+  agenda(days = 7, { signal } = {}) {
+    return getJSON(`/v1/desktop/calendar/agenda${query({ days })}`, { signal });
+  },
+  block(minutes, title) {
+    return requestJSON('POST', '/v1/desktop/calendar/block', title ? { minutes, title } : { minutes });
+  },
+  /** The note goes into today's journal word for word: only ever from an explicit "Add" by Samin. */
+  journal(text) {
+    return requestJSON('POST', '/v1/desktop/journal', { text });
+  },
+  devices() {
+    return orMobile(() => getJSON('/v1/desktop/devices'), () => getJSON('/v1/mobile/devices'));
+  },
+  unpair(deviceId) {
+    const id = encodeURIComponent(deviceId);
+    return orMobile(() => requestJSON('DELETE', `/v1/desktop/devices/${id}`),
+      () => requestJSON('DELETE', `/v1/mobile/devices/${id}`));
+  },
+  chatgpt() {
+    return getJSON('/v1/assistant/chatgpt/status');
+  },
+};
+
+const INBOX_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+
+/**
+ * The inbox long poll: `GET /v1/desktop/inbox?after=<revision>&wait=25`, again as soon as it answers; backs off on
+ * errors (30 s at least when the bridge has no inbox or refuses the token). `fetchInbox` and `sleep` are injectable
+ * for the tests.
+ */
+export class InboxPoller {
+  constructor({ onInbox, onError, fetchInbox = (options) => desktop.inbox(options), sleep, wait = 25 }) {
+    this.onInbox = onInbox;
+    this.onError = onError;
+    this.fetchInbox = fetchInbox;
+    this.sleep = sleep || ((ms) => new Promise((resolve) => { this.timer = setTimeout(resolve, ms); }));
+    this.wait = wait;
+    this.revision = null;
+    this.attempt = 0;
+    this.running = false;
+    this.controller = null;
+    this.generation = 0;
+  }
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this.loop(++this.generation);
+  }
+
+  stop() {
+    this.running = false;
+    this.generation += 1;
+    clearTimeout(this.timer);
+    if (this.controller) this.controller.abort();
+  }
+
+  /** Ask now (after an action), without waiting for the long poll to come back. */
+  poke() {
+    if (!this.running) return;
+    this.stop();
+    this.revision = null;
+    this.attempt = 0;
+    this.start();
+  }
+
+  /** The delay before the next try after a failure (ms). */
+  static backoff(attempt, status) {
+    const delay = INBOX_BACKOFF_MS[Math.min(attempt, INBOX_BACKOFF_MS.length - 1)];
+    return [401, 403, 404].includes(status) ? Math.max(delay, 30000) : delay;
+  }
+
+  async loop(generation) {
+    while (this.running && generation === this.generation) {
+      const asked = Date.now();
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      this.controller = controller;
+      try {
+        const first = this.revision == null;
+        const body = await this.fetchInbox({
+          after: first ? undefined : this.revision, wait: first ? 0 : this.wait, signal: controller?.signal,
+        });
+        if (generation !== this.generation) return;
+        this.attempt = 0;
+        const unchanged = body && body.revision === this.revision;
+        this.revision = body && Number.isFinite(body.revision) ? body.revision : null;
+        this.onInbox?.(body);
+        // A bridge that answers a long poll at once without news must not be asked in a tight loop.
+        if (unchanged && Date.now() - asked < 500) await this.sleep(1000);
+      } catch (error) {
+        if (generation !== this.generation || (error && error.name === 'AbortError')) return;
+        this.revision = null;
+        this.onError?.(error);
+        const delay = InboxPoller.backoff(this.attempt, error && error.status);
+        this.attempt += 1;
+        await this.sleep(delay);
+      }
+    }
+  }
+}
 
 /** Normalizes one SSE payload: either the event itself or {event, cursor}. */
 export function unwrapStreamPayload(data) {

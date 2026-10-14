@@ -19,8 +19,13 @@ It serves, on 127.0.0.1 only:
   ``GET /v1/desktop/inbox/items/<id>``, ``POST …/items/<id>/approve|answer|reply|stop|seen|open``,
   ``GET /v1/desktop/inbox/targets``, ``POST /v1/desktop/inbox/new``, from ``samples/inbox.json`` (every source and
   status, long titles, an approval with three options, a question); dev controls ``POST /dev/inbox/needs-you``
-  (a new approval arrives), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake`` (``{"fake": true}``: the dock's
-  smoke driver runs only against a server that answers it).
+  (a new approval arrives), ``POST /dev/inbox/reset`` and ``GET /dev/inbox/fake`` (``{"fake": true, "polls"}``: the
+  dock's smoke driver runs only against a server that answers it; ``polls`` counts the inbox reads since start).
+* the SamRabbit window's desktop twins of the mobile routes (CONTRACTS-WAVE7 §A, ``fake_desktop.py``):
+  ``GET /v1/desktop/summary``, ``GET /v1/desktop/calendar/agenda?days=``, ``POST /v1/desktop/calendar/block``,
+  ``POST /v1/desktop/journal`` (kept in memory), ``GET|DELETE /v1/desktop/devices[/<id>]`` and
+  ``GET /v1/assistant/chatgpt/status``, with a week of meetings around now and a paired iPhone and watch; dev
+  controls ``POST /dev/desktop {calendar?, chatgpt?, r1Online?, journal?}`` and ``POST /dev/desktop/reset``.
 
 The sample data is realistic: ten conversations over the last month with cards, a Mac screenshot,
 an R1 camera photo, T3 updates, tool calls, background results and generated UIs (Chart.js from
@@ -52,6 +57,7 @@ sys.path.append(HERE)  # fake_assistant.py (python3 -I leaves the script's folde
 import samrabbit_app  # noqa: E402  (the real /app module of the bridge)
 
 from fake_assistant import FakeAssistant  # noqa: E402  (the desktop voice routes)
+from fake_desktop import FakeDesktop  # noqa: E402  (the window's summary, calendar, journal and devices)
 
 MINUTE = 60_000
 HOUR = 60 * MINUTE
@@ -576,6 +582,8 @@ class InboxFixtures:
         self.path = path
         self.cond = threading.Condition()
         self.created = 0
+        # Inbox reads (long polls included) since start: the window's tests check that a hidden window doesn't poll.
+        self.polls = 0
         self.reset()
         if tick > 0:
             threading.Thread(target=self.ticker, args=(tick,), daemon=True).start()
@@ -616,6 +624,7 @@ class InboxFixtures:
 
     def wait(self, after: Optional[int], wait: float) -> Dict[str, Any]:
         with self.cond:
+            self.polls += 1
             if after is not None and after == self.revision and wait > 0:
                 self.cond.wait_for(lambda: self.revision != after, timeout=wait)
         return self.snapshot()
@@ -775,7 +784,8 @@ def handle_inbox(handler: "FakeHandler", method: str, path: str, query: Dict[str
     try:
         if method == "GET" and path == "/dev/inbox/fake":
             # The dock's smoke driver approves and creates tasks: it runs only when the server answers this.
-            return handler.json(200, {"fake": True})
+            with inbox.cond:
+                return handler.json(200, {"fake": True, "polls": inbox.polls})
         if method == "POST" and path == "/dev/inbox/needs-you":
             inbox.needs_you()
             return handler.json(202, {"ok": True})
@@ -830,6 +840,7 @@ class FakeServer(ThreadingHTTPServer):
         self.live = live
         self.site = site
         self.assistant = FakeAssistant()
+        self.desktop = FakeDesktop(store.conversations)
         super().__init__(address, FakeHandler)
 
 
@@ -845,6 +856,9 @@ class FakeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self.route("POST")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self.route("DELETE")
 
     def route(self, method: str) -> None:
         split = urlsplit(self.path)
@@ -862,6 +876,8 @@ class FakeHandler(BaseHTTPRequestHandler):
             return self.server.assistant.handle(self, method, path, split.query)
         if path.startswith("/v1/desktop/inbox") or path.startswith("/dev/inbox/"):
             return handle_inbox(self, method, path, query)
+        if FakeDesktop.handles(path):
+            return self.server.desktop.handle(self, method, path, split.query)
         if method == "POST" and path == "/dev/live":
             self.server.live.start(end_after=False)
             return self.json(202, {"ok": True})
