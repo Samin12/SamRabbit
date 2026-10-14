@@ -183,23 +183,12 @@ struct DockPill: View {
     }
 }
 
-/// A small breathing dot for "working".
+/// The small dot before "working" (still: the pill costs nothing at rest).
 struct DockWorkingDot: View {
     let size: CGFloat
-    @Environment(\.dockRender) private var render
 
     var body: some View {
-        if render.isSnapshot {
-            dot(0.85)
-        } else {
-            TimelineView(.periodic(from: .now, by: 1 / 8)) { context in
-                dot(0.55 + 0.4 * (0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 2.4)))
-            }
-        }
-    }
-
-    private func dot(_ opacity: Double) -> some View {
-        Circle().fill(Palette.pale.opacity(opacity)).frame(width: size, height: size)
+        Circle().fill(Palette.pale.opacity(0.85)).frame(width: size, height: size)
     }
 }
 

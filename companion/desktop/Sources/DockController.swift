@@ -15,6 +15,8 @@ final class DockPanelWindow: NSPanel {
 
     let role: Role
     weak var controller: DockController?
+    /// Set when the list comes on screen: the next time it becomes key it keeps the keys itself.
+    var keepKeysOnNextKey = false
 
     init(role: Role) {
         self.role = role
@@ -27,7 +29,8 @@ final class DockPanelWindow: NSPanel {
         level = .statusBar
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         hidesOnDeactivate = false
-        becomesKeyOnlyIfNeeded = true
+        // A click in the list gives it the keys (J/K, E, R…); the pill takes them only for a voice conversation.
+        becomesKeyOnlyIfNeeded = role == .pill
         isExcludedFromWindowsMenu = true
         isReleasedWhenClosed = false
         animationBehavior = .none
@@ -39,6 +42,15 @@ final class DockPanelWindow: NSPanel {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// AppKit gives the first text field the keys when a window first becomes key; the list keeps them (J/K, E, R…)
+    /// unless a field was asked for (N, R, ⌃⌥K) or clicked, which happens right after this.
+    override func becomeKey() {
+        super.becomeKey()
+        guard keepKeysOnNextKey else { return }
+        keepKeysOnNextKey = false
+        if firstResponder is NSTextView { makeFirstResponder(nil) }
+    }
 
     override func sendEvent(_ event: NSEvent) {
         if let controller, MainActor.assumeIsolated({ controller.handle(event, in: self) }) { return }
@@ -112,6 +124,7 @@ final class DockController: NSObject {
     private var monitors: [Any] = []
     private var observers: [NSObjectProtocol] = []
     private var voiceSubscription: AnyCancellable?
+    private var editingSubscription: AnyCancellable?
     private var started = false
     private var visible = false
     private var summoned = false
@@ -124,8 +137,11 @@ final class DockController: NSObject {
     private var pillControls: [CGRect] = []
     private var overPill = false
     private var overList = false
+    private var otherScreenTicks = 0
     /// The list should take the keys as soon as it is on screen (⌃⌥K, a click on the pill).
     private var listWantsKey = false
+    /// A field asked for the keys (⌃⌥K → compose): revealing the list must not take them back.
+    private var fieldWanted = false
 
     private struct Press {
         var start: CGPoint
@@ -221,6 +237,10 @@ final class DockController: NSObject {
         }
         voiceSubscription = voice.$state.sink { [weak self] state in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.voiceChanged(active: state != .idle) } }
+        }
+        // While a field has the keys, a list that opened on hover doesn't close under the pointer.
+        editingSubscription = ui.$editing.removeDuplicates().sink { [weak self] editing in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.send(.editing(editing != nil)) } }
         }
         // A click anywhere outside the dock closes a list that is open. Mouse-down monitoring needs no permission.
         if let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
@@ -445,7 +465,14 @@ final class DockController: NSObject {
     private func followPointer() {
         guard visible, spot == nil, press == nil, !expansion.isOpen, !voiceActive,
               let here = DockPlacement.screen(containing: NSEvent.mouseLocation, in: screens()),
-              here.id != screen?.id, here.frame.contains(NSEvent.mouseLocation) else { return }
+              here.id != screen?.id, here.frame.contains(NSEvent.mouseLocation) else {
+            otherScreenTicks = 0
+            return
+        }
+        // Passing through another screen moves nothing; staying there for two checks does.
+        otherScreenTicks += 1
+        guard otherScreenTicks >= 2 else { return }
+        otherScreenTicks = 0
         screen = here
         fraction = 0.5
         applyScale()
@@ -486,11 +513,26 @@ final class DockController: NSObject {
             case .show:
                 openList()
             case .hide:
+                Log.write("dock: list closed (\(Self.describe(event)))")
                 closeList()
             }
         }
         if ui.expanded != expansion.isOpen { ui.expanded = expansion.isOpen }
         watchPointer()
+    }
+
+    private static func describe(_ event: DockExpansion.Event) -> String {
+        switch event {
+        case .pointer: return "pointer left"
+        case .closeTimer: return "pointer left"
+        case .clickPill: return "pill clicked"
+        case .escape: return "escape"
+        case .clickOutside: return "click elsewhere"
+        case .dragStarted: return "drag"
+        case .voiceStarted: return "voice"
+        case .hidden: return "dock hidden"
+        default: return "\(event)"
+        }
     }
 
     private func openList() {
@@ -505,6 +547,8 @@ final class DockController: NSObject {
         guard let list, expansion.isOpen, visible else { return }
         placeList()
         list.alphaValue = 0
+        list.keepKeysOnNextKey = !fieldWanted && ui.focusRequest == nil
+        fieldWanted = false
         list.orderFrontRegardless()
         if listWantsKey {
             listWantsKey = false
@@ -518,6 +562,7 @@ final class DockController: NSObject {
 
     private func closeList() {
         listWantsKey = false
+        fieldWanted = false
         ui.menu = nil
         ui.expandedRow = nil
         ui.focusRequest = nil
@@ -774,7 +819,10 @@ final class DockController: NSObject {
         summoned = true
         refresh()
         send(.summon)
-        if focusCompose { ui.focusRequest = .compose }
+        if focusCompose {
+            fieldWanted = true
+            ui.focusRequest = .compose
+        }
         takeKeys()
     }
 

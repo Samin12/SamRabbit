@@ -303,6 +303,17 @@ enum DockSmoke {
         step(3, "pill")
         step(3.5, "summon") { controller.summon(focusCompose: false) }
         step(5, "panel")
+        // J, J, K through the list window's own event path (the same NSEvent route a real key takes once the panel is
+        // key); nothing is posted to the system.
+        step(5.2, "keys") {
+            for (character, code) in [("j", UInt16(38)), ("j", UInt16(38)), ("k", UInt16(40))] {
+                guard let list = controller.list,
+                      let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                   windowNumber: list.windowNumber, context: nil, characters: character,
+                                                   charactersIgnoringModifiers: character, isARepeat: false, keyCode: code) else { continue }
+                list.sendEvent(event)
+            }
+        }
         step(5.5, "expand") {
             if let item = store.items.first(where: { $0.supports("approve") && !$0.pending.approvals.isEmpty }) {
                 approved = item.id
@@ -332,6 +343,11 @@ enum DockSmoke {
         step(23, "hidden")
         step(23.5, "unhide") { controller.clearHide() }
         step(25, "back")
+        step(25.5, "hotkey") {
+            controller.perform(.collapsePanel)
+            controller.summon(focusCompose: true)
+        }
+        step(27, "hotkey-compose")
 
         for (at, name, body) in steps {
             DispatchQueue.main.asyncAfter(deadline: .now() + at) {
@@ -342,14 +358,15 @@ enum DockSmoke {
                 func describe(_ window: NSWindow?) -> String {
                     guard let window else { return "none" }
                     let f = window.frame
+                    let responder = window.firstResponder.map { $0 is NSTextView ? "text field" : "\(type(of: $0))" } ?? "none"
                     return "\(window.isVisible ? "visible" : "hidden") \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))"
-                        + " level=\(window.level.rawValue) key=\(window.isKeyWindow)"
+                        + " level=\(window.level.rawValue) key=\(window.isKeyWindow) keys=\(responder)"
                 }
                 Log.write("dock smoke \(name): pill \(describe(pill)); list \(describe(list)); front app=\(NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? "SamRabbit" : "other");"
                           + " main window visible=\(main?.isVisible ?? false); needs you \(store.needsYouCount), working"
-                          + " \(store.workingCount), items \(store.items.count); expanded=\(ui.expanded); voice=\(MacVoice.shared.state)")
+                          + " \(store.workingCount), items \(store.items.count); expanded=\(ui.expanded); selected=\(ui.selected ?? "-"); voice=\(MacVoice.shared.state)")
                 draw(controller, name: name, to: out)
-                if name == "back" { Log.write("dock smoke done") }
+                if name == "hotkey-compose" { Log.write("dock smoke done") }
             }
         }
     }
