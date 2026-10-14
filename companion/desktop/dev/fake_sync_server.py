@@ -26,6 +26,12 @@ It serves, on 127.0.0.1 only:
   ``POST /v1/desktop/journal`` (kept in memory), ``GET|DELETE /v1/desktop/devices[/<id>]`` and
   ``GET /v1/assistant/chatgpt/status``, with a week of meetings around now and a paired iPhone and watch; dev
   controls ``POST /dev/desktop {calendar?, chatgpt?, r1Online?, journal?}`` and ``POST /dev/desktop/reset``.
+* voice notes and the morning brief (CONTRACTS-WAVE8 §A2, §A3): ``POST /v1/desktop/capture``,
+  ``GET /v1/desktop/capture/<id>?wait=``, ``GET /v1/desktop/captures``, ``POST …/captures/<id>/act``
+  (``fake_capture.py``: canned outcomes, nothing journaled or filed; dev ``/dev/capture``), and
+  ``GET /v1/desktop/briefing``, ``POST …/briefing/refresh``, ``POST …/briefing/items/<id>/act`` (``fake_briefing.py``:
+  ``samples/briefing.json`` moved to today, no mail read or drafted; dev ``/dev/briefing``); the summary carries
+  ``briefing`` and ``captures``.
 
 The sample data is realistic: ten conversations over the last month with cards, a Mac screenshot,
 an R1 camera photo, T3 updates, tool calls, background results and generated UIs (Chart.js from
@@ -57,6 +63,8 @@ sys.path.append(HERE)  # fake_assistant.py (python3 -I leaves the script's folde
 import samrabbit_app  # noqa: E402  (the real /app module of the bridge)
 
 from fake_assistant import FakeAssistant  # noqa: E402  (the desktop voice routes)
+from fake_briefing import FakeBriefing  # noqa: E402  (the morning brief)
+from fake_capture import FakeCapture  # noqa: E402  (voice notes)
 from fake_desktop import FakeDesktop  # noqa: E402  (the window's summary, calendar, journal and devices)
 
 MINUTE = 60_000
@@ -840,7 +848,10 @@ class FakeServer(ThreadingHTTPServer):
         self.live = live
         self.site = site
         self.assistant = FakeAssistant()
-        self.desktop = FakeDesktop(store.conversations)
+        self.capture = FakeCapture()
+        self.briefing = FakeBriefing()
+        self.desktop = FakeDesktop(store.conversations,
+                                   extras=lambda: {"briefing": self.briefing.summary(), "captures": self.capture.summary()})
         super().__init__(address, FakeHandler)
 
 
@@ -876,6 +887,10 @@ class FakeHandler(BaseHTTPRequestHandler):
             return self.server.assistant.handle(self, method, path, split.query)
         if path.startswith("/v1/desktop/inbox") or path.startswith("/dev/inbox/"):
             return handle_inbox(self, method, path, query)
+        if FakeCapture.handles(path):
+            return self.server.capture.handle(self, method, path, split.query)
+        if FakeBriefing.handles(path):
+            return self.server.briefing.handle(self, method, path, split.query)
         if FakeDesktop.handles(path):
             return self.server.desktop.handle(self, method, path, split.query)
         if method == "POST" and path == "/dev/live":

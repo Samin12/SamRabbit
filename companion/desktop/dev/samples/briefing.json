@@ -1,0 +1,121 @@
+{
+  "_comment": "A morning brief as the bridge's GET /v1/desktop/briefing answers it (CONTRACTS-WAVE8 §A3), for the fake server, the dock snapshots and the tests. Invented people and mail. Times are moved so that `base` is the moment the fake starts (the date becomes today's).",
+  "base": "2026-10-14T07:01:00-04:00",
+  "briefing": {
+    "available": true,
+    "status": "ready",
+    "date": "2026-10-14",
+    "revision": 3,
+    "updatedAt": "2026-10-14T07:01:00-04:00",
+    "headline": "3 things need you · 4 meetings, first at 9:30 · 1 agent waiting",
+    "spoken": "Morning. Three things need you: Dana needs the SOW confirmed by Thursday, Monday's Stripe payout failed, and the dentist clashes with the design review tomorrow. Four meetings today, the first is standup at 9:30. One agent is waiting for your approval.",
+    "needsYou": 3,
+    "sections": [
+      {
+        "kind": "doFirst",
+        "title": "Do first",
+        "items": [
+          {
+            "id": "bi_7f3a2c91d0e4b512",
+            "kind": "email",
+            "account": "business",
+            "accountEmail": "sam@example.com",
+            "title": "Reply to Dana: confirm the SOW by Thursday",
+            "why": "Dana Whitfield needs it signed by Thu; she asked twice",
+            "suggestion": "Draft a reply confirming Thursday 2 pm",
+            "actions": [
+              {"type": "draft_reply", "label": "Draft reply"},
+              {"type": "remind", "label": "Remind me"}
+            ],
+            "state": "open",
+            "priority": 1,
+            "url": "https://mail.google.com/mail/u/0/#inbox/18f2a9c3b7e4d001"
+          },
+          {
+            "id": "bi_2b81e05c94af7d36",
+            "kind": "email",
+            "account": "business",
+            "accountEmail": "sam@example.com",
+            "title": "Fix the failed Stripe payout",
+            "why": "Stripe: the bank declined Monday’s $1,240 payout",
+            "suggestion": "Update the bank details in Stripe today",
+            "actions": [
+              {"type": "open", "label": "Open"},
+              {"type": "make_task", "label": "Make task"}
+            ],
+            "state": "open",
+            "priority": 2,
+            "url": "https://mail.google.com/mail/u/0/#inbox/18f2a77d0c3e9a42"
+          },
+          {
+            "id": "bi_c4d90a1f6e2b8873",
+            "kind": "conflict",
+            "title": "Move the dentist or the design sync",
+            "why": "Both are tomorrow at 4:00 PM",
+            "suggestion": "Block 45 min before the sync instead",
+            "actions": [
+              {"type": "block_time", "label": "Block time"},
+              {"type": "remind", "label": "Remind me"}
+            ],
+            "state": "open",
+            "priority": 3,
+            "conflict": true
+          }
+        ]
+      },
+      {
+        "kind": "today",
+        "title": "Today",
+        "items": [
+          {"id": "bi_ev_standup", "kind": "event", "title": "Standup", "why": "Google Meet", "startsAt": "2026-10-14T09:30:00-04:00", "endsAt": "2026-10-14T09:45:00-04:00", "actions": [], "state": "open"},
+          {"id": "bi_ev_review", "kind": "event", "title": "Design review: Agent Dock and the Mac window", "why": "Priya sent the deck last night", "startsAt": "2026-10-14T11:00:00-04:00", "endsAt": "2026-10-14T11:45:00-04:00", "actions": [], "state": "open"},
+          {"id": "bi_ev_one_on_one", "kind": "event", "title": "1:1 with Priya", "why": "Zoom", "startsAt": "2026-10-14T14:00:00-04:00", "endsAt": "2026-10-14T14:30:00-04:00", "actions": [], "state": "open"},
+          {"id": "bi_ev_gym", "kind": "event", "title": "Gym", "why": "Equinox Hudson Yards", "startsAt": "2026-10-14T18:30:00-04:00", "endsAt": "2026-10-14T19:30:00-04:00", "actions": [], "state": "open"}
+        ]
+      },
+      {
+        "kind": "agents",
+        "title": "Agents",
+        "items": [
+          {
+            "id": "bi_a19e44d07c2f65b0",
+            "kind": "agent",
+            "title": "Approve the pairing tests",
+            "why": "T3 · SamRabbit wants to run npm test for the pairing fix",
+            "inboxItemId": "t3:th_pairing_redirect",
+            "actions": [{"type": "open", "label": "Open"}],
+            "state": "open"
+          }
+        ]
+      },
+      {
+        "kind": "fyi",
+        "title": "FYI",
+        "items": [
+          {
+            "id": "bi_5e0b7a3d21c98f44",
+            "kind": "fyi",
+            "account": "personal",
+            "accountEmail": "sam.personal@example.com",
+            "title": "Your flight to SFO on Saturday is confirmed",
+            "why": "United UA 1532 · JFK 8:05 AM → SFO 11:30 AM",
+            "actions": [{"type": "open", "label": "Open"}],
+            "state": "open",
+            "url": "https://mail.google.com/mail/u/0/#inbox/18f29e5a4b1c7d20"
+          },
+          {
+            "id": "bi_9d2c6f81a7e03b55",
+            "kind": "fyi",
+            "account": "business",
+            "title": "Bookedin weekly numbers are in",
+            "why": "Leads up 18% week over week",
+            "actions": [{"type": "open", "label": "Open"}],
+            "state": "open",
+            "url": "https://mail.google.com/mail/u/0/#inbox/18f2a1b6c9d0e377"
+          }
+        ]
+      }
+    ],
+    "skipped": {"promotions": 182, "business": 64, "personal": 41}
+  }
+}
