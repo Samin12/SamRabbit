@@ -3,11 +3,12 @@ import WebKit
 
 /// Dev only: `--render-window-snapshots <dir> --base-url http://127.0.0.1:<fake>/app/ --token-file <token>` with
 /// `SAMRABBIT_VOICE_FIXTURE=<wav>` loads the main window against the fake sync server, off screen (no Dock icon, no
-/// menu bar extra, nothing on any display), draws Home, Tasks, Chats, Calendar and Settings to PNGs, then clicks the
-/// page's Talk button: the request goes through the WKScriptMessageHandler bridge to MacVoice (fixture microphone, the
-/// reply rendered silently into memory), whose state comes back into the page's live transcript, which is drawn too;
-/// then the page's End button ends it. `window-smoke.json` lists what the bridge received and pushed. It refuses the
-/// real bridge (port 3780 or a server that doesn't answer `/dev/inbox/fake`) and a real microphone.
+/// menu bar extra, nothing on any display), draws Home, Tasks, Chats, Calendar and Settings to PNGs, then presses the
+/// page's Talk button with the mouse (a real down and up, as a finger does: not a script's click): the request goes
+/// through the WKScriptMessageHandler bridge to MacVoice (fixture microphone, the reply rendered silently into memory),
+/// whose state comes back into the page's live transcript, which is drawn too; then the voice panel's End button is
+/// pressed while the reply streams. `window-smoke.json` lists what the bridge received and pushed. It refuses the real
+/// bridge (port 3780 or a server that doesn't answer `/dev/inbox/fake`) and a real microphone.
 @MainActor
 enum MainWindowSnapshots {
     nonisolated static var requested: Bool { Config.argument("--render-window-snapshots") != nil }
@@ -77,14 +78,17 @@ enum MainWindowSnapshots {
 
             // Talk: the page's button → the bridge → MacVoice (fixture) → the bridge → the page's transcript.
             let voice = MacVoice.shared
-            await evaluate("SamRabbitApp.show('home'); document.querySelector('.talk-btn').click()")
+            await evaluate("SamRabbitApp.show('home')")
+            await pause(0.6)
+            await press(".talk-btn .talk-label")
             let spoke = await waitFor(30) { voice.state == .speaking && !voice.caption.isEmpty }
             if !spoke { problems.append("MacVoice never spoke (state \(voice.state))") }
             await pause(1.2)
             await shoot("window-talk")
             let transcript = await evaluate("document.querySelector('.voice-transcript') ? document.querySelector('.voice-transcript').innerText : ''") as? String ?? ""
             let talkLabel = await evaluate("document.querySelector('.talk-btn').innerText") as? String ?? ""
-            await evaluate("document.querySelector('.voice-btn.danger') && document.querySelector('.voice-btn.danger').click()")
+            // While it speaks: the level and the caption are pushed under the pointer the whole time.
+            await press(".voice-panel .voice-btn.danger")
             let ended = await waitFor(15) { voice.state == .idle }
             if !ended { problems.append("the conversation didn't end from the page (state \(voice.state))") }
             await pause(1.0)
@@ -107,6 +111,30 @@ enum MainWindowSnapshots {
         }
 
         // MARK: steps
+
+        /// A mouse down in the middle of the element, 110 ms, and a mouse up at the same spot.
+        func press(_ selector: String) async {
+            let script = "(() => { const el = document.querySelector('\(selector)'); if (!el) return null; "
+                + "const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; })()"
+            guard let window = controller.window, let box = await evaluate(script) as? [Double], box.count == 4 else {
+                problems.append("nothing to press at \(selector)")
+                return
+            }
+            let web = controller.webView
+            let (x, y) = (box[0] + box[2] / 2, box[1] + box[3] / 2)  // the page's CSS pixels, from the top left
+            let inWindow = web.convert(NSPoint(x: x, y: web.isFlipped ? y : web.bounds.height - y), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(with: type, location: inWindow, modifierFlags: [],
+                                                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                  context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) {
+                    // Straight to the web view: this app isn't active (it must not take the focus from Samin), and an
+                    // inactive window takes a first click as "come forward", not as a click.
+                    if type == .leftMouseDown { web.mouseDown(with: event) } else { web.mouseUp(with: event) }
+                }
+                if type == .leftMouseDown { await pause(0.11) }
+            }
+            await pause(0.2)
+        }
 
         @discardableResult
         func evaluate(_ script: String) async -> Any? {

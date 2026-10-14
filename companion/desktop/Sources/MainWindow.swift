@@ -227,10 +227,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
         }
     }
 
-    func windowWillClose(_ notification: Notification) { Log.write("window closed (SamRabbit keeps running in the menu bar)") }
+    func windowWillClose(_ notification: Notification) {
+        Log.write("window closed (SamRabbit keeps running in the menu bar)")
+        bridge.windowChanged(closing: true)
+    }
+    func windowDidMiniaturize(_ notification: Notification) { bridge.windowChanged() }
+    func windowDidDeminiaturize(_ notification: Notification) { bridge.windowChanged() }
     func windowDidResize(_ notification: Notification) { layoutTrafficLights() }
     func windowDidBecomeKey(_ notification: Notification) {
         layoutTrafficLights()
+        bridge.windowChanged()
         bridge.windowBecameKey()
     }
     func windowDidResignKey(_ notification: Notification) { layoutTrafficLights() }
@@ -242,6 +248,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, WKNaviga
         if !window.isVisible { Log.write("window shown") }
         window.makeKeyAndOrderFront(nil)
         layoutTrafficLights()
+        bridge.windowChanged()
         if !loaded && !loading { attemptLoad() }
     }
 

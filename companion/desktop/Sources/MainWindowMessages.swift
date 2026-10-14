@@ -53,6 +53,8 @@ struct WindowVoiceState: Equatable {
     var state = "idle"
     var error: String?
     var heard = ""
+    /// The exchange `heard` belongs to: the same words said again are a new line (web/voice.js).
+    var heardId: String?
     var caption = ""
     /// 0...1, rounded to a hundredth (the page only moves the orb with it).
     var level = 0.0
@@ -67,7 +69,7 @@ struct WindowVoiceState: Equatable {
 
     var json: [String: Any] {
         [
-            "state": state, "error": error ?? NSNull(), "heard": heard, "caption": caption,
+            "state": state, "error": error ?? NSNull(), "heard": heard, "heardId": heardId ?? NSNull(), "caption": caption,
             "level": (min(1, max(0, level)) * 100).rounded() / 100,
             "micMuted": micMuted, "wakeArmed": wakeArmed, "wakeEnabled": wakeEnabled,
             "wakeProblem": wakeProblem ?? NSNull(), "brain": brain ?? NSNull(),
@@ -120,6 +122,17 @@ struct WindowPushThrottle {
     }
 }
 
+/// The Agent Dock as the window's Settings shows it. `on` is its switch: the dock is on and not hidden for a while (what
+/// it actually does, not only its setting); `turnedOn` is its setting (on but hidden for now: "Hidden for now");
+/// `canCustomize`: the dock has a shortcut settings window to open.
+struct WindowDockState: Equatable {
+    var on: Bool
+    var turnedOn: Bool
+    var canCustomize = false
+
+    var json: [String: Any] { ["enabled": on, "turnedOn": turnedOn, "canCustomize": canCustomize] }
+}
+
 enum WindowScript {
     /// `window.SamRabbitApp.native(<patch>)`, safe to evaluate in the page (JSON, which is valid JavaScript; the
     /// page may still be loading, hence the guard).
@@ -132,11 +145,16 @@ enum WindowScript {
         return "window.SamRabbitApp && window.SamRabbitApp.native(\(text))"
     }
 
-    /// The shortcuts Settings lists (`{id, label, keys, problem}`): talk from MacVoice, the dock's compose key.
+    /// One shortcut as Settings lists it: `{id, label, keys, problem}` ("" keys: none works).
+    static func shortcut(id: String, label: String, keys: String, problem: String?) -> [String: Any] {
+        ["id": id, "label": label, "keys": keys, "problem": problem ?? NSNull()]
+    }
+
+    /// The shortcuts Settings lists: talk from MacVoice, the dock's compose key.
     static func shortcuts(talk: String, talkProblem: String?, compose: String = "⌃⌥K") -> [[String: Any]] {
         [
-            ["id": "talk", "label": "Talk to SamRabbit", "keys": talk, "problem": talkProblem ?? NSNull()],
-            ["id": "compose", "label": "Open the Agent Dock on a new task", "keys": compose, "problem": NSNull()],
+            shortcut(id: "talk", label: "Talk to SamRabbit", keys: talk, problem: talkProblem),
+            shortcut(id: "compose", label: "Open the Agent Dock on a new task", keys: compose, problem: nil),
         ]
     }
 }

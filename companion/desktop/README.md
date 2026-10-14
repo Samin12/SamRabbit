@@ -43,23 +43,34 @@ A sidebar (the orb, **Talk**, and the views) and five views (CONTRACTS-WAVE7 §B
   Dock (on/off, its shortcut), About.
 - **Talk** (the sidebar button, the Home action): the conversation is MacVoice's — the same one ⌃⌥Space, "Hey Rabbit"
   and the dock start. The page asks the shell (`{type: "voice", action: start|end|mute|unmute|stopSpeaking}`) and
-  draws what the shell pushes back: a glass panel with the orb, Listening / Thinking / Speaking, your lines and the
-  reply as it streams, mute, stop speaking, end (Esc). It stays a few seconds after the end, with Open in Chats.
-  There is no audio in the page.
-- **Keys**: ⌘1–⌘5 views (also in the View menu), ⌘N new task, ⌘K search conversations, ⌘, Settings; in Tasks J/K
-  or ↓/↑ move, ↩ open, E approve with the recommended option (the selected item's card is on screen), R reply, N new
-  task, Esc closes the composer, then the selection; Esc ends a conversation first.
+  draws what the shell pushes back: a glass panel with your lines and the reply as it streams above, and under them
+  the orb, Listening / Thinking / Speaking, mute, stop speaking, end (Esc). It stays a few seconds after the end, with
+  Open in Chats. There is no audio in the page. The level comes about twelve times a second and the reply at word
+  rate, so the button and the panel are built once and patched in place (a click is a press and a release on the
+  same element; a redraw in between loses it), and the controls sit on the panel's bottom edge, which doesn't move
+  while the transcript grows. Each exchange is its own line (`heardId`), so "Yes." twice is two lines.
+- **Keys**: ⌘1–⌘5 views (also in the View menu), ⌘N new task, ⌘K search conversations, ⌘, Settings — ⌘ only (⌃N,
+  ⌃K stay the text fields' next line / kill line), and nothing behind a sheet (a journal note, an unpair); in Tasks
+  J/K or ↓/↑ move, ↩ open, E approve with the recommended option (the selected item's card is on screen), R reply, N
+  new task, Esc closes the composer, then the selection; Esc ends a conversation first.
 - **Live**: the inbox long poll (25 s), the sync stream, the summary every minute (`GET /v1/desktop/summary`: the
-  phone's summary plus `r1.online` and `devices`), the agenda every five minutes and when a view opens.
+  phone's summary plus `r1.online` and `devices`), the agenda every five minutes and when a view opens — the
+  summary, the agenda and the inbox only while the window is on screen. The page lives as long as the app (it loads
+  at launch, with `--login` too, and stays when the window closes), and each summary read makes the bridge look at
+  Google Calendar and the journal: closed, minimised, hidden or covered (WebKit's page visibility, and the shell's
+  `window {visible}`), nothing is read; back on screen, what was asked meanwhile or has grown old is read once.
+  Redraws of Home, Tasks, Calendar and Settings wait while a mouse button is held (`redrawWhenFree` in `web/ui.js`).
 - Narrower than 1100 pt the sidebar becomes an icon rail.
 
 **The shell's half** (`Sources/MainWindowBridge.swift`, rules in `MainWindowMessages.swift`): `WKScriptMessageHandler`
 messages from the page — `ready`, `voice` (and `{action: "wake", on}`), `dock {enabled}`, `connectChatGPT`,
-`pairPhone`, `open`, `copy`, `noDrag` — and pushes into `window.SamRabbitApp.native({voice, dock, shortcuts, app})`:
-MacVoice's published state (state, heard, caption, level, mute, wake armed/enabled/problem, brain, conversation,
-shortcut), at once for anything but the level, the level at most twelve times a second. The Settings dock switch
-does what the dock's own Turn Off / Show Agent Dock do (`AgentDockEnabled`, the dock's store), without opening its
-list. Before the page loads, the menus' calls wait and run once it has.
+`pairPhone`, `open`, `copy`, `noDrag` — and pushes into `window.SamRabbitApp.native({voice, dock, shortcuts, app,
+window})`: MacVoice's published state (state, heard and its exchange, caption, level, mute, wake armed/enabled/problem,
+brain, conversation, shortcut), at once for anything but the level, the level at most twelve times a second; the
+window shown, minimised or closed. The Settings dock switch is the dock's own `DockController.setEnabled(_:)` (on ends
+a hide for a while, off is "Turn Off the Dock") and shows `isOn`: "Hidden for now" while it is on but hidden. All the
+window knows of the dock is in `WindowDock` (with feat/w7-dock: its shortcut center and settings window go there).
+Before the page loads, the menus' calls wait and run once it has.
 
 ## Install
 
@@ -263,10 +274,11 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
 
 - `--render-window-snapshots <dir> --base-url http://127.0.0.1:<fake>/app/ --token-file <token>` with
   `SAMRABBIT_VOICE_FIXTURE=<wav>` loads the main window against the fake, off every display (no Dock icon, no menu bar
-  extra), draws Home, Tasks, Chats, Calendar and Settings (`window-*.png`, 2x), clicks the page's Talk button
-  (through the bridge to MacVoice in fixture mode: the WAV is the microphone, the reply is rendered silently into
-  memory), draws the live transcript, ends it from the page's End button, and writes `window-smoke.json` (what the
-  bridge received, how many voice pushes, the transcript). It refuses port 3780, a server that doesn't answer
+  extra), draws Home, Tasks, Chats, Calendar and Settings (`window-*.png`, 2x), presses the page's Talk button with
+  the mouse (a down and an up 110 ms apart, not a script's click; through the bridge to MacVoice in fixture mode: the
+  WAV is the microphone, the reply is rendered silently into memory), draws the live transcript, presses the panel's
+  End while the reply streams, and writes `window-smoke.json` (what the bridge received, how many voice pushes, the
+  transcript). It refuses port 3780, a server that doesn't answer
   `/dev/inbox/fake`, the installed app's bundle id (build the copy with `--bundle-id`), and running without the
   fixture microphone. Make the WAV with `say -o ask.aiff "What's on my
   calendar this afternoon?"` and `afconvert -f WAVE -d LEI16@16000 -c 1 ask.aiff ask.wav` (nothing plays).
@@ -311,7 +323,8 @@ The fake also answers the window's desktop routes (`dev/fake_desktop.py`): `GET 
 `GET /v1/desktop/calendar/agenda?days=` (a week of meetings on the clock, from now on), `POST …/calendar/block`,
 `POST /v1/desktop/journal` (kept in memory: it never writes a journal), `GET|DELETE /v1/desktop/devices[/<id>]`
 (an iPhone and its watch) and `GET /v1/assistant/chatgpt/status` (through the Codex login); `POST /dev/desktop
-{calendar: false, chatgpt: "off", r1Online, journal}` shows the window's degraded states, `POST /dev/desktop/reset`.
+{calendar: false, chatgpt: "off", r1Online, journal}` shows the window's degraded states, `POST /dev/desktop/reset`;
+`GET /dev/desktop` counts the window's reads (`reads`) and `GET /dev/inbox/fake` its inbox polls (`polls`).
 
 Event types the UI renders (`web/store.js`): `message.user`, `message.assistant.delta|done|interrupted`,
 `card.shown|updated|dismissed`, `host.t3_update`, `host.note`, `host.completion`, `ui.event`, `image`,
@@ -331,6 +344,9 @@ node --test companion/desktop/tests/*.mjs                   # timeline/store log
                                                             # poll, agenda, devices/ChatGPT status, the voice transcript
 python3 -m unittest discover -s companion/desktop/tests     # install.sh / uninstall.sh, the fake inbox and desktop routes
 companion/desktop/tests/window/run.sh                       # the window bridge's rules (page requests, voice pushes)
+companion/desktop/tests/window/clicks.sh                    # the page under a real mouse while the voice and inbox
+                                                            # change, and a hidden window reading nothing (WebKit,
+                                                            # off screen, silent; its own fake server)
 companion/desktop/tests/swift/run.sh                        # Agent Dock logic: inbox, placement, visibility, keys
 python3 -m unittest discover -s companion/mac-bridge/tests  # includes the /app/ route (test_desktop_app.py)
 companion/desktop/tests/voice/run.sh                        # the wake phrase matcher and runs, gate, ring, mic choice

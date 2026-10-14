@@ -41,6 +41,7 @@ func voiceStateAsThePageReadsIt() {
     expectEqual(json["level"] as? Double, 1.0, "the level is clamped to 0...1")
     expect(json["brain"] is NSNull, "nil goes as null, not missing")
     expect(json["conversationId"] is NSNull)
+    expect(json["heardId"] is NSNull, "no exchange heard yet")
     expectEqual(json["wakeEnabled"] as? Bool, true)
     expect(JSONSerialization.isValidJSONObject(json), "valid JSON")
     state.level = 0.123_456
@@ -50,6 +51,28 @@ func voiceStateAsThePageReadsIt() {
     expect(state.sameApartFromLevel(other))
     other.caption = "Next up"
     expect(!state.sameApartFromLevel(other))
+    // "Yes." twice: the same words, another exchange, so the page draws another line.
+    var yes = WindowVoiceState()
+    yes.heard = "Yes."
+    yes.heardId = "turn-1"
+    expectEqual(yes.json["heardId"] as? String, "turn-1")
+    var again = yes
+    again.heardId = "turn-2"
+    expect(!yes.sameApartFromLevel(again), "a new exchange with the same words is a change, pushed at once")
+}
+
+func dockStateIsWhatTheDockDoes() {
+    let on = WindowDockState(on: true, turnedOn: true).json
+    expectEqual(on["enabled"] as? Bool, true)
+    expectEqual(on["turnedOn"] as? Bool, true)
+    expectEqual(on["canCustomize"] as? Bool, false)
+    // Hidden for an hour from its menu: on in its setting, off on the switch.
+    let hidden = WindowDockState(on: false, turnedOn: true).json
+    expectEqual(hidden["enabled"] as? Bool, false, "the switch says it isn't showing")
+    expectEqual(hidden["turnedOn"] as? Bool, true)
+    let custom = WindowDockState(on: true, turnedOn: true, canCustomize: true).json
+    expectEqual(custom["canCustomize"] as? Bool, true)
+    expect(JSONSerialization.isValidJSONObject(hidden))
 }
 
 func throttlesOnlyTheLevel() {
@@ -95,4 +118,7 @@ func shortcutsSayWhenTalkIsTaken() {
     expectEqual(shortcuts[1]["keys"] as? String, "⌃⌥K")
     expect(shortcuts[1]["problem"] is NSNull)
     expect(JSONSerialization.isValidJSONObject(shortcuts))
+    let one = WindowScript.shortcut(id: "showHide", label: "Show / hide the dock", keys: "⌃⌥D", problem: "Not available — taken by another app")
+    expectEqual(one["problem"] as? String, "Not available — taken by another app")
+    expectEqual(one["keys"] as? String, "⌃⌥D")
 }

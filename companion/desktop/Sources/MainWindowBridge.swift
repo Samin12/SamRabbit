@@ -3,10 +3,10 @@ import Combine
 import WebKit
 
 /// The window's half of Talk and Settings (CONTRACTS-WAVE7 §B): the page's requests go to MacVoice, the Agent Dock's
-/// switch and the native windows; MacVoice's published state (with the dock's switch, the shortcuts and the app's
-/// version) goes into the page through `window.SamRabbitApp.native(…)`, where Talk draws the live transcript. The voice
-/// is MacVoice's alone (the same conversation ⌃⌥Space, "Hey Rabbit" and the dock start): the page has no audio engine.
-/// The message rules are in MainWindowMessages.swift (unit-tested in tests/window).
+/// switch and the native windows; MacVoice's published state (with the dock's switch, the shortcuts, the app's version
+/// and whether the window is on screen) goes into the page through `window.SamRabbitApp.native(…)`, where Talk draws the
+/// live transcript. The voice is MacVoice's alone (the same conversation ⌃⌥Space, "Hey Rabbit" and the dock start):
+/// the page has no audio engine. The message rules are in MainWindowMessages.swift (unit-tested in tests/window).
 @MainActor
 final class MainWindowBridge {
     private weak var webView: WKWebView?
@@ -18,6 +18,8 @@ final class MainWindowBridge {
     private var subscription: AnyCancellable?
     private var later: Timer?
     private var lastShortcut: String?
+    /// The window is on screen (not closed, minimised or hidden): the page reads the bridge only then.
+    private var windowVisible = true
     /// What the page asked for, in order (the window snapshots check the Talk button's path with it).
     private(set) var received: [String] = []
     private(set) var voicePushes = 0
@@ -50,13 +52,12 @@ final class MainWindowBridge {
             Log.write("window: \"Hey Rabbit\" turned \(on ? "on" : "off") in Settings")
             voice.wakeEnabled = on
         case .dock(let on):
-            if live { WindowDockSwitch.set(on) }
-            push(["dock": dockState(enabled: live ? WindowDockSwitch.enabled : on)])
+            if live { WindowDock.set(on) }
+            push(["dock": dockState(asked: on)])
         case .connectChatGPT:
             if live { AppModel.shared.openChatGPT() }
         case .dockSettings:
-            // The dock's own settings window comes with the dock's next version; nothing to open yet.
-            Log.write("window: dock settings asked for (not available in this build)")
+            if live { WindowDock.openSettings() }
         }
         onCommand?(command)
         return true
@@ -82,10 +83,25 @@ final class MainWindowBridge {
         throttle.reset()
     }
 
-    /// The window came to the front: the dock may have been switched from its own menu meanwhile.
+    /// The window came to the front: the dock may have been switched, hidden or given other shortcuts from its own menu
+    /// or settings meanwhile.
     func windowBecameKey() {
         guard ready else { return }
-        push(["dock": dockState(enabled: live ? WindowDockSwitch.enabled : true)])
+        push(["dock": dockState(), "shortcuts": shortcuts()])
+    }
+
+    /// The window was shown, minimised, brought back or closed (`closing`: it still counts as visible while it closes):
+    /// the page stops or starts reading the bridge.
+    func windowChanged(closing: Bool = false) {
+        let visible = !closing && isWindowVisible()
+        guard visible != windowVisible else { return }
+        windowVisible = visible
+        push(["window": ["visible": visible]])
+    }
+
+    private func isWindowVisible() -> Bool {
+        guard let window = webView?.window else { return false }
+        return window.isVisible && !window.isMiniaturized
     }
 
     // MARK: to the page
@@ -103,6 +119,7 @@ final class MainWindowBridge {
             value.error = message
         }
         value.heard = voice.heard
+        value.heardId = voice.heardId
         value.caption = voice.caption
         value.level = Double(voice.level)
         value.micMuted = voice.micMuted
@@ -116,23 +133,24 @@ final class MainWindowBridge {
         return value
     }
 
-    private func dockState(enabled: Bool) -> [String: Any] {
-        ["enabled": enabled, "canCustomize": false]
+    /// The dock as it is (`asked`: what the switch was set to, in the snapshots, where the dock is left alone).
+    private func dockState(asked: Bool = true) -> [String: Any] {
+        (live ? WindowDock.state : WindowDockState(on: asked, turnedOn: asked)).json
     }
 
     private func shortcuts() -> [[String: Any]] {
-        WindowScript.shortcuts(talk: voice.shortcutDescription, talkProblem: voice.shortcutProblem)
+        WindowDock.shortcuts(voice: voice)
     }
 
     private func pushAll() {
         let state = Self.state(of: voice)
         let host = "\(Config.baseURL.host ?? "127.0.0.1"):\(Config.baseURL.port ?? 80)"
         lastShortcut = state.shortcut + (state.shortcutProblem ?? "")
+        windowVisible = isWindowVisible()
         throttle.pushed(state, at: Date())
         voicePushes += 1
-        push(["app": ["version": Config.version, "bridge": host],
-              "dock": dockState(enabled: live ? WindowDockSwitch.enabled : true),
-              "shortcuts": shortcuts(), "voice": state.json])
+        push(["app": ["version": Config.version, "bridge": host], "dock": dockState(),
+              "shortcuts": shortcuts(), "voice": state.json, "window": ["visible": windowVisible]])
     }
 
     private func voiceChanged() {
@@ -181,21 +199,34 @@ final class MainWindowBridge {
     }
 }
 
-/// Settings' "Show the Agent Dock". The dock keeps its switch in its own setting and its menu turns it off and on;
-/// DockController has no setter for it yet, so this does what those menu items do, without opening the list.
-/// (When the dock gets a `setEnabled(_:)`, this becomes a call to it.)
+/// What the window's Settings knows of the Agent Dock, in one place: its switch, its shortcuts and its settings window.
+/// The switch goes through the dock's own `setEnabled(_:)` (on ends a hide for a while; off is "Turn Off the Dock")
+/// and shows `isOn` (on and not hidden), so it never says "On" while the dock is away.
+///
+/// Merging feat/w7-dock (CONTRACTS-WAVE7 §B2): keep that branch's `DockController.setEnabled(_:)` and `isOn` (they
+/// also end ⌃⌥D's put-away), and change this enum only: `shortcuts` lists `DockShortcutAction.allCases` from
+/// `DockShortcutCenter.shared` (`shortcut(action).display`, `unavailable[action]`), `canCustomize` is true and
+/// `openSettings()` calls `DockController.shared.openSettings()`.
 @MainActor
-enum WindowDockSwitch {
-    static let key = "AgentDockEnabled"
+enum WindowDock {
+    static let canCustomize = false
 
-    static var enabled: Bool { DockController.shared.isEnabled }
+    static var state: WindowDockState {
+        let dock = DockController.shared
+        return WindowDockState(on: dock.isOn, turnedOn: dock.isEnabled, canCustomize: canCustomize)
+    }
 
     static func set(_ on: Bool) {
-        guard on != enabled else { return }
-        UserDefaults.standard.set(on, forKey: key)
-        let dock = DockController.shared
-        if on { dock.store.start() } else { dock.store.stop() }
-        dock.refresh()
         Log.write("window: dock turned \(on ? "on" : "off") in Settings")
+        DockController.shared.setEnabled(on)
+    }
+
+    /// Talk (MacVoice's) and the dock's ⌃⌥K, as Settings lists them.
+    static func shortcuts(voice: MacVoice) -> [[String: Any]] {
+        WindowScript.shortcuts(talk: voice.shortcutDescription, talkProblem: voice.shortcutProblem)
+    }
+
+    static func openSettings() {
+        Log.write("window: dock settings asked for (this build has none to open)")
     }
 }

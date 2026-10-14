@@ -18,6 +18,7 @@ let tests: [(String, () -> Void)] = [
     ("parsesSettingsAndReady", parsesSettingsAndReady),
     ("leavesTheWindowsOwnMessagesAlone", leavesTheWindowsOwnMessagesAlone),
     ("voiceStateAsThePageReadsIt", voiceStateAsThePageReadsIt),
+    ("dockStateIsWhatTheDockDoes", dockStateIsWhatTheDockDoes),
     ("throttlesOnlyTheLevel", throttlesOnlyTheLevel),
     ("scriptIsSafeJavaScript", scriptIsSafeJavaScript),
     ("shortcutsSayWhenTalkIsTaken", shortcutsSayWhenTalkIsTaken),

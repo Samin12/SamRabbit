@@ -199,6 +199,12 @@ final class DockController: NSObject {
 
     var isEnabled: Bool { enabled }
 
+    /// On and not hidden for a while: what the main window's Settings shows as its switch.
+    var isOn: Bool {
+        guard enabled else { return false }
+        return hiddenUntil.map { $0 <= Date() } ?? true
+    }
+
     /// Dev runs: forget a hide (the smoke driver hides it once and puts it back).
     func clearHide() {
         hiddenUntil = nil
@@ -907,6 +913,21 @@ final class DockController: NSObject {
         if !enabled { turnOn() }
         hiddenUntil = nil
         summon(focusCompose: false)
+    }
+
+    /// Settings (the main window's): the dock on or off (off for good, until it is turned on again). On also ends a
+    /// hide for a while, even when it was never turned off: the switch then says it shows. Off is the menu's "Turn Off
+    /// the Dock" (an open list closes). (feat/w7-dock has this too, also ending ⌃⌥D's put-away: its version wins.)
+    func setEnabled(_ on: Bool) {
+        guard started else { return }
+        if on {
+            guard !isOn else { return }
+            if !enabled { turnOn() }
+            hiddenUntil = nil
+            refresh()
+        } else if enabled {
+            turnOff()
+        }
     }
 
     private func turnOn() {
