@@ -1307,14 +1307,19 @@ class _Conversation:
         self.ended = False
         self.turns = 0
         # The realtime brain: this conversation's session (opened in the background), what was said (for the summary
-        # a new session starts with after 55 minutes), the current turn's cancel switch and its turn id (set before
-        # the switch and cleared after it, so a cancel that names a turn never reaches the next one's switch).
+        # a new session starts with after 55 minutes). ``current``: the turn being answered, its id and its cancel
+        # switch as one value (set and cleared at once), so a cancel that names a turn reads that turn's own switch.
         self.realtime: Any = None
         self.realtime_lock = threading.Lock()
         self.history: Deque[Tuple[str, str]] = deque(maxlen=HISTORY_TURNS)
         self.said: Deque[str] = deque(maxlen=3)
-        self.cancel: Optional[threading.Event] = None
-        self.turn_id: Optional[str] = None
+        self.current: Optional[Tuple[str, threading.Event]] = None
+
+    @property
+    def cancel(self) -> Optional[threading.Event]:
+        """The current turn's cancel switch (None between turns)."""
+        current = self.current
+        return current[1] if current is not None else None
 
     def record(self) -> Dict[str, Any]:
         return {"sessionId": self.session_id, "started": self.started, "deviceId": self.device_id,
@@ -2399,8 +2404,7 @@ class AssistantService:
         result.brain = brain
         if not conversation.lock.acquire(blocking=False):
             raise AssistantError(409, "assistant_busy", "Still answering the last thing you said.", retryable=True)
-        conversation.turn_id = request.turn_id
-        conversation.cancel = sink.cancel
+        conversation.current = (request.turn_id, sink.cancel)
         try:
             conversation.last_at = self._clock()
             conversation.ended = False
@@ -2474,8 +2478,7 @@ class AssistantService:
             conversation.history.append((heard, result.say))
             self._done(conversation, request, result, run)
         finally:
-            conversation.cancel = None
-            conversation.turn_id = None
+            conversation.current = None
             conversation.lock.release()
 
     def _realtime_failed(self, conversation: _Conversation, error: Any) -> None:
@@ -2894,10 +2897,11 @@ class AssistantService:
             found = self._conversations.get(conversation_id)
         if found is None or found.device_id != str(device.get("deviceId") or ""):
             return 200, {"ok": True, "cancelled": False}
-        switch = found.cancel  # read before the turn id: a turn sets its id first and clears it last
-        if turn_id is not None and found.turn_id != turn_id.strip():
+        current = found.current  # the turn being answered and its switch, read together
+        if current is None or (turn_id is not None and current[0] != turn_id.strip()):
             return 200, {"ok": True, "cancelled": False}
-        if switch is None or switch.is_set():
+        switch = current[1]
+        if switch.is_set():
             return 200, {"ok": True, "cancelled": False}
         switch.set()
         _LOG.info("assistant reply cancelled")

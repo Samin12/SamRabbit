@@ -20,7 +20,7 @@ Routes (CONTRACTS-WAVE4 "Mobile API"):
   (recorded into the day's "Phone" conversation, so the desktop app shows it too).
 * T3 (``samrabbit_t3``): ``GET /v1/mobile/t3/threads?filter=``, ``GET /v1/mobile/t3/threads/<id>``,
   ``POST .../message|respond|stop``, ``POST /v1/mobile/t3/threads {text, projectId?}``, ``GET /v1/mobile/t3/projects``.
-* Calendar (Composio, ``samrabbit_calendar``): ``GET /v1/mobile/calendar/agenda?hours=24``,
+* Calendar (Composio, ``samrabbit_calendar``): ``GET /v1/mobile/calendar/agenda?hours=24`` (or ``?days=``: whole days),
   ``POST /v1/mobile/calendar/block {minutes, title?}``, ``POST /v1/mobile/calendar/events {title, startsAt, endsAt}``.
 * ``POST /v1/mobile/journal {text}``: ``**HH:MM** <text>`` appended to today's Heptabase journal (explicit notes only;
   codes, passwords and API keys in the words are redacted first, as on the R1).
@@ -43,10 +43,11 @@ Routes (CONTRACTS-WAVE4 "Mobile API"):
   phone twin ``/v1/mobile/inbox*`` checks the mobile token with ``device_denied``.
 * The SamRabbit window on the Mac (CONTRACTS-WAVE7), the same handlers for the desktop token from this Mac only:
   ``GET /v1/desktop/summary`` (the phone's summary, plus ``r1.online`` and the paired ``devices``),
-  ``GET /v1/desktop/calendar/agenda?days=``, ``POST /v1/desktop/calendar/block {minutes, title?}``,
-  ``POST /v1/desktop/journal {text}`` (an explicit note, as from the phone), ``GET /v1/desktop/devices`` and
-  ``DELETE /v1/desktop/devices/<id>``. Whatever talks to the bridge with the R1's token from the network (the journal,
-  Mac control, conversation sync) tells this module the R1 was there (``r1_heard``).
+  ``GET /v1/desktop/calendar/agenda?days=`` (today from its midnight and the days after it),
+  ``POST /v1/desktop/calendar/block {minutes, title?}``, ``POST /v1/desktop/journal {text}`` (an explicit note, as
+  from the phone), ``GET /v1/desktop/devices`` and ``DELETE /v1/desktop/devices/<id>``. Whatever talks to the bridge
+  with the R1's token from the network (the journal, Mac control, conversation sync) tells this module the R1 was there
+  (``r1_heard``).
 
 Errors are ``{"error": {"code", "message", "retryable"}}``. Times in the routes this module answers itself are ISO
 8601 (``...Z`` or with the calendar's offset); the reused sync routes keep their epoch milliseconds. Tokens, codes,
@@ -126,6 +127,8 @@ MIN_BLOCK_MINUTES = 5
 MAX_BLOCK_MINUTES = 12 * 60
 DEFAULT_BLOCK_TITLE = "Focus"
 MAX_AGENDA_HOURS = 7 * 24
+MAX_AGENDA_DAYS = 7
+MAX_AGENDA_EVENTS = 250  # a week of a busy calendar (a day's agenda asks for 50)
 SUMMARY_CACHE_SECONDS = 2.0
 T3_REFRESH_SECONDS = 10.0
 CALENDAR_REFRESH_SECONDS = 120.0
@@ -786,7 +789,7 @@ class MobileService:
         self._cache: Dict[str, Tuple[float, Any]] = {}
         self._loading: Dict[str, bool] = {}
         self._summary: Optional[Tuple[float, Dict[str, Any]]] = None
-        self._agenda: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+        self._agenda: Dict[Any, Tuple[float, Dict[str, Any]]] = {}  # hours, or ("days", days, today's date)
         self._hosts: Optional[Tuple[float, List[str]]] = None
         self._streams: Dict[str, List[Any]] = {}  # device id -> handlers of its open live streams (oldest first)
         self._r1_heard: Optional[float] = None  # when the R1 last talked to the bridge (this run only)
@@ -1505,21 +1508,32 @@ class MobileService:
             raise MobileError(503, code, message)
         return writer
 
-    def agenda(self, hours: int, *, fresh: bool = False) -> Dict[str, Any]:
+    def agenda(self, hours: int = 24, *, days: Optional[int] = None, fresh: bool = False) -> Dict[str, Any]:
         """The next ``hours`` of the configured Google calendar (``GOOGLECALENDAR_EVENTS_LIST``, single events,
-        ordered by start), cached for ``CALENDAR_REFRESH_SECONDS``."""
+        ordered by start), cached for ``CALENDAR_REFRESH_SECONDS``. ``days``: whole days in the bridge's timezone
+        instead, today (from its midnight, so what already happened today is there too) and the ``days - 1`` after
+        it (the SamRabbit window's agenda by day)."""
+        now = self._now()
+        if days is not None:
+            # Midnights by calendar date: same-zone arithmetic is wall time, so a daylight-saving change in between
+            # makes that day 23 or 25 hours long instead of moving the next midnight.
+            low = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            high = low + timedelta(days=days)
+            key: Any = ("days", days, low.date().isoformat())
+        else:
+            low, high, key = now, now + timedelta(hours=hours), hours
         with self._lock:
-            cached = self._agenda.get(hours)
+            cached = self._agenda.get(key)
         if cached is not None and not fresh and self._monotonic() - cached[0] < CALENDAR_REFRESH_SECONDS:
             return dict(cached[1], cached=True)
         try:
             writer = self._writer()
         except MobileError as error:
             return {"available": False, "reason": error.code, "events": []}
-        now = self._now()
-        arguments = {"calendarId": writer.calendar_id, "timeMin": now.isoformat(timespec="seconds"),
-                     "timeMax": (now + timedelta(hours=hours)).isoformat(timespec="seconds"), "singleEvents": True,
-                     "orderBy": "startTime", "maxResults": 50, "maxAttendees": 1, "timeZone": self.zone_name}
+        arguments = {"calendarId": writer.calendar_id, "timeMin": low.isoformat(timespec="seconds"),
+                     "timeMax": high.isoformat(timespec="seconds"), "singleEvents": True, "orderBy": "startTime",
+                     "maxResults": 50 if (high - low) <= timedelta(hours=24) else MAX_AGENDA_EVENTS,
+                     "maxAttendees": 1, "timeZone": self.zone_name}
         try:
             data = writer._call("GOOGLECALENDAR_EVENTS_LIST", arguments, writing=False)  # noqa: SLF001
         except Exception as error:  # noqa: BLE001 - CalendarError: Composio missing, signed out, Google busy
@@ -1536,7 +1550,10 @@ class MobileService:
                  "to": arguments["timeMax"], "calendarId": writer.calendar_id, "events": events,
                  "updatedAt": iso_utc(self._clock())}
         with self._lock:
-            self._agenda[hours] = (self._monotonic(), value)
+            if days is not None:  # the days read on an earlier date are never asked for again
+                for name in [name for name in self._agenda if isinstance(name, tuple) and name[2] != key[2]]:
+                    del self._agenda[name]
+            self._agenda[key] = (self._monotonic(), value)
         return dict(value, cached=False)
 
     def _calendar_changed(self) -> None:
@@ -1546,13 +1563,13 @@ class MobileService:
             self._summary = None
 
     def _r_agenda(self, handler: Any, _params: Dict[str, str], _device: Any, _route: str) -> Tuple[int, Any]:
-        """``?hours=`` (the phone; default 24) or ``?days=`` (the SamRabbit window's agenda by day: 1 to 7), from now."""
+        """``?hours=`` (the phone; default 24, from now) or ``?days=`` (the SamRabbit window's agenda by day: today
+        from its midnight and the days after it, 1 to 7 days)."""
         query = _query(handler)
         if _one(query, "days") is not None:
-            hours = _int(query, "days", 1, 1, MAX_AGENDA_HOURS // 24) * 24
+            value = self.agenda(days=_int(query, "days", 1, 1, MAX_AGENDA_DAYS))
         else:
-            hours = _int(query, "hours", 24, 1, MAX_AGENDA_HOURS)
-        value = self.agenda(hours)
+            value = self.agenda(_int(query, "hours", 24, 1, MAX_AGENDA_HOURS))
         if not value.get("available") and not value.get("events"):
             raise MobileError(503, str(value.get("reason") or "calendar_unavailable"),
                               "Google Calendar can't be read from the Mac right now.", retryable=True)

@@ -163,33 +163,61 @@ class DesktopSummaryTest(DesktopWindowBase):
 
 
 class DesktopCalendarTest(DesktopWindowBase):
-    def test_agenda_by_days_and_the_phones_hours(self) -> None:
+    def test_agenda_by_whole_days_and_the_phones_hours(self) -> None:
         status, value = self.desk("GET", "/v1/desktop/calendar/agenda")
         self.assertEqual(200, status, value)
         self.assertEqual(("2026-10-08T14:37:45-04:00", "2026-10-09T14:37:45-04:00"), (value["from"], value["to"]),
-                         "one day by default")
+                         "no days: the phone's next 24 hours")
         self.assertEqual(["Mom's birthday", "Standup 6612", "Dentist"], [item["title"] for item in value["events"]])
-        self.assertEqual({"eventId", "title", "startsAt", "endsAt", "allDay", "location", "meetingUrl"},
-                         set(value["events"][0]))
         phone = self.pair()["token"]
         self.assertEqual(value["events"], self.call("GET", "/v1/mobile/calendar/agenda", token=phone)[1]["events"],
-                         "the phone's agenda (its own 24 hours: the same cache)")
+                         "the phone's agenda (the same cache)")
+        status, today = self.desk("GET", "/v1/desktop/calendar/agenda?days=1")
+        self.assertEqual(200, status, today)
+        self.assertEqual(("2026-10-08T00:00:00-04:00", "2026-10-09T00:00:00-04:00"), (today["from"], today["to"]),
+                         "today, from its midnight: the window's Today shows what already happened too")
+        self.assertEqual(["Mom's birthday", "Breakfast", "Standup 6612", "Dentist"],
+                         [item["title"] for item in today["events"]])
+        self.assertEqual({"eventId", "title", "startsAt", "endsAt", "allDay", "location", "meetingUrl"},
+                         set(today["events"][0]))
+        args = self.composio_calls()[-1]["args"]
+        self.assertEqual(("2026-10-08T00:00:00-04:00", "2026-10-09T00:00:00-04:00", True, "startTime", 50),
+                         (args["timeMin"], args["timeMax"], args["singleEvents"], args["orderBy"],
+                          args["maxResults"]))
         status, week = self.desk("GET", "/v1/desktop/calendar/agenda?days=7")
         self.assertEqual(200, status, week)
-        self.assertEqual("2026-10-15T14:37:45-04:00", week["to"])
-        self.assertIn("Next week", [item["title"] for item in week["events"]])
-        args = self.composio_calls()[-1]["args"]
-        self.assertEqual(("2026-10-08T14:37:45-04:00", "2026-10-15T14:37:45-04:00", True, "startTime"),
-                         (args["timeMin"], args["timeMax"], args["singleEvents"], args["orderBy"]))
-        self.assertEqual("2026-10-15T14:37:45-04:00", self.desk("GET", "/v1/desktop/calendar/agenda?days=30")[1]["to"],
+        self.assertEqual(("2026-10-08T00:00:00-04:00", "2026-10-15T00:00:00-04:00"), (week["from"], week["to"]),
+                         "today and the six days after it")
+        self.assertNotIn("Next week", [item["title"] for item in week["events"]], "the eighth day is not in it")
+        self.assertEqual(mobile.MAX_AGENDA_EVENTS, self.composio_calls()[-1]["args"]["maxResults"],
+                         "a week of a busy calendar")
+        self.assertIn("Next week", [item["title"] for item in
+                                    self.call("GET", "/v1/mobile/calendar/agenda?hours=168", token=phone)[1]["events"]])
+        self.assertEqual("2026-10-15T00:00:00-04:00", self.desk("GET", "/v1/desktop/calendar/agenda?days=30")[1]["to"],
                          "at most a week")
         self.assertEqual("2026-10-08T20:37:45-04:00",
                          self.desk("GET", "/v1/desktop/calendar/agenda?hours=6")[1]["to"], "hours work too")
-        self.assertEqual("2026-10-10T14:37:45-04:00",
-                         self.call("GET", "/v1/mobile/calendar/agenda?days=2", token=phone)[1]["to"],
+        self.assertEqual(("2026-10-08T00:00:00-04:00", "2026-10-10T00:00:00-04:00"),
+                         (lambda answer: (answer["from"], answer["to"]))(
+                             self.call("GET", "/v1/mobile/calendar/agenda?days=2", token=phone)[1]),
                          "and days on the phone's route")
+        calls = len(self.composio_calls())
+        self.assertTrue(self.desk("GET", "/v1/desktop/calendar/agenda?days=7")[1]["cached"])
+        self.assertEqual(calls, len(self.composio_calls()), "cached like the phone's")
         status, value = self.desk("GET", "/v1/desktop/calendar/agenda?days=two")
         self.assertEqual((400, "invalid_query"), (status, value["error"]["code"]))
+
+    def test_days_follow_the_calendar_date_across_midnight_and_daylight_saving(self) -> None:
+        # 23:59:30 on Friday, October 30, 2026 (New York leaves daylight saving on Sunday, November 1).
+        self.clock.advance(22 * 86400 + 9 * 3600 + 21 * 60 + 45)
+        status, value = self.desk("GET", "/v1/desktop/calendar/agenda?days=4")
+        self.assertEqual(200, status, value)
+        self.assertEqual(("2026-10-30T00:00:00-04:00", "2026-11-03T00:00:00-05:00"), (value["from"], value["to"]),
+                         "midnight to midnight, one of the days 25 hours long")
+        self.clock.advance(60)  # past midnight, well inside the agenda's two-minute cache
+        status, value = self.desk("GET", "/v1/desktop/calendar/agenda?days=4")
+        self.assertEqual((200, False, "2026-10-31T00:00:00-04:00", "2026-11-04T00:00:00-05:00"),
+                         (status, value["cached"], value["from"], value["to"]), "the new day, never yesterday's")
 
     def test_block_time_from_the_window(self) -> None:
         status, value = self.desk("POST", "/v1/desktop/calendar/block", {"minutes": 45, "title": "Deep work"})

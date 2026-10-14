@@ -237,7 +237,8 @@ class PhoneT3ActionTest(PhoneInboxBase):
         [command] = self.dispatched("thread.approval.respond")
         self.assertEqual(("t-approval", "req-approve-1", "accept"),
                          (command["threadId"], command["requestId"], command["decision"]))
-        status, value = self.phone_act("t3:t-input", "answer", {"requestId": "req-input-1", "answers": {"q1": "SQLite"}})
+        status, value = self.phone_act("t3:t-input", "answer",
+                                       {"requestId": "req-input-1", "answers": {"q1": "SQLite"}})
         self.assertEqual(200, status, value)
         [command] = self.dispatched("thread.user-input.respond")
         self.assertEqual(("t-input", {"q1": "sqlite"}), (command["threadId"], command["answers"]))

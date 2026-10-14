@@ -351,7 +351,7 @@ sync routes, which keep epoch milliseconds):
 | `POST /v1/mobile/t3/threads/<id>/message {text}` · `/respond {decision: "approve"\|"deny"}` or `{answer}` (or `{answers: {questionId: …}}`) · `/stop` | `thread.turn.start` / `thread.approval.respond` (approve → accept, deny → decline) / `thread.user-input.respond` (option values as T3 expects; as on the R1, an answer may be the label, a shortened label, a number or a position such as "the first one"; other words go as free text only when the question allows it) / `thread.turn.interrupt` |
 | `POST /v1/mobile/t3/threads {text, projectId?, title?}` | `thread.create` + `thread.turn.start` → `{threadId, title, projectId, projectName, placement}`. Without `projectId`: a project the request names, coding work to the most recently active code project, everything else to the orchestration project (`SAMRABBIT_T3_ORCHESTRATION_PROJECT` id, e.g. from `install.sh --t3-orchestration-project`, else the project titled `SAMRABBIT_T3_ORCHESTRATION_TITLE`, default T3's agent project "Hermes", else T3's agent workspace project, else the most recent one). See "Placement compared with the R1" below. |
 | `GET /v1/mobile/t3/projects` | `{projects: [{projectId, name, orchestration}], orchestrationProjectId}` |
-| `GET /v1/mobile/calendar/agenda?hours=24` (or `?days=1..7`) | Composio `GOOGLECALENDAR_EVENTS_LIST` (single events, by start time) on the bridge's calendar (`primary`), cached 120 s: `{available, timezone, from, to, events: [{eventId, title, startsAt, endsAt, allDay, location, meetingUrl}], cached}` (no cancelled, declined or working-location entries) |
+| `GET /v1/mobile/calendar/agenda?hours=24` (or `?days=1..7`) | Composio `GOOGLECALENDAR_EVENTS_LIST` (single events, by start time) on the bridge's calendar (`primary`), cached 120 s: `{available, timezone, from, to, events: [{eventId, title, startsAt, endsAt, allDay, location, meetingUrl}], cached}` (no cancelled, declined or working-location entries). `hours` counts from now; `days` are whole days in `SAMRABBIT_TIMEZONE`, today from its midnight (so what already happened today is in it) and the `days - 1` after it, midnight to midnight by calendar date (a daylight-saving day is 23 or 25 hours), up to 250 events |
 | `POST /v1/mobile/calendar/block {minutes, title?}` | an event from now (rounded down to the minute) for `minutes` (5–720), in `SAMRABBIT_TIMEZONE` (default America/New_York), default title "Focus" |
 | `POST /v1/mobile/calendar/events {title, startsAt, endsAt}` | the same writer as `/v1/calendar/events` |
 | `POST /v1/mobile/journal {text}` | appends `**HH:MM** <text>` (the words escaped, nothing added) to today's Heptabase journal; explicit notes only. As on the R1 (its "redact secrets" setting is on by default), API keys, tokens, private keys, "the code is 123456" and "password is …" are written as `[redacted]`, and the answer then says `redacted: true` |
@@ -698,14 +698,14 @@ from this Mac only, the same rule as the dock's routes (401 without it, 403 from
 | Route | Answer |
 |---|---|
 | `GET /v1/desktop/summary` | `GET /v1/mobile/summary`'s answer, plus `r1.online` (the R1 talked to this bridge with its own token from the network in the last 15 minutes, or a conversation on it is live; the R1 sends no heartbeat and reports no battery, so an idle R1 shows its `lastSeenAt` instead) and `devices` (as below). Reading it keeps the summary's caches warm, as a phone does |
-| `GET /v1/desktop/calendar/agenda?days=1..7` | the phone's agenda for the next `days` (default 1; `hours=` works too), from now |
+| `GET /v1/desktop/calendar/agenda?days=1..7` | the phone's agenda by whole days: today from its midnight and the `days - 1` after it (`days=7`: the week the window shows; without `days`, the phone's `hours=`, default the next 24) |
 | `POST /v1/desktop/calendar/block {minutes, title?}` | the phone's "Block N minutes" (5–720, default title "Focus") |
 | `POST /v1/desktop/journal {text}` | the phone's explicit note: `**HH:MM** <text>` in today's journal, the words escaped and secrets redacted, nothing added (`redacted: true` when something was); only for something Samin typed and sent himself |
 | `GET /v1/desktop/devices` · `DELETE /v1/desktop/devices/<id>` | `{devices: [{deviceId, name, platform, createdAt, lastSeenAt, parentId?}]}` / unpair (`{ok, revoked}`; a phone takes its watch with it), as `/v1/mobile/devices*` |
 
 **The dock's voice** (`/v1/desktop/assistant/turn | session | cancel | end | announcements`): the watch assistant's
-routes (above), bodies and streaming protocol unchanged, for the desktop token from this Mac only, as the one device
-"mac". Its conversations are "Mac" ones in the sync store (`mac-<conversationId>`, titled `Mac: <first words>`, origin
+routes (above), bodies and streaming protocol unchanged (`cancel` names its `turnId` the same way), for the desktop
+token from this Mac only, as the one device "mac". Its conversations are "Mac" ones in the sync store (`mac-<conversationId>`, titled `Mac: <first words>`, origin
 `mac`), so they show in the desktop app and the iPhone's Chats; the same brain choice (realtime when ChatGPT is
 connected and the helper is ready, else Claude) and the same tools; the realtime session ends its instructions with a
 Mac addendum instead of the watch's (`MAC_INSTRUCTION`: he is at his Mac, usually managing his T3 threads; one to three
@@ -836,16 +836,18 @@ first typed message, `item_completed` events, a failed `task_complete`, no appro
 followed, a live Codex CLI, a reply that starts with `-`, a session resumed twice in a row, a bridge started again,
 and that nothing about an item reaches the log. `tests/test_desktop_assistant.py`
 drives `/v1/desktop/assistant/*` with the watch assistant's fakes: the auth, the "Mac" conversation in the sync store
-(and that the Mac and the watch never share one), the Mac's prompt and time line, warm-up, cancel, end and
-announcements, and a streamed realtime turn with the Mac addendum. `tests/test_mobile_inbox.py` drives the phone's
+(and that the Mac and the watch never share one), the Mac's prompt and time line, warm-up, cancel (one that names an
+earlier turn leaves the running one alone, one that names the running turn stops it), end and announcements, and a
+streamed realtime turn with the Mac addendum. `tests/test_mobile_inbox.py` drives the phone's
 `/v1/mobile/inbox*` against the dock's fakes: the mobile-token auth (401 for the R1's, the desktop's and a wrong
 token, 403 off the LAN and for the assistant's own token), the same list and revision as the dock without `open`, the
 long poll, items, seen shared with the dock, T3's dispatch bodies, new tasks, a reply to a live session that opens
 nothing, one that resumes in Terminal and says so, `/open` refused, and the log. `tests/test_desktop_window.py`
 drives `/v1/desktop/summary`, `/calendar/agenda|block`, `/journal` and `/devices*`: the desktop-token auth, the summary
 against the phone's (plus `r1.online` and `devices`), when the R1 counts as seen (its token from the network only),
-agendas by days, block time, the verbatim note in the fake journal, unpairing a phone with its watch. A cancel that
-names a turn other than the current one (`test_realtime.py`) never stops the next turn.
+agendas by whole days (from today's midnight, across midnight and a daylight-saving change), block time, the verbatim
+note in the fake journal, unpairing a phone with its watch. A cancel that names a turn other than the current one
+(`test_realtime.py`, a streamed realtime turn) never stops the next turn.
 
 ## Troubleshooting
 
