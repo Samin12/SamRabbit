@@ -38,6 +38,12 @@ enum AppSheet: Identifiable, Equatable {
     }
 }
 
+/// "Dismissed · <title> · Undo": shown for a few seconds at the bottom after a task was dismissed.
+struct UndoOffer: Equatable, Identifiable {
+    let id = UUID()
+    var item: InboxItem
+}
+
 /// A short confirmation or error shown over the app.
 struct Toast: Equatable, Identifiable {
     enum Style { case success, failure, info }
@@ -67,6 +73,15 @@ final class AppModel {
     /// order; T3's from the last list that had them while T3 Code is down (`t3Stale`). An older bridge: T3's threads
     /// only.
     var tasks: [InboxItem] = []
+    /// The rows as the Mac (or the T3 list) last gave them, before what was dismissed or undone here (`dismissals`):
+    /// `tasks` is these as they show.
+    private var rows: [InboxItem] = []
+    /// Tasks dismissed (or brought back) from here, until the Mac's list says the same (`InboxDismissals`).
+    private(set) var dismissals = InboxDismissals()
+    /// A dismissal on its way (an undo waits for it: the Mac must never get them the other way round). true = it worked.
+    private var dismissCalls: [String: Task<Bool, Never>] = [:]
+    /// "Dismissed · Undo" while it shows.
+    var undoOffer: UndoOffer?
     /// The T3 rows in `tasks` are the last ones, kept while T3 Code isn't answering: shown read-only, counted nowhere.
     var t3Stale = false
     /// The inbox failed while the Mac answered: T3's rows come from its own thread list, the others' are the last.
@@ -243,9 +258,9 @@ final class AppModel {
         switch await BridgeError.capture({ try await client.threads() }) {
         case .success(let list):
             threads = list
-            let rows = inboxError == nil ? InboxRows(items: InboxSnapshot.fromThreads(list).items)
-                : InboxRows(threads: list, keeping: tasks)
-            if rows.items != tasks { withAnimation(.smooth) { tasks = rows.items } }
+            let fresh = inboxError == nil ? InboxRows(items: InboxSnapshot.fromThreads(list).items)
+                : InboxRows(threads: list, keeping: rows)
+            updateTasks(fresh.items)
             t3Stale = false
             inboxFallback = inboxError != nil
             threadsLoaded = true
@@ -270,17 +285,29 @@ final class AppModel {
         inboxMissing = false
         inboxFallback = false
         inbox = snapshot
-        let rows = InboxRows(snapshot, previous: tasks)
+        let fresh = InboxRows(snapshot, previous: rows)
         tasksError = snapshot.t3Problem
-        t3Stale = rows.t3Stale
-        if rows.items != tasks { withAnimation(.smooth) { tasks = rows.items } }
-        let t3 = rows.items.compactMap(\.taskThread)
+        t3Stale = fresh.t3Stale
+        // What it settles is the Mac's from now on (an item that changed since it was dismissed is back by itself).
+        dismissals.apply(snapshot)
+        updateTasks(fresh.items)
+        let t3 = fresh.items.compactMap(\.taskThread)
         if t3 != threads { threads = t3 }
         threadsLoaded = true
-        let agents = rows.items.filter { $0.source != .t3 }
-        // While T3 Code is down its rows are the last ones: nothing new is announced from them.
-        await notifications.check(threads: rows.t3Stale ? [] : t3, agents: agents, needsYou: needsYouCount)
+        let agents = tasks.filter { $0.source != .t3 }
+        // While T3 Code is down its rows are the last ones: nothing new is announced from them. Nor from what was
+        // dismissed here and the Mac hasn't hidden yet.
+        await notifications.check(threads: fresh.t3Stale ? [] : t3.filter { !dismissals.isHidden("t3:\($0.threadId)") },
+                                  agents: agents, needsYou: needsYouCount)
         await liveActivities.update(with: t3)
+    }
+
+    /// The Mac's rows (`fresh`, else the ones kept) as Tasks and Home show them: less what was dismissed here, plus
+    /// what was brought back here that the Mac doesn't list yet.
+    private func updateTasks(_ fresh: [InboxItem]? = nil) {
+        if let fresh { rows = fresh }
+        let shown = dismissals.shown(rows)
+        if shown != tasks { withAnimation(.smooth) { tasks = shown } }
     }
 
     /// Refreshes every 20 seconds while the app is active, and follows the inbox as it changes in between.
@@ -289,6 +316,7 @@ final class AppModel {
         refreshLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
+                self?.tickDismissals()
                 try? await Task.sleep(for: .seconds(20))
             }
         }
@@ -408,6 +436,9 @@ final class AppModel {
         summary = nil
         threads = []
         tasks = []
+        rows = []
+        dismissals = InboxDismissals()
+        undoOffer = nil
         t3Stale = false
         inboxFallback = false
         seenMarks = []
@@ -616,6 +647,7 @@ final class AppModel {
         if let index = tasks.firstIndex(where: { $0.id == item.id }) {
             withAnimation(.smooth) { tasks[index] = seen }
         }
+        if let index = rows.firstIndex(where: { $0.id == item.id }) { rows[index] = seen }
         var marked = true
         do {
             try await client.inboxSeen(item.id)
@@ -628,6 +660,72 @@ final class AppModel {
         }
         if !quiet { await refresh() }
         return marked
+    }
+
+    /// Dismisses a task (`/inbox/items/<id>/dismiss`): it leaves Tasks and Home at once, here and on the Mac's dock
+    /// and window, until it changes (a new state, a new request, something it did); "Dismissed · Undo" shows at the
+    /// bottom for a few seconds. A refusal puts it back and says why. Nothing reaches T3, Claude Code or Codex.
+    func dismiss(_ item: InboxItem) {
+        guard item.canDismiss, !dismissals.isHidden(item.id), let client else { return }
+        Haptics.tap()
+        dismissals.dismiss(item)
+        updateTasks()
+        undoOffer = UndoOffer(item: item)
+        dismissCalls[item.id] = Task { [weak self] () -> Bool in
+            do {
+                let result = try await client.inboxDismiss(item.id)
+                guard let self else { return true }
+                self.dismissCalls[item.id] = nil
+                self.dismissals.confirmed(item.id, revision: result.revision, current: self.inbox?.revision ?? 0)
+                self.updateTasks()
+                return true
+            } catch {
+                guard let self else { return false }
+                self.dismissCalls[item.id] = nil
+                // Undone meanwhile: nothing to put back, nothing to say.
+                if self.dismissals.failed(item.id) {
+                    self.updateTasks()
+                    if self.undoOffer?.item.id == item.id { withAnimation(.smooth) { self.undoOffer = nil } }
+                    self.couldNot("Couldn't dismiss it", error)
+                }
+                return false
+            }
+        }
+    }
+
+    /// The Undo of "Dismissed · Undo": the task is back at once (as it was: unread stays unread), then
+    /// `/inbox/items/<id>/undismiss`, after the dismissal's own call if it is still on its way.
+    func undoDismiss() {
+        guard let offer = undoOffer, let client else { return }
+        withAnimation(.smooth) { undoOffer = nil }
+        let item = offer.item
+        Haptics.tap()
+        dismissals.undo(item)
+        updateTasks()
+        let pending = dismissCalls[item.id]
+        Task { [weak self] in
+            if let pending, await pending.value == false {
+                self?.dismissals.undoNotNeeded(item.id)  // it never was dismissed
+                self?.updateTasks()
+                return
+            }
+            do {
+                let result = try await client.inboxUndismiss(item.id)
+                guard let self else { return }
+                self.dismissals.undoConfirmed(item.id, revision: result.revision, current: self.inbox?.revision ?? 0)
+                self.updateTasks()
+            } catch {
+                guard let self else { return }
+                self.dismissals.undoFailed(item.id)
+                self.updateTasks()
+                self.couldNot("Couldn't bring it back", error)
+            }
+        }
+    }
+
+    /// Lets go of dismissals nothing settled (the Mac's list never came): its own rows again.
+    func tickDismissals() {
+        if dismissals.tick() { updateTasks() }
     }
 
     /// Its screen shows this item: unread and able to be marked seen, it is marked seen, quietly, once per state
@@ -813,6 +911,19 @@ final class AppModel {
 
     func show(_ error: BridgeError) {
         show(.failure, error.shortDescription, detail: error.errorDescription)
+    }
+
+    /// A failure with our own headline ("Couldn't dismiss it") and the bridge's reason under it.
+    func couldNot(_ title: String, _ error: Error) {
+        Haptics.error()
+        if let bridge = error as? BridgeError {
+            if bridge == .cancelled { return }
+            if bridge == .unauthorized { handleUnauthorized() }
+            show(.failure, title, detail: bridge.isRouteMissing ? "Update the bridge on your Mac first."
+                 : bridge.errorDescription ?? bridge.shortDescription)
+        } else {
+            show(.failure, title, detail: error.localizedDescription)
+        }
     }
 
     func fail(_ error: Error) {

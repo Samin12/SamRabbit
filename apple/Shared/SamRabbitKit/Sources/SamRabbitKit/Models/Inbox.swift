@@ -51,9 +51,10 @@ public enum InboxSource: String, Codable, Sendable, CaseIterable {
     }
 }
 
-/// What an item supports right now (`item.can`). Unknown words are kept and ignored.
+/// What an item supports right now (`item.can`). Unknown words are kept and ignored. `dismiss` is on every item of a
+/// bridge that knows it (hidden until it changes); `undismiss` on a dismissed one (`?include=dismissed`).
 public enum InboxCapability: String, Sendable {
-    case approve, answer, reply, stop, seen, open
+    case approve, answer, reply, stop, seen, open, dismiss, undismiss
 }
 
 /// One approval an item waits on (`pending.approvals[]`): T3's own choices (`accept`, `acceptForSession`,
@@ -212,11 +213,13 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
     public var live: Bool
     public var progress: Double?
     public var phase: String?
+    /// Samin dismissed it and it hasn't changed since (only with `?include=dismissed`; the app never asks for them).
+    public var dismissed: Bool
 
     public init(id: String, source: InboxSource, agent: String? = nil, title: String, project: String? = nil,
                 cwd: String? = nil, status: ThreadStatus, statusLabel: String = "", summary: String = "",
                 updatedAt: Date? = nil, unread: Bool = false, pending: InboxPending = InboxPending(), can: [String] = [],
-                live: Bool = false, progress: Double? = nil, phase: String? = nil) {
+                live: Bool = false, progress: Double? = nil, phase: String? = nil, dismissed: Bool = false) {
         self.id = id
         self.source = source
         self.agent = agent
@@ -233,6 +236,7 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
         self.live = live
         self.progress = progress
         self.phase = phase
+        self.dismissed = dismissed
     }
 
     public init(from decoder: Decoder) throws {
@@ -258,6 +262,7 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
         live = c.bool("live")
         progress = c.value(Double.self, "progress")
         phase = c.text("phase")
+        dismissed = c.bool("dismissed")
     }
 
     /// The id without its source (`<threadId>` of `t3:<threadId>`).
@@ -267,6 +272,9 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
     }
 
     public func supports(_ capability: InboxCapability) -> Bool { can.contains(capability.rawValue) }
+
+    /// It can be dismissed: hidden here and on the Mac until it changes (a bridge before it lists no `dismiss`).
+    public var canDismiss: Bool { supports(.dismiss) }
 
     public var isChat: Bool { source == .samrabbit }
 
@@ -420,16 +428,19 @@ public enum InboxHold: String, Sendable, Equatable {
     }
 }
 
-/// `counts`: what the inbox says needs Samin and what is working.
+/// `counts`: what the inbox says needs Samin and what is working (`dismissed`: how many it hides, left out of the
+/// others).
 public struct InboxCounts: Codable, Sendable, Equatable {
     public var needsYou: Int
     public var working: Int
     public var total: Int
+    public var dismissed: Int
 
-    public init(needsYou: Int = 0, working: Int = 0, total: Int = 0) {
+    public init(needsYou: Int = 0, working: Int = 0, total: Int = 0, dismissed: Int = 0) {
         self.needsYou = needsYou
         self.working = working
         self.total = total
+        self.dismissed = dismissed
     }
 
     public init(from decoder: Decoder) throws {
@@ -437,6 +448,7 @@ public struct InboxCounts: Codable, Sendable, Equatable {
         needsYou = c.int("needsYou")
         working = c.int("working")
         total = c.int("total")
+        dismissed = c.int("dismissed")
     }
 }
 
@@ -484,7 +496,8 @@ public struct InboxSnapshot: Codable, Sendable, Equatable {
         let c = try decoder.container(keyedBy: AnyKey.self)
         revision = c.int64("revision")
         updatedAt = c.date("updatedAt")
-        let items = Self.ordered(Array(c.list(InboxItem.self, "items").prefix(Self.itemCap)))
+        // A dismissed item is the bridge's to bring back: never a row, even from a bridge that sends it anyway.
+        let items = Self.ordered(Array(c.list(InboxItem.self, "items").filter { !$0.dismissed }.prefix(Self.itemCap)))
         self.items = items
         let agents = items.filter(\.isAgent)
         counts = c.value(InboxCounts.self, "counts")
@@ -854,6 +867,119 @@ public struct InboxTargets: Codable, Sendable, Equatable {
     }
 
     public func agent(_ id: String?) -> Agent? { agents.first { $0.id == id } }
+}
+
+/// `dismiss` / `undismiss` -> `{ok, dismissed, revision}`: the list's revision once it shows the change.
+public struct InboxDismissResult: Codable, Sendable, Equatable {
+    public var dismissed: Bool
+    public var revision: Int64?
+
+    public init(dismissed: Bool, revision: Int64? = nil) {
+        self.dismissed = dismissed
+        self.revision = revision
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        dismissed = c.bool("dismissed")
+        revision = c.optionalInt64("revision")
+    }
+}
+
+/// Dismissing from the phone (W8): a dismissed row leaves Tasks and Home at once (and the counts with it); the bridge
+/// then leaves it out of its list until it changes. Here it stays hidden until an inbox at least as new as the one the
+/// bridge gave with its yes (from then on the bridge's own list decides: an item that changed meanwhile is back by
+/// itself); a refusal puts it back. The undo shows it again at once, from the copy kept here, until the inbox carries
+/// it again; an undo that fails hides it again. Entries nothing settled go after `staleSeconds`. The same rules as
+/// the Mac's dock (`DockDismissals`) and window.
+public struct InboxDismissals: Sendable, Equatable {
+    public struct Entry: Sendable, Equatable {
+        public var item: InboxItem
+        public var at: Date
+        /// The inbox revision from which the bridge's list says the same; nil while the call is on its way.
+        public var settles: Int64?
+    }
+
+    public private(set) var hidden: [String: Entry] = [:]
+    public private(set) var restored: [String: Entry] = [:]
+    public static let staleSeconds: TimeInterval = 30
+
+    public init() {}
+
+    public func isHidden(_ id: String) -> Bool { hidden[id] != nil }
+
+    public var isEmpty: Bool { hidden.isEmpty && restored.isEmpty }
+
+    /// The rows to draw: these, less the ones dismissed here, plus the ones undone here they don't carry yet; in the
+    /// contract's order.
+    public func shown(_ items: [InboxItem]) -> [InboxItem] {
+        guard !isEmpty else { return items }
+        let ids = Set(items.map(\.id))
+        let back = restored.values.map(\.item).filter { !ids.contains($0.id) }
+        return InboxSnapshot.ordered(items.filter { hidden[$0.id] == nil } + back)
+    }
+
+    public mutating func dismiss(_ item: InboxItem, now: Date = .now) {
+        restored[item.id] = nil
+        hidden[item.id] = Entry(item: item, at: now, settles: nil)
+    }
+
+    /// The bridge said yes: its list leaves the item out from `revision` on (one past `current` when it didn't say).
+    public mutating func confirmed(_ id: String, revision: Int64?, current: Int64) {
+        guard hidden[id] != nil else { return }
+        let settles = revision ?? current + 1
+        if current >= settles { hidden[id] = nil } else { hidden[id]?.settles = settles }
+    }
+
+    /// The dismissal failed: the row is back. Whether it was still hidden here (an undo may have brought it back).
+    @discardableResult
+    public mutating func failed(_ id: String) -> Bool {
+        hidden.removeValue(forKey: id) != nil
+    }
+
+    /// The undo: the row is back at once (the copy hidden here, else `item`). Returns the row brought back.
+    @discardableResult
+    public mutating func undo(_ item: InboxItem, now: Date = .now) -> InboxItem {
+        let back = hidden.removeValue(forKey: item.id)?.item ?? item
+        restored[item.id] = Entry(item: back, at: now, settles: nil)
+        return back
+    }
+
+    /// The dismissal an undo waited for failed: nothing to undo, the inbox's own row stays.
+    public mutating func undoNotNeeded(_ id: String) {
+        restored[id] = nil
+    }
+
+    /// The bridge took the undo back: its list carries the item again from `revision` on.
+    public mutating func undoConfirmed(_ id: String, revision: Int64?, current: Int64) {
+        guard restored[id] != nil else { return }
+        let settles = revision ?? current + 1
+        if current >= settles { restored[id] = nil } else { restored[id]?.settles = settles }
+    }
+
+    /// The undo failed: the bridge still keeps it dismissed, so it goes again.
+    public mutating func undoFailed(_ id: String, now: Date = .now) {
+        guard let entry = restored.removeValue(forKey: id) else { return }
+        hidden[id] = Entry(item: entry.item, at: now, settles: nil)
+    }
+
+    /// A new inbox: what it settles is the bridge's from now on.
+    public mutating func apply(_ snapshot: InboxSnapshot) {
+        let present = Set(snapshot.items.map(\.id))
+        hidden = hidden.filter { _, entry in entry.settles.map { snapshot.revision < $0 } ?? true }
+        restored = restored.filter { id, entry in
+            !present.contains(id) && (entry.settles.map { snapshot.revision < $0 } ?? true)
+        }
+    }
+
+    /// Lets go of entries nothing settled in `staleSeconds`; whether any went.
+    @discardableResult
+    public mutating func tick(now: Date = .now) -> Bool {
+        let before = hidden.count + restored.count
+        hidden = hidden.filter { now.timeIntervalSince($0.value.at) < Self.staleSeconds }
+        restored = restored.filter { now.timeIntervalSince($0.value.at) < Self.staleSeconds }
+        return hidden.count + restored.count != before
+    }
 }
 
 /// `POST /v1/mobile/inbox/new` -> `202 {itemId: "t3:<id>", ...}`.

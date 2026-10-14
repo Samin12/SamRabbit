@@ -231,6 +231,57 @@ final class TasksUITests: XCTestCase {
         XCTAssertFalse(card("t3:t_backup").buttons["inbox-seen-t3:t_backup"].exists, "with nothing left to mark")
     }
 
+    // MARK: - Dismiss
+
+    /// Swipe a row left: it goes (here and on the Mac: the fake is told), the badge drops, "Dismissed · Undo" shows;
+    /// Undo brings it back. Dismiss on an item's screen goes back to the list without it; a dismissal the Mac refuses
+    /// puts the row back and says why.
+    func testSwipeToDismissAndUndo() throws {
+        try launch()
+        openTasks()
+        let failed = card(Self.pytest)
+        XCTAssertTrue(failed.waitForExistence(timeout: 15), "a Codex run that failed needs you")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.badge("7") })
+        scrollTo(failed)
+        failed.swipeLeft()
+        XCTAssertTrue(waitUntil(timeout: 5) { !self.card(Self.pytest).exists }, "swiped away")
+        let snackbar = app.descendants(matching: .any)["undo-snackbar"]
+        XCTAssertTrue(snackbar.waitForExistence(timeout: 3), "Dismissed · Undo")
+        XCTAssertTrue(waitUntil(timeout: 5) { self.fakeLog("dismissed").contains(Self.pytest) }, "the Mac was told")
+        XCTAssertTrue(waitUntil(timeout: 5) { self.badge("6") }, "one fewer needs you")
+        snap("phone-dismiss-undo", settle: 0.4)
+        app.buttons["undo-dismiss"].tap()
+        XCTAssertTrue(card(Self.pytest).waitForExistence(timeout: 5), "back")
+        XCTAssertTrue(waitUntil(timeout: 5) { self.fakeLog("undismissed").contains(Self.pytest) }, "the Mac too")
+        XCTAssertTrue(waitUntil(timeout: 10) { self.badge("7") })
+        XCTAssertTrue(card(Self.pytest).buttons["inbox-seen-\(Self.pytest)"].exists, "as unread as it was")
+
+        // Dismiss on its screen.
+        let reply = card(Self.changelog).buttons["inbox-reply-\(Self.changelog)"]
+        scrollTo(reply)
+        reply.tap()
+        let dismiss = app.buttons["inbox-detail-dismiss"]
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 10), "its screen has Dismiss")
+        snap("phone-dismiss-item-screen")
+        dismiss.tap()
+        XCTAssertTrue(app.navigationBars["Tasks"].waitForExistence(timeout: 5), "back to the list")
+        XCTAssertTrue(waitUntil(timeout: 5) { !self.card(Self.changelog).exists }, "without it")
+        XCTAssertTrue(waitUntil(timeout: 5) { self.fakeLog("dismissed").contains(Self.changelog) })
+
+        // The Mac refuses: the row is back and the toast says why.
+        fake("inbox", ["refuse": ["dismiss"]])
+        let flaky = card(Self.flaky)
+        XCTAssertTrue(flaky.waitForExistence(timeout: 5))
+        app.swipeDown()
+        app.swipeDown()
+        scrollTo(flaky)
+        flaky.swipeLeft()
+        XCTAssertTrue(app.staticTexts["Couldn't dismiss it"].waitForExistence(timeout: 8), "it says why")
+        XCTAssertTrue(card(Self.flaky).waitForExistence(timeout: 5), "and the row is back")
+        snap("phone-dismiss-refused", settle: 0.4)
+        fake("inbox", ["refuse": []])
+    }
+
     // MARK: - T3 Code down, an older bridge, a new task
 
     /// T3 Code stops answering: the Claude Code and Codex rows stay fresh; T3's last rows stay apart at the end,
@@ -315,6 +366,11 @@ final class TasksUITests: XCTestCase {
     private func badge(_ count: String) -> Bool {
         let tab = app.tabBars.buttons["Tasks"]
         return tab.label.contains(count) || (tab.value as? String)?.contains(count) == true
+    }
+
+    /// The ids the fake bridge logged under `name` ("dismissed", "undismissed").
+    nonisolated private func fakeLog(_ name: String) -> [String] {
+        (fakeGet("inbox")[name] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
     }
 
     /// How often the fake bridge was told this item was seen.

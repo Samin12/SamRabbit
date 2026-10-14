@@ -77,6 +77,8 @@ struct RootView: View {
                 .overlay(alignment: .top) { ToastOverlay().environment(model) }
         }
         .overlay(alignment: .top) { ToastOverlay() }
+        // Above the tab bar (and the Talk accessory while a conversation runs).
+        .overlay(alignment: .bottom) { UndoSnackbar().padding(.bottom, talk.active && !talk.presented ? 124 : 70) }
     }
 }
 

@@ -94,11 +94,16 @@ The inbox (CONTRACTS-WAVE6 §A, the phone's twin of WAVE7: every agent on the Ma
   Terminal window" resumes it, live and working, finished six seconds later), a live one answers 409 ``session_live``,
   a Codex Desktop thread or a chat 409 ``unsupported_action``. The phone's items never list ``open`` and ``POST
   .../open`` answers 409 ``unsupported_action`` (only the Mac opens things on its screen).
-* ``POST /__fake/inbox {missing?, id?, live?, unread?, unsure?, status?, clear?}`` / ``GET /__fake/inbox``:
+* ``POST /v1/mobile/inbox/items/<id>/dismiss | undismiss`` (every item lists ``dismiss``): as the real bridge, seen and
+  out of the list and its counts (``counts.dismissed``) until it changes (status, requests, a newer ``updatedAt``; a
+  working item's steps don't count), ``{ok, dismissed, revision}``; the undo puts back what was unread.
+  ``?include=dismissed`` lists them after the rest with ``dismissed: true``.
+* ``POST /__fake/inbox {missing?, id?, live?, unread?, unsure?, status?, clear?, refuse?}`` / ``GET /__fake/inbox``:
   ``missing`` makes every inbox route 404 (an older bridge); ``id`` with ``live`` / ``unread`` / ``status`` changes a
   session, ``unsure`` as when the Mac's process list didn't answer (the real bridge then sends neither ``live`` nor
-  ``reply``, and a reply answers 503 ``session_check_failed``); the answer lists what arrived (replies, seen, new
-  tasks, refusals; ids and sizes only).
+  ``reply``, and a reply answers 503 ``session_check_failed``); ``refuse: [actions]`` makes those item actions answer
+  503 (a rollback to look at; ``[]`` ends it); the answer lists what arrived (replies, seen, dismissals, new tasks,
+  refusals; ids and sizes only).
 Stdlib only, Python 3.9.
 """
 
@@ -937,7 +942,10 @@ class FakeBridge:
         self.inbox_missing = False
         self.inbox_revision = int(now * 1000)  # like the real bridge: from the time in ms (64-bit on the watch)
         self.inbox_digest = ""
-        self.inbox_log: Dict[str, List[Dict[str, Any]]] = {"replies": [], "seen": [], "new": [], "refused": []}
+        self.inbox_log: Dict[str, List[Dict[str, Any]]] = {"replies": [], "seen": [], "new": [], "refused": [],
+                                                           "dismissed": [], "undismissed": []}
+        self.inbox_dismissed: Dict[str, Dict[str, Any]] = {}  # item id -> its change marker (and unread) when dismissed
+        self.inbox_refuse: List[str] = []  # item actions that answer 503 (/__fake/inbox refuse)
 
         def session(sid: str, source: str, title: str, project: str, status: str, label: str, ago: float,
                     summary: str, messages: List[Tuple[str, str]], *, live: bool = False, unread: bool = False,
@@ -1033,6 +1041,7 @@ class FakeBridge:
         unread = bool(t.get("unread")) and status != "working"
         can = {"needs-approval": ["approve", "reply", "stop", "open"], "needs-input": ["answer", "reply", "stop", "open"],
                "working": ["reply", "stop", "open"]}.get(status, ["reply", "open"]) + (["seen"] if unread else [])
+        can.append("dismiss")
         return {"id": "t3:" + t["threadId"], "source": "t3", "agent": t.get("agent") or "claude", "title": t["title"],
                 "project": t["projectName"], "cwd": "/Users/sam/" + t["projectName"].lower(), "status": status,
                 "statusLabel": self.T3_LABELS.get(status, "Finished"), "summary": t["summary"],
@@ -1055,6 +1064,7 @@ class FakeBridge:
         # As the real bridge: a Claude Code prompt can't be marked seen (only answered); a Codex item can.
         if unread and (x["source"] == "codex" or not asking):
             can.append("seen")
+        can.append("dismiss")
         return {"id": x["id"], "source": x["source"], "agent": x["source"], "title": x["title"],
                 "project": x["project"], "cwd": x["cwd"], "status": status, "statusLabel": x["statusLabel"],
                 "summary": x["summary"], "updatedAt": iso(x["updatedAt"]), "unread": unread, "pending": x["pending"],
@@ -1066,7 +1076,7 @@ class FakeBridge:
                 "project": "R1", "cwd": None, "status": "idle",
                 "statusLabel": "Live" if conv["live"] else "Conversation", "summary": conv["preview"] or "",
                 "updatedAt": iso(conv["lastAt"] / 1000.0), "unread": False, "pending": {"approvals": [], "inputs": []},
-                "can": ["open"], "live": bool(conv["live"]), "progress": None, "phase": None}
+                "can": ["open", "dismiss"], "live": bool(conv["live"]), "progress": None, "phase": None}
 
     INBOX_RANK = {"needs-approval": 0, "needs-input": 1, "error": 2, "working": 4}
 
@@ -1090,11 +1100,32 @@ class FakeBridge:
             return order, -epoch_of(item["updatedAt"])
         return sorted(items, key=rank)[:60]
 
-    def inbox(self) -> Dict[str, Any]:
+    @staticmethod
+    def change_marker(item: Dict[str, Any]) -> Dict[str, Any]:
+        pending = item.get("pending") or {}
+        requests = sorted(e.get("requestId") for kind in ("approvals", "inputs") for e in pending.get(kind) or [])
+        return {"status": item["status"], "requests": requests, "at": item["updatedAt"]}
+
+    def still_dismissed(self, item: Dict[str, Any]) -> bool:
+        """Dismissed and not changed since (the real bridge's ``_changed_since``); a change forgets the dismissal."""
+        marker = self.inbox_dismissed.get(item["id"])
+        if marker is None:
+            return False
+        now = self.change_marker(item)
+        changed = now["status"] != marker["status"] or any(r not in marker["requests"] for r in now["requests"]) or (
+            now["status"] != "working" and epoch_of(now["at"]) > epoch_of(marker["at"]))
+        if changed:
+            del self.inbox_dismissed[item["id"]]
+        return not changed
+
+    def inbox(self, include_dismissed: bool = False) -> Dict[str, Any]:
         """``GET /v1/mobile/inbox``: the revision grows by one whenever what the list shows changes."""
         with self.lock:
-            items = self.inbox_items()
-            digest = sha(json.dumps(items, sort_keys=True).encode())
+            everything = self.inbox_items()
+            hidden = [i for i in everything if self.still_dismissed(i)]
+            hidden_ids = {i["id"] for i in hidden}
+            items = [i for i in everything if i["id"] not in hidden_ids]
+            digest = sha(json.dumps([items, sorted(hidden_ids)], sort_keys=True).encode())
             if digest != self.inbox_digest:
                 if self.inbox_digest:
                     self.inbox_revision += 1
@@ -1105,10 +1136,12 @@ class FakeBridge:
                                        {"connected": False, "reason": "t3_unavailable"},
                                        "claude": {"available": True}, "codex": {"available": True},
                                        "samrabbit": {"available": True}}
+            shown = items + ([dict(i, dismissed=True, can=["undismiss" if c == "dismiss" else c for c in i["can"]])
+                              for i in hidden] if include_dismissed else [])
             return {"revision": self.inbox_revision, "updatedAt": iso(time.time()),
                     "counts": {"needsYou": needs, "working": sum(1 for i in items if i["status"] == "working"),
-                               "total": len(items)},
-                    "sources": sources, "items": items}
+                               "total": len(items), "dismissed": len(hidden)},
+                    "sources": sources, "items": shown}
 
     def inbox_find(self, item_id: str) -> Tuple[str, Dict[str, Any]]:
         """(source, the record behind an item id), or 404 ``item_not_found``."""
@@ -1171,9 +1204,38 @@ class FakeBridge:
         self.later(6.0, done)
         return {"ok": True, "how": "terminal", "message": "It continues in a new Terminal window on the Mac."}
 
+    def inbox_item_now(self, source: str, record: Dict[str, Any]) -> Dict[str, Any]:
+        if source == "t3":
+            return self.t3_inbox_item(record)
+        if source == "chat":
+            return self.chat_item(record)
+        return self.session_item(record)
+
     def inbox_action(self, item_id: str, action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         with self.lock:
+            if action in self.inbox_refuse:
+                self.inbox_log["refused"].append({"id": item_id, "code": "fake_refused"})
+                raise ApiError(503, "fake_refused", "The fake bridge refuses that right now.", retryable=True)
             source, record = self.inbox_find(item_id)
+            if action == "dismiss":
+                # Seen, and out of the list and its counts until it changes; nothing reaches T3.
+                known = self.inbox_dismissed.get(item_id) or {}
+                unread = known.get("unread", bool(record.get("unread")))
+                if "unread" in record:
+                    record["unread"] = False
+                # The marker of the item as it reads once seen (a failed session settles: that is no change).
+                self.inbox_dismissed[item_id] = dict(self.change_marker(self.inbox_item_now(source, record)),
+                                                     unread=unread)
+                self.inbox_log["dismissed"].append({"id": item_id})
+                revision = self.inbox(include_dismissed=False)["revision"]
+                return 200, {"ok": True, "dismissed": True, "revision": revision}
+            if action == "undismiss":
+                marker = self.inbox_dismissed.pop(item_id, None)
+                if marker is not None and "unread" in record:
+                    record["unread"] = marker.get("unread", record["unread"])  # back as unread as it was
+                self.inbox_log["undismissed"].append({"id": item_id})
+                revision = self.inbox(include_dismissed=False)["revision"]
+                return 200, {"ok": True, "dismissed": False, "revision": revision}
             if action == "seen":
                 self.inbox_log["seen"].append({"id": item_id})
                 record["unread"] = False
@@ -1638,6 +1700,8 @@ class Handler(BaseHTTPRequestHandler):
                     if body.get("clear"):
                         for log in b.inbox_log.values():
                             del log[:]
+                    if isinstance(body.get("refuse"), list):
+                        b.inbox_refuse = [str(action) for action in body["refuse"]]
             with b.lock:
                 return self.send_json(200, {"missing": b.inbox_missing, "revision": b.inbox_revision,
                                             **{k: list(v) for k, v in b.inbox_log.items()}})
@@ -1964,12 +2028,13 @@ class Handler(BaseHTTPRequestHandler):
             self.only(method, "GET")
             after = self.q1("after")
             wait = min(25.0, max(0.0, float(self.q1("wait", "0") or 0)))
-            answer = b.inbox()
+            include = "dismissed" in (self.q1("include", "") or "").split(",")
+            answer = b.inbox(include)
             if after is not None and after.isdigit() and int(after) == answer["revision"] and wait > 0:
                 deadline = time.time() + wait
                 while time.time() < deadline and answer["revision"] == int(after):
                     time.sleep(0.2)
-                    answer = b.inbox()
+                    answer = b.inbox(include)
             return self.send_json(200, answer)
         if rest in ("inbox/targets", "inbox/new") and not b.t3_available:
             raise ApiError(503, "t3_unavailable", "T3 Code on the Mac is not answering. Is the T3 Code app running?",
@@ -1991,10 +2056,10 @@ class Handler(BaseHTTPRequestHandler):
             # Like the real bridge: the phone never brings anything up on the Mac's screen.
             self.only(method, "POST")
             raise ApiError(409, "unsupported_action", "Opening is done on the Mac (the dock or the SamRabbit window).")
-        if action not in ("approve", "answer", "reply", "stop", "seen"):
+        if action not in ("approve", "answer", "reply", "stop", "seen", "dismiss", "undismiss"):
             raise ApiError(404, "not_found", "Not found.")
         self.only(method, "POST")
-        body = self.optional_body() if action in ("stop", "seen") else self.body()
+        body = self.optional_body() if action in ("stop", "seen", "dismiss", "undismiss") else self.body()
         status, payload = b.inbox_action(item_id, action, body)
         return self.send_json(status, payload)
 

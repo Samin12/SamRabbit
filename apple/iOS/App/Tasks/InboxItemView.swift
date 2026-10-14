@@ -8,6 +8,7 @@ import SwiftUI
 /// seeing it: it is marked seen (here and on the Mac's dock).
 struct InboxItemView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var close
     let itemId: String
     @State private var detail: InboxItemDetail?
     @State private var error: BridgeError?
@@ -89,6 +90,18 @@ struct InboxItemView: View {
                     }
                     .disabled(model.busyItems.contains(item.id))
                     .accessibilityIdentifier("inbox-detail-seen")
+                }
+            }
+            if let item, item.canDismiss {
+                ToolbarItem(placement: .topBarTrailing) {
+                    // Hidden here and on the Mac until it changes; back to the list, with Undo there.
+                    Button {
+                        model.dismiss(item)
+                        close()
+                    } label: {
+                        Label("Dismiss", systemImage: "eye.slash")
+                    }
+                    .accessibilityIdentifier("inbox-detail-dismiss")
                 }
             }
         }

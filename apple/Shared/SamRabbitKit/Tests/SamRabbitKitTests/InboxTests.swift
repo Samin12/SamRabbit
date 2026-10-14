@@ -527,6 +527,104 @@ struct InboxTests {
         #expect(Int32Range.violations(in: inbox).isEmpty)
         #expect(Int32Range.violations(in: MobileSummary.sample().with(inbox: inbox)).isEmpty)
     }
+
+    // MARK: dismissing (W8)
+
+    /// A dismissed item is never a row; `counts.dismissed` is read (0 from an older bridge); `dismiss` in `can` is
+    /// what offers it, so a bridge before it offers nothing.
+    @Test func dismissedItemsAndCounts() throws {
+        let json = """
+        {"revision": 9, "counts": {"needsYou": 1, "working": 0, "total": 1, "dismissed": 2},
+         "items": [{"id": "t3:a", "source": "t3", "title": "A", "status": "error", "can": ["reply", "dismiss"]},
+                   {"id": "t3:b", "source": "t3", "title": "B", "status": "error", "can": ["undismiss"], "dismissed": true}]}
+        """
+        let decoded = try snapshot(json)
+        #expect(decoded.items.map(\.id) == ["t3:a"])
+        #expect(decoded.counts.dismissed == 2)
+        #expect(try item("t3:a", in: decoded).canDismiss)
+        #expect(try snapshot().counts.dismissed == 0)
+        let older = try item("t3:t_deploy", in: try snapshot())
+        #expect(!older.canDismiss, "an older bridge: no dismiss in can")
+        let result = try BridgeJSON.decode(InboxDismissResult.self,
+                                           from: Data(#"{"ok": true, "dismissed": true, "revision": 1791955209040}"#.utf8))
+        #expect(result == InboxDismissResult(dismissed: true, revision: 1_791_955_209_040))
+        #expect(try BridgeJSON.decode(InboxDismissResult.self, from: Data(#"{"ok": true}"#.utf8)).revision == nil)
+    }
+
+    /// Gone at once; kept gone until the bridge's list at the revision its yes gave; from then on that list decides,
+    /// so an item that changed is back by itself. A refusal puts it back; nothing settled in 30 s lets go.
+    @Test func dismissingHidesUntilTheBridgeDecides() throws {
+        let inbox = try snapshot()
+        let deploy = try item("t3:t_deploy", in: inbox)
+        let now = Date.now
+        var dismissals = InboxDismissals()
+        dismissals.dismiss(deploy, now: now)
+        #expect(!dismissals.shown(inbox.items).contains { $0.id == deploy.id })
+        #expect(dismissals.shown(inbox.items).count == inbox.items.count - 1)
+        dismissals.apply(inbox)
+        #expect(dismissals.isHidden(deploy.id), "an answer from before the bridge hid it")
+        dismissals.confirmed(deploy.id, revision: inbox.revision + 1, current: inbox.revision)
+        var without = inbox
+        without.revision += 1
+        without.items.removeAll { $0.id == deploy.id }
+        dismissals.apply(without)
+        #expect(!dismissals.isHidden(deploy.id), "the bridge decides from here")
+        var back = inbox
+        back.revision += 2
+        #expect(dismissals.shown(back.items).contains { $0.id == deploy.id }, "it changed: back by itself")
+        // A yes after the answer it settles holds nothing back.
+        dismissals.dismiss(deploy, now: now)
+        dismissals.confirmed(deploy.id, revision: back.revision, current: back.revision)
+        #expect(!dismissals.isHidden(deploy.id))
+        // A refusal puts it back.
+        dismissals.dismiss(deploy, now: now)
+        let putBack = dismissals.failed(deploy.id)
+        #expect(putBack)
+        #expect(dismissals.shown(inbox.items).contains { $0.id == deploy.id })
+        let again = dismissals.failed(deploy.id)
+        #expect(!again, "nothing left to put back")
+        // Nothing settles it in 30 s.
+        dismissals.dismiss(deploy, now: now)
+        let early = dismissals.tick(now: now.addingTimeInterval(29))
+        #expect(!early)
+        let late = dismissals.tick(now: now.addingTimeInterval(InboxDismissals.staleSeconds))
+        #expect(late)
+        #expect(dismissals.isEmpty)
+    }
+
+    /// The undo: back at once, as it was, until the inbox carries it again; a failed undo hides it again; an undo
+    /// of a dismissal that never happened leaves the inbox's own row.
+    @Test func undoBringsItBack() throws {
+        let inbox = try snapshot()
+        let changelog = try item("claude:changelog", in: inbox)
+        var without = inbox
+        without.revision += 1
+        without.items.removeAll { $0.id == changelog.id }
+        var dismissals = InboxDismissals()
+        dismissals.dismiss(changelog)
+        dismissals.confirmed(changelog.id, revision: without.revision, current: inbox.revision)
+        dismissals.apply(without)
+        #expect(!dismissals.shown(without.items).contains { $0.id == changelog.id })
+        let back = dismissals.undo(changelog)
+        #expect(back.unread, "as unread as it was")
+        #expect(dismissals.shown(without.items).contains { $0.id == changelog.id }, "at once, from the copy")
+        #expect(dismissals.shown(without.items).map(\.id) == InboxSnapshot.ordered(without.items + [changelog]).map(\.id),
+                "in the contract's order")
+        dismissals.apply(without)
+        #expect(dismissals.shown(without.items).contains { $0.id == changelog.id })
+        dismissals.undoConfirmed(changelog.id, revision: without.revision + 1, current: without.revision)
+        var again = inbox
+        again.revision = without.revision + 1
+        dismissals.apply(again)
+        #expect(dismissals.isEmpty, "the inbox carries it again")
+        dismissals.dismiss(changelog)
+        dismissals.undo(changelog)
+        dismissals.undoFailed(changelog.id)
+        #expect(!dismissals.shown(inbox.items).contains { $0.id == changelog.id }, "the Mac still keeps it dismissed")
+        dismissals.undo(changelog)
+        dismissals.undoNotNeeded(changelog.id)
+        #expect(dismissals.shown(inbox.items).filter { $0.id == changelog.id }.count == 1)
+    }
 }
 
 #if os(macOS)
@@ -651,6 +749,48 @@ struct InboxBridgeTests {
         #expect(new.status == .working && new.agent == "codex")
         await #expect { _ = try await client.inboxNew(text: "x", choice: .init(agent: "codex", model: "claude-opus-5-5")) }
             throws: { ($0 as? BridgeError)?.code == "invalid_model" }
+    }
+
+    /// Dismiss on the phone: gone from the list and the counts (here and in the dock: one list), seen; back with the
+    /// undo as unread as it was; back by itself when it changes; nothing reaches T3.
+    @Test func dismissingAndTheUndo() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, _) = try await bridge.pairedClient()
+        let first = try await client.inbox()
+        #expect(first.items.allSatisfy { $0.canDismiss }, "every item")
+        let dismissed = try await client.inboxDismiss(Self.changelog)
+        #expect(dismissed.dismissed)
+        #expect((dismissed.revision ?? 0) > first.revision)
+        let after = try await client.inbox()
+        #expect(after.revision == dismissed.revision)
+        #expect(!after.items.contains { $0.id == Self.changelog })
+        #expect(after.counts.dismissed == 1)
+        #expect(after.shownCounts.needsYou == first.shownCounts.needsYou - 1)
+        let all = try await client.raw(.get("/v1/mobile/inbox", query: [URLQueryItem(name: "include", value: "dismissed")]))
+        let listed = try JSONDecoder().decode(JSONValue.self, from: all.body)["items"].array ?? []
+        let hidden = listed.filter { $0["dismissed"].bool == true }
+        #expect(hidden.compactMap { $0["id"].string } == [Self.changelog])
+        #expect(hidden.first?["can"].array?.compactMap(\.string).contains("undismiss") == true)
+        // The undo: back, unread.
+        let undone = try await client.inboxUndismiss(Self.changelog)
+        #expect(!undone.dismissed)
+        let changelog = try #require(try await client.inbox().items.first { $0.id == Self.changelog })
+        #expect(changelog.unread && changelog.needsYou)
+        // It comes back by itself when it changes: a reply makes it work.
+        _ = try await client.inboxDismiss(Self.changelog)
+        _ = try await client.inboxReply(Self.changelog, text: "Open the PR too")
+        let working = try #require(try await client.inbox().items.first { $0.id == Self.changelog })
+        #expect(working.status == .working)
+        let log = try await bridge.control("inbox", [:])
+        #expect(log["dismissed"].array?.count == 2 && log["undismissed"].array?.count == 1)
+        // A refusal (the fake's switch): 503, nothing hidden.
+        try await bridge.control("inbox", ["refuse": .array([.string("dismiss")])])
+        await #expect { _ = try await client.inboxDismiss(Self.pytest) } throws: { ($0 as? BridgeError)?.code == "fake_refused" }
+        #expect(try await client.inbox().items.contains { $0.id == Self.pytest })
+        try await bridge.control("inbox", ["refuse": .array([])])
+        await #expect { _ = try await client.inboxDismiss("claude:nope") } throws: {
+            ($0 as? BridgeError)?.code == "item_not_found"
+        }
     }
 
     /// T3 Code down: the inbox still answers with the others; an older bridge has no inbox at all (404).
