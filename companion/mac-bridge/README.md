@@ -342,11 +342,11 @@ sync routes, which keep epoch milliseconds):
 
 | Route | What |
 |---|---|
-| `GET /v1/mobile/summary` | `{generatedAt, mac: {name, online, screenLocked}, r1: {lastSeenAt, live, liveConversationId, liveTitle}, t3: {available, needsYou, working, threads: [top 5 {threadId, title, project, status, updatedAt, summary}]}, calendar: {available, next: [≤3 {title, startsAt, endsAt, allDay, location, meetingUrl}]}, latestConversation: {conversationId, title, lastAt, preview, live}, journal: {available}, transcribe: {available, reason?}}`. Served from caches (< 300 ms) that a worker refreshes while a device is active (T3 every 10 s, calendar every 120 s, journal every 5 min, screen lock every 15 s, transcription every 60 s). `transcribe` tells the phone and the watch whether `POST /v1/mobile/transcribe` works now (the same `reason`s as `/health`, e.g. `helper_missing`, `model_downloading`, `permission_denied`); a recording that just worked or failed updates it at once. The journal check is one read of today through the bridge's own read slots (at most two Heptabase CLI reads at once), and a note added from the phone counts as a check. A part that can't be read says `available: false` with a `reason` (`loading` while a cold start is still reading it). `r1.lastSeenAt` is the later of the R1's last conversation activity and its last request to this bridge with its own token from the network (the journal, Mac control, conversation sync, `/health`; remembered while the bridge runs). |
+| `GET /v1/mobile/summary` | `{generatedAt, mac: {name, online, screenLocked}, r1: {lastSeenAt, live, liveConversationId, liveTitle}, t3: {available, needsYou, working, threads: [top 5 {threadId, title, project, status, updatedAt, summary}]} (less the threads dismissed in the inbox), calendar: {available, next: [≤3 {title, startsAt, endsAt, allDay, location, meetingUrl}]}, latestConversation: {conversationId, title, lastAt, preview, live}, journal: {available}, transcribe: {available, reason?}}`. Served from caches (< 300 ms) that a worker refreshes while a device is active (T3 every 10 s, calendar every 120 s, journal every 5 min, screen lock every 15 s, transcription every 60 s). `transcribe` tells the phone and the watch whether `POST /v1/mobile/transcribe` works now (the same `reason`s as `/health`, e.g. `helper_missing`, `model_downloading`, `permission_denied`); a recording that just worked or failed updates it at once. The journal check is one read of today through the bridge's own read slots (at most two Heptabase CLI reads at once), and a note added from the phone counts as a check. A part that can't be read says `available: false` with a `reason` (`loading` while a cold start is still reading it). `r1.lastSeenAt` is the later of the R1's last conversation activity and its last request to this bridge with its own token from the network (the journal, Mac control, conversation sync, `/health`; remembered while the bridge runs). |
 | `GET /v1/mobile/conversations?limit=&before=&q=`, `GET /v1/mobile/conversations/<id>[/events?after=]`, `GET /v1/mobile/stream?after=` (SSE), `GET /v1/mobile/blobs/<sha256>` | the desktop sync API's own handlers (same JSON and SSE format), authorized by the mobile token. Phones and watches share 4 of the sync store's 8 live streams (so the desktop app always has some; 503 `too_many_streams` beyond that), at most 2 per device (a third one, e.g. a reconnect, closes that device's oldest); revoking a device ends its open streams at once |
 | `GET /v1/mobile/ui/artifacts/<id>` (+ `/image` JPEG, `/document` HTML with the generated-UI CSP) | a generated UI's status and content |
 | `POST /v1/mobile/ui/generate {prompt, data?, requestId?}` | → `202 {artifactId, status, conversationId}`; the request and the result are recorded in the day's **"Phone"** conversation (`phone-YYYYMMDD`, never live), so the desktop app shows them too. A request the generator would refuse (bad `data`, 503 `genui_busy`) records nothing. With the phone's own `requestId` (1–96 of `A-Z a-z 0-9 . _ : -`), a retry after a timeout answers the same visual and records the request once |
-| `GET /v1/mobile/t3/threads?filter=needs_you\|working\|recent` | `{threads: [{threadId, title, projectId, projectName, status: needs_approval\|needs_input\|working\|done\|error\|idle, statusLabel, updatedAt, summary, settled, pending?: {kind: approval\|question, text, options, requestId, …}}]}` (idle = never ran a turn). Needs-you threads whose open request is not cached yet are read before answering (up to 4, about 2.5 s at most), so `pending` is there on the first load |
+| `GET /v1/mobile/t3/threads?filter=needs_you\|working\|recent[&include=dismissed]` | `{threads: [{threadId, title, projectId, projectName, status: needs_approval\|needs_input\|working\|done\|error\|idle, statusLabel, updatedAt, summary, settled, pending?: {kind: approval\|question, text, options, requestId, …}}]}` (idle = never ran a turn). Needs-you threads whose open request is not cached yet are read before answering (up to 4, about 2.5 s at most), so `pending` is there on the first load. Threads dismissed in the inbox are left out until they change, as in the inbox (so the watch, the phone's background alerts and the voice assistants agree with it); `include=dismissed` lists them too, with `dismissed: true` |
 | `GET /v1/mobile/t3/threads/<id>` | `{thread, messages: [{role: user\|assistant\|tool, text, at}], pending, activeTurnId}` (a run of tool steps is one `tool` line) |
 | `POST /v1/mobile/t3/threads/<id>/message {text}` · `/respond {decision: "approve"\|"deny"}` or `{answer}` (or `{answers: {questionId: …}}`) · `/stop` | `thread.turn.start` / `thread.approval.respond` (approve → accept, deny → decline) / `thread.user-input.respond` (option values as T3 expects; as on the R1, an answer may be the label, a shortened label, a number or a position such as "the first one"; other words go as free text only when the question allows it) / `thread.turn.interrupt` |
 | `POST /v1/mobile/t3/threads {text, projectId?, title?}` | `thread.create` + `thread.turn.start` → `{threadId, title, projectId, projectName, placement}`. Without `projectId`: a project the request names, coding work to the most recently active code project, everything else to the orchestration project (`SAMRABBIT_T3_ORCHESTRATION_PROJECT` id, e.g. from `install.sh --t3-orchestration-project`, else the project titled `SAMRABBIT_T3_ORCHESTRATION_TITLE`, default T3's agent project "Hermes", else T3's agent workspace project, else the most recent one). See "Placement compared with the R1" below. |
@@ -681,7 +681,11 @@ did not have (an approval or question; a T3 thread's requests read later than th
 something it did since (a newer `updatedAt`: a new turn, an answer, a chat message). A working item's steps are not
 news: it comes back when it stops working (finished, failed, needs him). `?include=dismissed` returns them after the
 rest, in the list's order, each with `dismissed: true` and `undismiss` in place of `dismiss` in `can` (so does
-`/items/<id>` for a dismissed item).
+`/items/<id>` for a dismissed item). A list that was already being built when something was dismissed read it before
+it was dismissed and seen (a failed Claude Code session still unread, so still failed), so it keeps it hidden whatever
+it read; the list the dismissal builds next decides. T3's own lists elsewhere (`summary.t3`,
+`/v1/mobile/t3/threads`, the voice assistants' thread lists and their session's T3 status) leave a dismissed T3 thread
+out by the same rule, from what the T3 session already has (never a T3 call).
 
 What Samin has seen and dismissed is `~/Library/Application Support/SamRabbit/inbox/inbox-state.json` (0600;
 `--inbox-dir`; ids and markers only, never a title). The first look at a source marks everything there as seen, so the
@@ -823,7 +827,8 @@ per conversation, announcements (once each), the "Watch" conversation in the syn
 no real Claude, ElevenLabs, T3, journal or calendar. `tests/test_realtime.py` drives the realtime brain with a fake
 helper (`tests/fake_realtime_peer.py`: the helper protocol plus OpenAI's data-channel events from a script), a fake
 signaling server and a fake ChatGPT login (`tests/fake_openai.py`): the session's exact shape and headers, the
-stream's frames, the `[Now: …]` line, tools and cards, the journal's verbatim check, cancel, warm-up, idle and 55-minute
+stream's frames, the `[Now: …]` line, tools and cards (a thread dismissed in the inbox: not listed, still found by
+name), the journal's verbatim check, cancel, warm-up, idle and 55-minute
 sessions (a stale one replaced without a deadlock), announcements, the fallback to Claude (never after a tool ran or a
 cancel), a session that died between turns (replaced, no pause), a refused `response.create` while another response
 is active, outputs for a cancelled response's calls, the session cap and the warm-up's reuse, a close while opening, a
@@ -844,7 +849,8 @@ test), a fake process table instead of `ps` / `lsof` and a launcher that records
 launched): the desktop-token auth (401, 403 from the LAN or a foreign Origin), every status of every source and what
 is left out, the order, the cap and the counts, revisions and the long poll (woken by a change, by the refresher, or
 after its wait), seen and unread (kept across restarts), dismiss and undo (out of the list and the counts until the
-item changes, back as unread as it was, kept across restarts, never a T3 call, waking a long poll), each action's
+item changes, back as unread as it was, kept across restarts, never a T3 call, waking a long poll, a dismissal written
+while a list is being built, more hidden items than the cap), each action's
 dispatch body, `session_live`, what `open` and
 `reply` would run, targets with and without T3's provider list, new tasks with a project, agent and model, a dev
 copy's dry run, incremental reads, rollouts in the format the installed Codex Desktop writes (a ~100 KB head before the
@@ -857,7 +863,8 @@ earlier turn leaves the running one alone, one that names the running turn stops
 streamed realtime turn with the Mac addendum. `tests/test_mobile_inbox.py` drives the phone's
 `/v1/mobile/inbox*` against the dock's fakes: the mobile-token auth (401 for the R1's, the desktop's and a wrong
 token, 403 off the LAN and for the assistant's own token), the same list and revision as the dock without `open`, the
-long poll, items, seen and dismissals shared with the dock (both ways, with the undo), T3's dispatch bodies, new tasks, a reply to a live session that opens
+long poll, items, seen and dismissals shared with the dock (both ways, with the undo; a dismissed T3 thread out of the
+summary and T3's thread lists until it changes), T3's dispatch bodies, new tasks, a reply to a live session that opens
 nothing, one that resumes in Terminal and says so, nothing started while `ps` fails, `/open` refused, and the log.
 `tests/test_desktop_window.py`
 drives `/v1/desktop/summary`, `/calendar/agenda|block`, `/journal` and `/devices*`: the desktop-token auth, the summary

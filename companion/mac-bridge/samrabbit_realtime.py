@@ -1026,10 +1026,15 @@ class ToolRunner:
 
     # ------------------------------------------------------------------ T3
     def _all_threads(self) -> List[Dict[str, Any]]:
+        """Every thread, the ones Samin dismissed in the inbox too (``dismissed: true``): a thread is still found by
+        name; the list and its counts leave them out (``_shown_threads``)."""
         if self._threads is None:
-            value = self.bridge.call("GET", "/v1/mobile/t3/threads?limit=100")
+            value = self.bridge.call("GET", "/v1/mobile/t3/threads?limit=100&include=dismissed")
             self._threads = [item for item in value.get("threads") or [] if isinstance(item, dict)]
         return self._threads
+
+    def _shown_threads(self) -> List[Dict[str, Any]]:
+        return [item for item in self._all_threads() if not item.get("dismissed")]
 
     def _brief(self, item: Dict[str, Any]) -> Dict[str, Any]:
         return {"id": item.get("threadId"), "title": item.get("title"), "project": item.get("projectName"),
@@ -1061,7 +1066,7 @@ class ToolRunner:
             raise _Failure("invalid_arguments", "filter must be needs-you, working, recent or all.")
         limit = arguments.get("limit") if isinstance(arguments.get("limit"), int) else 6
         limit = max(1, min(12, int(limit)))
-        threads = list(self._all_threads())
+        threads = self._shown_threads()
         counts = {"needsYou": sum(1 for item in threads if item.get("status") in ("needs_approval", "needs_input")),
                   "working": sum(1 for item in threads if item.get("status") == "working"),
                   "error": sum(1 for item in threads if item.get("status") == "error"),

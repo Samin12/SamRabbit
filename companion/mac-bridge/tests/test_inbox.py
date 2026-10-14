@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1012,6 +1013,104 @@ class DismissTest(InboxBase):
         self.assertFalse(waiter.is_alive())
         self.assertEqual(start["revision"] + 1, answers[0]["revision"])
         self.assertNotIn("t3:t-error", self.by_id(answers[0]))
+
+    def fail_claude_again(self, age: float) -> str:
+        """The failed Claude Code session fails again (unread, ``error``); its item id."""
+        claude = self.project_dir / (IDS["failed"] + ".jsonl")
+        at = NOW - age
+        self.append(claude, [claude_user(at - 1, "and the errors?", session=IDS["failed"]),
+                             claude_record("assistant", at, session=IDS["failed"], isApiErrorMessage=True,
+                                           message={"id": "e" + str(int(at)), "role": "assistant",
+                                                    "model": "<synthetic>",
+                                                    "content": [{"type": "text", "text": "API Error: overloaded"}],
+                                                    "stop_reason": "stop_sequence"})], age=age)
+        return "claude:" + IDS["failed"]
+
+    def test_a_list_already_being_built_never_undoes_a_dismissal(self) -> None:
+        """A refresh that read the sources just before Samin dismissed a failed Claude Code session holds it as it
+        was (unread, so ``error``; seen, it is idle): that list keeps it hidden, the one built next decides."""
+        self.build_world()
+        self.get_inbox()  # the first look
+        failed_id = self.fail_claude_again(79)
+        item = self.by_id(self.fresh())[failed_id]
+        self.assertEqual(("error", True), (item["status"], item["unread"]))
+        entered, release = threading.Event(), threading.Event()
+        real = self.inbox._codex_items  # noqa: SLF001
+
+        def slow_codex(now: float) -> Any:  # Claude Code's sessions are read by now: unread, failed
+            entered.set()
+            release.wait(10)
+            return real(now)
+
+        self.inbox._codex_items = slow_codex  # type: ignore[method-assign]  # noqa: SLF001
+        building = threading.Thread(target=lambda: self.inbox.refresh(force=True))
+        building.start()
+        self.assertTrue(entered.wait(10))
+        self.inbox._codex_items = real  # type: ignore[method-assign]  # noqa: SLF001
+        answers: List[Tuple[int, Dict[str, Any]]] = []
+        acting = threading.Thread(target=lambda: answers.append(self.act(failed_id, "dismiss")))
+        acting.start()
+        deadline = time.monotonic() + 10
+        while self.inbox.seen.dismissal(failed_id) is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNotNone(self.inbox.seen.dismissal(failed_id), "written while the list is being built")
+        release.set()
+        building.join(10)
+        acting.join(10)
+        self.assertFalse(building.is_alive() or acting.is_alive())
+        self.assertEqual((200, True), (answers[0][0], answers[0][1].get("dismissed")))
+        value = self.get_inbox()
+        self.assertEqual(answers[0][1]["revision"], value["revision"])
+        self.assertNotIn(failed_id, self.by_id(value), "still dismissed")
+        self.assertEqual(1, value["counts"]["dismissed"])
+        self.assertEqual({failed_id}, set(self.saved()["dismissed"]))
+        self.assertEqual({"marker", "seen", "before", "at"}, set(self.saved()["dismissed"][failed_id]),
+                         "this run's write numbers are never saved")
+        self.assertNotIn(failed_id, self.by_id(self.fresh()), "and the lists after it agree")
+        # It still comes back when it changes: it failed again.
+        failed_id = self.fail_claude_again(10)
+        back = self.by_id(self.fresh())[failed_id]
+        self.assertEqual(("error", True), (back["status"], back["unread"]))
+        self.assertEqual({}, self.saved()["dismissed"])
+
+    def test_a_dismissal_written_again_is_never_forgotten_for_the_one_before(self) -> None:
+        seen = inbox.SeenState(None)
+        marker = {"status": "done", "requests": [], "at": "2026-10-08T12:00:00Z"}
+        seen.dismiss("t3:x", marker, "m1")
+        first = seen.dismissal("t3:x")
+        self.assertEqual((1, 1), (first["write"], seen.writes()))
+        seen.undismiss("t3:x")
+        seen.dismiss("t3:x", marker, "m2")  # the undo, then dismissed again while a list compared the first one
+        seen.came_back({"t3:x": first["write"]})
+        self.assertIsNotNone(seen.dismissal("t3:x"), "a list that compared the first one leaves the second alone")
+        seen.came_back({"t3:x": seen.dismissal("t3:x")["write"]})
+        self.assertIsNone(seen.dismissal("t3:x"))
+        self.assertEqual(2, seen.writes())
+
+    def test_every_dismissed_item_counts_and_is_found_past_the_cap(self) -> None:
+        self.build_world()
+        self.get_inbox()
+        ids = ["claude:" + IDS["done"], "codex:" + IDS["desk"], "codex:" + IDS["cli_done"]]
+        for item_id in ids:
+            status, answer = self.act(item_id, "dismiss")
+            self.assertEqual((200, True), (status, answer.get("dismissed")), item_id)
+        with mock.patch.object(inbox, "MAX_ITEMS", 2):
+            value = self.fresh()
+            everything = self.get_inbox("?include=dismissed")
+            status, health = self.call("GET", "/health", token=TOKEN)
+            self.assertEqual(200, status, health)
+            self.assertEqual((3, 3), (value["counts"]["dismissed"], health["inbox"]["dismissed"]),
+                             "/health says what counts.dismissed says")
+            hidden = [item["id"] for item in everything["items"] if item.get("dismissed")]
+            self.assertEqual(ids[:2], hidden, "?include=dismissed lists as many as the list does")
+            # The one past the cap is still the bridge's: its route says it is dismissed, it can be dismissed again.
+            status, detail = self.call("GET", "/v1/desktop/inbox/items/" + ids[2], desktop=True)
+            self.assertEqual((200, True), (status, detail["item"].get("dismissed")))
+            status, answer = self.act(ids[2], "dismiss")
+            self.assertEqual((200, True), (status, answer.get("dismissed")))
+            status, answer = self.act(ids[2], "undismiss")
+            self.assertEqual((200, False), (status, answer.get("dismissed")))
+            self.assertEqual(2, self.fresh()["counts"]["dismissed"])
 
     def test_what_counts_as_a_change(self) -> None:
         def item(status: str = "error", at: str = "2026-10-08T12:00:00Z", requests: Tuple[str, ...] = (),

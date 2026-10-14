@@ -2191,7 +2191,9 @@ class AssistantService:
         try:
             t3_on = hub is not None and bool(hub.available())
             if t3_on and hub.cached() is not None:
-                items = hub.threads(None, limit=40, max_age=1e9)  # the cached snapshot only (no T3 call)
+                # The cached snapshot only (no T3 call), less what Samin dismissed in the inbox.
+                hidden = getattr(self.mobile, "t3_hidden", None)
+                items = hub.threads(None, limit=40, max_age=1e9, hide=hidden() if callable(hidden) else None)
         except Exception:  # noqa: BLE001
             items = None
         writer = getattr(self.server, "calendar", None)

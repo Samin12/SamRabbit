@@ -79,7 +79,9 @@ Any item can be dismissed (``dismiss`` is in every ``can``): it is marked seen a
 ``dismissed: true`` and ``undismiss`` instead of ``dismiss`` in ``can``) until it changes: another status, a request it
 did not have, or something it did since (a newer ``updatedAt``; a working item's steps do not count). Then it comes back
 by itself. ``undismiss`` (the undo) brings it back at once, as unread as it was. The dismissals are kept in the same
-state file, next to what was seen; nothing of it ever reaches T3, Claude Code or Codex.
+state file, next to what was seen; nothing of it ever reaches T3, Claude Code or Codex. T3's lists outside the inbox
+(``summary.t3``, ``/v1/mobile/t3/threads``, the voice assistants') leave dismissed threads out the same way
+(``t3_dismissed``).
 
 Opening things uses LaunchServices only (``/usr/bin/open``: no AppleScript, no Automation prompt). A copy of the
 bridge that is not the installed one opens nothing (``dryRun: true``) unless started with ``--inbox-launch``.
@@ -573,7 +575,8 @@ class SeenState:
     {itemId: {marker, seen, before, at}}}``; with no ``path`` (a copy of the bridge that is not the installed one) it
     lives in memory only. A dismissal keeps the item's change marker (``_change_marker``: it is hidden until that
     changes), the seen marker dismissing stored (at ``at``) and the one before it (so an undo puts back what was
-    unread)."""
+    unread). Each dismissal written in this run also has a number (``write``, never saved: 0 for one loaded from the
+    file), so a list built while it was written can tell it is newer than what it read (``InboxService.refresh``)."""
 
     def __init__(self, path: Optional[str], *, clock: Callable[[], float] = time.time) -> None:
         self.path = path
@@ -581,7 +584,8 @@ class SeenState:
         self._lock = threading.Lock()
         self._seen: Dict[str, Tuple[str, float]] = {}  # item id -> (marker, when it was stored)
         self._baselines: Dict[str, bool] = {}
-        self._dismissed: Dict[str, Dict[str, Any]] = {}  # item id -> {marker, seen, before, at}
+        self._dismissed: Dict[str, Dict[str, Any]] = {}  # item id -> {marker, seen, before, at, write}
+        self._writes = 0  # dismissals written in this run (``write`` is the count when one was)
         self._load()
 
     def _load(self) -> None:
@@ -603,7 +607,7 @@ class SeenState:
                 self._dismissed[str(key)] = {
                     "marker": entry["marker"], "at": float(entry.get("at") or 0.0),
                     "seen": entry.get("seen") if isinstance(entry.get("seen"), str) else None,
-                    "before": entry.get("before") if isinstance(entry.get("before"), str) else None}
+                    "before": entry.get("before") if isinstance(entry.get("before"), str) else None, "write": 0}
 
     def _save_locked(self) -> None:
         if len(self._seen) > MAX_SEEN:  # the most recently stored ones stay (never by age: old threads stay seen)
@@ -616,7 +620,8 @@ class SeenState:
         data = json.dumps({"version": 1, "seen": {key: {"marker": marker, "at": round(at, 3)}
                                                   for key, (marker, at) in self._seen.items()},
                            "baselines": self._baselines,
-                           "dismissed": {key: dict(entry, at=round(entry["at"], 3))
+                           "dismissed": {key: {"marker": entry["marker"], "seen": entry["seen"],
+                                               "before": entry["before"], "at": round(entry["at"], 3)}
                                          for key, entry in self._dismissed.items()}}, separators=(",", ":"))
         folder = os.path.dirname(self.path) or "."
         try:
@@ -669,6 +674,11 @@ class SeenState:
         with self._lock:
             return len(self._dismissed)
 
+    def writes(self) -> int:
+        """How many dismissals were written in this run: one with a higher ``write`` came after this was read."""
+        with self._lock:
+            return self._writes
+
     def dismiss(self, item_id: str, marker: Dict[str, Any], seen: str) -> None:
         """Hide an item until it changes from ``marker``, and mark it seen (``seen``). What was seen before is kept
         (from the first dismissal, when dismissed again) so an undo can put it back."""
@@ -677,8 +687,10 @@ class SeenState:
             known = self._dismissed.get(item_id)
             previous = self._seen.get(item_id)
             before = known["before"] if known else (previous[0] if previous else None)
+            self._writes += 1
             self._seen[item_id] = (seen, now)
-            self._dismissed[item_id] = {"marker": dict(marker), "seen": seen, "before": before, "at": now}
+            self._dismissed[item_id] = {"marker": dict(marker), "seen": seen, "before": before, "at": now,
+                                        "write": self._writes}
             self._save_locked()
 
     def undismiss(self, item_id: str) -> bool:
@@ -698,10 +710,14 @@ class SeenState:
             self._save_locked()
             return True
 
-    def came_back(self, item_ids: List[str]) -> None:
-        """These changed since they were dismissed: they show again (what was seen stays)."""
+    def came_back(self, evaluated: Dict[str, int]) -> None:
+        """These changed since they were dismissed (item id -> the ``write`` of the dismissal that was compared): they
+        show again (what was seen stays). A dismissal written again since (an undo and another dismiss) stays."""
         with self._lock:
-            gone = [key for key in item_ids if self._dismissed.pop(key, None) is not None]
+            gone = [key for key, write in evaluated.items()
+                    if key in self._dismissed and self._dismissed[key].get("write") == write]
+            for key in gone:
+                del self._dismissed[key]
             if gone:
                 self._save_locked()
 
@@ -1564,7 +1580,7 @@ class InboxService:
     def health(self) -> Dict[str, Any]:
         state = self._state
         return {"available": True, "revision": state.revision, "items": len(state.items),
-                "needsYou": state.counts.get("needsYou", 0), "dismissed": len(state.dismissed)}
+                "needsYou": state.counts.get("needsYou", 0), "dismissed": state.counts.get("dismissed", 0)}
 
     # ------------------------------------------------------------------ wiring
     def _hub(self) -> Any:
@@ -1612,6 +1628,8 @@ class InboxService:
             if state.generation == generation and (
                     state.built_at >= started or (not force and self._monotonic() - state.built_at < REUSE_SECONDS)):
                 return state
+            # Dismissals written from here on may be newer than what the sources read: this list keeps them hidden.
+            written = self.seen.writes()
             now = self._clock()
             items: List[Dict[str, Any]] = []
             sources: Dict[str, Any] = {}
@@ -1626,12 +1644,11 @@ class InboxService:
                 items.extend(found)
                 sources[name] = status
             items.sort(key=_rank)
-            items, hidden = self._without_dismissed(items)
+            items, hidden = self._without_dismissed(items, written)
             counts = {"needsYou": sum(1 for item in items if _needs_you(item)),
                       "working": sum(1 for item in items if item["status"] == WORKING), "total": len(items),
                       "dismissed": len(hidden)}
-            items = items[:MAX_ITEMS]
-            hidden = hidden[:MAX_ITEMS]
+            items = items[:MAX_ITEMS]  # every hidden one stays (``_find``: dismissed again, its undo, its route)
             digest = hashlib.sha256(json.dumps({"items": items, "dismissed": [item["id"] for item in hidden],
                                                 "sources": sources}, sort_keys=True,
                                                ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -1671,20 +1688,24 @@ class InboxService:
             self._state.built_at = -1e12
         self._wake.set()
 
-    def _without_dismissed(self, items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def _without_dismissed(self, items: List[Dict[str, Any]],
+                           written: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """(what shows, what Samin dismissed and has not changed since), both in the list's order. An item that
-        changed comes back by itself: its dismissal is forgotten."""
+        changed comes back by itself: its dismissal is forgotten. A dismissal written after this list started
+        reading (``written``: ``SeenState.writes`` then) stays hidden whatever the item says: it was read before it
+        was dismissed and seen (a failed Claude Code session still unread, so still ``error``), so comparing them
+        would undo the dismissal; the list built next (an action always makes one) compares them."""
         if not self.seen.dismissed_count():
             return items, []
         shown: List[Dict[str, Any]] = []
         hidden: List[Dict[str, Any]] = []
-        back: List[str] = []
+        back: Dict[str, int] = {}
         for item in items:
             entry = self.seen.dismissal(item["id"])
             if entry is None:
                 shown.append(item)
-            elif _changed_since(entry["marker"], item):
-                back.append(item["id"])
+            elif entry.get("write", 0) <= written and _changed_since(entry["marker"], item):
+                back[item["id"]] = entry.get("write", 0)
                 shown.append(item)
             else:
                 hidden.append(item)
@@ -1696,6 +1717,21 @@ class InboxService:
     def _is_dismissed(self, item: Dict[str, Any]) -> bool:
         entry = self.seen.dismissal(item["id"])
         return entry is not None and not _changed_since(entry["marker"], item)
+
+    def t3_dismissed(self, thread: Dict[str, Any]) -> bool:
+        """For T3's own lists outside the inbox (``summary.t3``, ``/v1/mobile/t3/threads``, the voice assistants'
+        thread lists): is this thread (a ``T3Hub.item``) one Samin dismissed that has not changed since? The inbox's
+        own test (``_changed_since``) on what the hub knows of it: its status, its open request (when read) and its
+        ``updatedAt``, the same ones the inbox's item has. Never a T3 call, so a list is never held up by it."""
+        entry = self.seen.dismissal("t3:" + str(thread.get("threadId") or ""))
+        if entry is None:
+            return False
+        pending = _dict(thread.get("pending"))
+        requests = [{"requestId": pending["requestId"]}] if pending.get("requestId") else []
+        view = {"status": _MOBILE.get(str(thread.get("status")), IDLE), "updatedAt": thread.get("updatedAt"),
+                "pending": {"approvals": requests if pending.get("kind") == "approval" else [],
+                            "inputs": requests if pending.get("kind") != "approval" else []}}
+        return not _changed_since(entry["marker"], view)
 
     # ------------------------------------------------------------------ T3
     def _t3_items(self, now: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -2087,7 +2123,7 @@ class InboxService:
             state = self._wait(after, wait)
         items = list(state.items)
         if "dismissed" in include:  # after everything that shows, marked
-            items += [_dismissed_view(item) for item in state.dismissed]
+            items += [_dismissed_view(item) for item in state.dismissed[:MAX_ITEMS]]
         return 200, {"revision": state.revision, "updatedAt": state.updated_at, "counts": dict(state.counts),
                      "sources": state.sources,
                      "items": [_phone_view(item) for item in items] if mobile else items}
@@ -2246,6 +2282,9 @@ class InboxService:
         else:
             self.seen.undismiss(item_id)
         self._changed_now()
+        forget = getattr(getattr(self.server, "mobile", None), "forget_summary", None)
+        if callable(forget):
+            forget()  # its ``t3`` part leaves dismissed threads out too
         state = self.refresh(force=True)
         _LOG.info("inbox %s %s", "dismissed" if on else "undismissed", source)
         return 200, {"ok": True, "dismissed": on, "revision": state.revision}

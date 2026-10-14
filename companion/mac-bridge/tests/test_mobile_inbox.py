@@ -277,6 +277,52 @@ class PhoneDismissTest(PhoneInboxBase):
         self.assertNotIn("t-error", log, "route templates only: no item ids")
 
 
+    def test_a_dismissed_thread_leaves_t3s_own_lists_until_it_changes(self) -> None:
+        """What the watch, the phone's background alerts, its fallback list and the voice assistants read
+        (``summary.t3``, ``/v1/mobile/t3/threads``) leaves out what was dismissed in the inbox, as the inbox does."""
+        self.build_world()
+        self.phone_inbox()
+
+        def summary(path: str = "/v1/mobile/summary") -> Dict[str, Any]:
+            status, value = (self.call("GET", path, desktop=True) if path.startswith("/v1/desktop")
+                             else self.call("GET", path, token=self.phone))
+            self.assertEqual(200, status, value)
+            return value["t3"]
+
+        def listed(query: str = "") -> List[Dict[str, Any]]:
+            status, value = self.call("GET", "/v1/mobile/t3/threads" + query, token=self.phone)
+            self.assertEqual(200, status, value)
+            return value["threads"]
+
+        before = summary()
+        self.assertEqual(["t-approval", "t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        status, answer = self.phone_act("t3:t-approval", "dismiss")
+        self.assertEqual((200, True), (status, answer["dismissed"]))
+        for path in ("/v1/mobile/summary", "/v1/desktop/summary"):
+            with self.subTest(summary=path):
+                part = summary(path)
+                self.assertEqual(before["needsYou"] - 1, part["needsYou"], "at once: no summary from before it")
+                self.assertNotIn("t-approval", [item["threadId"] for item in part["threads"]])
+        self.assertEqual(["t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        self.assertNotIn("t-approval", [item["threadId"] for item in listed()], "the watch's whole list too")
+        everything = listed("?include=dismissed")
+        self.assertEqual([True], [item.get("dismissed") for item in everything if item["threadId"] == "t-approval"])
+        self.assertEqual(1, sum(1 for item in everything if "dismissed" in item), "only the dismissed one says so")
+        # The undo brings it back everywhere.
+        self.phone_act("t3:t-approval", "undismiss")
+        self.assertEqual(before["needsYou"], summary()["needsYou"])
+        self.assertEqual(["t-approval", "t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        # Dismissed again, it comes back by itself when it changes (without waiting for the inbox to look again).
+        self.act("t3:t-approval", "dismiss")
+        self.assertEqual(["t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        with self.fake_t3.lock:
+            self.fake_t3.get_thread("t-approval")["updatedAt"] = "2026-10-08T18:45:00.000Z"
+        self.hub.invalidate()
+        self.assertEqual(["t-approval", "t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        self.assertEqual(before["needsYou"], summary()["needsYou"])
+        self.assertEqual([], self.fake_t3.dispatched, "dismissing never touches T3")
+
+
 # ====================================================================== T3 from the phone
 
 

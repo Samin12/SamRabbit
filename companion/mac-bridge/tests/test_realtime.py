@@ -39,6 +39,7 @@ sys.path.insert(0, str(HERE))
 
 import samrabbit_assistant as assistant  # noqa: E402
 import samrabbit_chatgpt as chatgpt  # noqa: E402
+import samrabbit_inbox as inbox  # noqa: E402
 import samrabbit_realtime as realtime  # noqa: E402
 import samrabbit_realtime_profile as profile  # noqa: E402
 from fake_openai import FakeIssuer, FakeSignaling, jwt  # noqa: E402
@@ -366,6 +367,28 @@ class ToolTest(RealtimeBase):
         actions = [event for event in turn["events"] if event["type"] == "action"]
         self.assertEqual(["task_started"], [action["kind"] for action in actions])
         self.assertEqual({"type", "kind", "title", "threadId"}, set(actions[0]))
+
+    def test_a_thread_dismissed_in_the_inbox_is_not_listed_but_is_still_found(self) -> None:
+        # An inbox of its own (nothing but what was dismissed: it reads no sessions here), the login thread dismissed.
+        dismissed = inbox.InboxService(home=str(self.root / "home-inbox"))
+        self.addCleanup(dismissed.close)
+        self.server.inbox = dismissed
+        dismissed.attach(self.server)
+        approval = next(item for item in self.hub.threads(None) if item["threadId"] == "t-approval")
+        dismissed.seen.dismiss("t3:t-approval", {"status": "needs-approval", "requests": None,
+                                                 "at": approval["updatedAt"]}, "seen")
+        self.rt_script({"call": "t3_list_threads", "arguments": {"filter": "needs-you"}},
+                       {"call": "t3_read_thread", "arguments": {"thread": "the login redirect"}},
+                       {"say": "Only the database question needs you.", "ms": 200})
+        self.say_turn("what needs me")
+        outputs = [json.loads(event["item"]["output"]) for event in self.received()
+                   if event["type"] == "conversation.item.create" and event["item"]["type"] == "function_call_output"]
+        self.assertEqual(["Pick a database", "Deploy preview"], [item["title"] for item in outputs[0]["threads"]])
+        self.assertEqual(1, outputs[0]["counts"]["needsYou"])
+        self.assertEqual("Fix the login redirect", outputs[1]["thread"]["title"], "still found by name")
+        instructions = self.signaling.last_session()["instructions"]
+        self.assertIn("1 need the user", instructions, "the session's T3 status leaves it out too")
+        self.assertNotIn("Fix the login redirect", instructions)
 
     def test_cards_show_on_the_watch(self) -> None:
         self.rt_script({"call": "show_card", "arguments": {"id": "next", "title": "Next up",
