@@ -145,8 +145,196 @@ enum DockSnapshots {
             ui.expanded = true
             save("dock-11-offline.png", CGSize(width: 680, height: 560), Stage { panel(store, ui, DockVoiceSnapshot()) })
         }
+        // 12. Minimized to the orb: needs you (with "Hey Rabbit" armed), pointed at, only working, all clear without the
+        //     wake phrase, offline, many waiting, and on a 3200 pt screen.
+        do {
+            let (needs, plain) = fixture.make()
+            let (_, hovered) = fixture.make()
+            hovered.pillHover = true
+            let working = fixture.make(keep: { $0.status == .working }).0
+            let clear = fixture.make(keep: { _ in false }).0
+            let offline = fixture.make(connection: .offline(0)).0
+            // The bridge counts more than the list carries: 12 in all.
+            var crowded = fixture.inbox
+            crowded.counts = DockCounts(needsYou: 12, working: crowded.counts.working, total: crowded.items.count + 12)
+            let many = Fixture(inbox: crowded, details: fixture.details, targets: fixture.targets, now: fixture.now).make().0
+            let (_, big) = fixture.make()
+            big.pillScale = DockMetrics.pillScale(screenWidth: 3200, zoom: 1)
+            let quiet = DockVoiceSnapshot(phase: .idle, wakeArmed: false)
+            let orbs: [(String, DockStore, DockUIState, DockVoiceSnapshot)] = [
+                ("\(needs.needsYouCount) need you · “Hey Rabbit” on", needs, plain, idleVoice), ("pointed at", needs, hovered, idleVoice),
+                ("\(working.workingCount) working only", working, plain, idleVoice), ("all clear · no wake", clear, plain, quiet),
+                ("bridge offline", offline, plain, quiet), ("\(many.needsYouCount) need you", many, plain, idleVoice),
+                ("3200 pt screen", needs, big, idleVoice),
+            ]
+            save("dock-12-orb.png", CGSize(width: 860, height: 230), HStack(alignment: .bottom, spacing: 30) {
+                ForEach(Array(orbs.enumerated()), id: \.offset) { _, orb in
+                    VStack(spacing: 12) {
+                        DockOrb(store: orb.1, ui: orb.2, voice: orb.3).fixedSize()
+                        caption(orb.0)
+                    }
+                }
+            }.padding(.bottom, 30))
+        }
+        // 13. The "–" that appears on the pill while it is pointed at: at the far end from the edge the pill is kept
+        //     against (right of a pill on the left half or in the middle, left of one on the right), and the orb it
+        //     folds into.
+        do {
+            let (store, ui) = fixture.make()
+            ui.pillHover = true
+            ui.minimizeSlot = .trailing
+            let (_, leading) = fixture.make()
+            leading.pillHover = true
+            leading.minimizeSlot = .leading
+            let (_, orbUI) = fixture.make()
+            save("dock-13-minimize.png", CGSize(width: 760, height: 380), VStack(spacing: 18) {
+                HStack(spacing: 14) {
+                    DockPill(store: store, ui: ui, voice: idleVoice, commands: DockCommands()).fixedSize()
+                    caption("left half or middle")
+                }
+                HStack(spacing: 14) {
+                    caption("right half")
+                    DockPill(store: store, ui: leading, voice: idleVoice, commands: DockCommands()).fixedSize()
+                }
+                HStack(spacing: 14) {
+                    Image(systemName: "arrow.down").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.white.opacity(0.7))
+                    DockOrb(store: store, ui: orbUI, voice: idleVoice).fixedSize()
+                    caption("click → the pill again")
+                }
+            }.padding(.bottom, 30))
+        }
+        // 14–15. On a screen, placed by DockPlacement: dragged up to the top-left (the list opens below it, its left
+        //        edge lined up), and minimized in the bottom-right corner (the list opens above it, right edges lined up).
+        do {
+            let size = CGSize(width: 1180, height: 980)
+            let topLeft = DockSpot(corner: .topLeft, dx: DockMetrics.edgeGap, dy: DockMetrics.edgeGap)
+            save("dock-14-top-left.png", size,
+                 onScreen(fixture, size: size, spot: topLeft, minimized: false, open: nil, backdrop: wallpaper))
+            let corner = DockSpot(corner: .bottomRight, dx: DockMetrics.edgeGap, dy: DockMetrics.bottomGap)
+            save("dock-15-orb-corner.png", size,
+                 onScreen(fixture, size: size, spot: corner, minimized: true, open: nil, backdrop: wallpaper))
+        }
+        // 16–17. Settings: the four shortcuts (one recorded anew, one another app has), the dock's switches; and
+        //        recording one, with why the last try couldn't be used.
+        do {
+            var bindings = DockShortcuts.defaults
+            bindings[.minimize] = DockShortcut(keyCode: 31, modifiers: DockShortcut.control | DockShortcut.option)
+            let center = DockShortcutCenter(fixture: bindings, unavailable: [.showHide: DockShortcutCenter.takenMessage])
+            let rest = DockSettingsModel(fixture: center, recording: nil, held: "",
+                                         notes: [.minimize: .init(text: "Saved", isError: false)], dockOn: true, minimized: false)
+            let recording = DockSettingsModel(fixture: center, recording: .talk, held: "⌃⌥",
+                                              notes: [.compose: .init(text: "⇧⌘4 is macOS’s shortcut for screenshots.", isError: true)],
+                                              dockOn: true, minimized: true)
+            for (model, name) in [(rest, "dock-16-settings.png"), (recording, "dock-17-settings-recording.png")] {
+                let sheet = settingsSheet(model)
+                let measured = measure(sheet)
+                let canvas = CGSize(width: measured.width + 120, height: measured.height + 120)
+                save(name, canvas, VStack { sheet }.frame(width: canvas.width, height: canvas.height))
+            }
+        }
         for path in written { print(path) }
-        return written.count == 11 ? 0 : 1
+        return written.count == 17 ? 0 : 1
+    }
+
+    /// A small label under a state (dev snapshots only).
+    private static func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.85))
+            .shadow(color: .black.opacity(0.6), radius: 2)
+            .fixedSize()
+    }
+
+    /// What a view measures at its own size (an NSHostingView that is never in a window).
+    private static func measure(_ view: some View) -> CGSize {
+        let hosting = NSHostingView(rootView: view.fixedSize().environment(\.colorScheme, .dark))
+        let size = hosting.fittingSize
+        return CGSize(width: ceil(size.width), height: ceil(size.height))
+    }
+
+    /// The dock on a screen the size of the canvas (a menu bar at the top, a Dock at the bottom): placed at `spot` by
+    /// DockPlacement, as the pill or the orb, with its list (and `open`'s row open) on the side DockPlacement picks.
+    private static func onScreen(_ fixture: Fixture, size: CGSize, spot: DockSpot, minimized: Bool, open: String?,
+                                 backdrop: NSImage) -> some View {
+        let menuBar: CGFloat = 26
+        let dockBar: CGFloat = 70
+        let screen = DockScreen(id: "snapshot", frame: CGRect(origin: .zero, size: size),
+                                visibleFrame: CGRect(x: 0, y: dockBar, width: size.width, height: size.height - menuBar - dockBar))
+        let (store, ui) = fixture.make()
+        let voice = DockVoiceSnapshot(phase: .idle, wakeArmed: true)
+        ui.minimized = minimized
+        let pill: AnyView = minimized ? AnyView(DockOrb(store: store, ui: ui, voice: voice))
+            : AnyView(DockPill(store: store, ui: ui, voice: voice, commands: DockCommands()))
+        let pillFrame = DockPlacement.frame(for: spot, size: measure(pill), on: screen)
+        ui.expanded = true
+        ui.listBelow = DockPlacement.panelOpensBelow(pill: pillFrame, screen: screen)
+        ui.maxPanelHeight = DockPlacement.maxPanelHeight(pill: pillFrame, screen: screen)
+        ui.selected = open ?? store.items.first?.id
+        ui.expandedRow = open
+        let panel = DockPanel(store: store, ui: ui, voice: voice, commands: DockCommands())
+        let listFrame = DockPlacement.panelFrame(size: measure(panel), pill: pillFrame, screen: screen)
+        func top(_ frame: CGRect) -> CGFloat { size.height - frame.maxY }
+        return ZStack(alignment: .topLeading) {
+            fakeMenuBar(width: size.width, height: menuBar)
+            fakeDock(width: 560, height: dockBar - 14)
+                .padding(.leading, (size.width - 560) / 2)
+                .padding(.top, size.height - dockBar + 7)
+            panel.fixedSize()
+                .frame(width: listFrame.width, height: listFrame.height, alignment: ui.listBelow ? .top : .bottom)
+                .clipped()
+                .padding(.leading, listFrame.minX)
+                .padding(.top, top(listFrame))
+            pill.fixedSize()
+                .padding(.leading, pillFrame.minX)
+                .padding(.top, top(pillFrame))
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    private static func fakeMenuBar(width: CGFloat, height: CGFloat) -> some View {
+        HStack(spacing: 18) {
+            Image(systemName: "apple.logo").font(.system(size: 13, weight: .semibold))
+            Text("Ghostty").font(.system(size: 13, weight: .bold))
+            ForEach(["File", "Edit", "View", "Window", "Help"], id: \.self) { Text($0).font(.system(size: 13)) }
+            Spacer()
+            Text("Wed 14 Oct  9:41").font(.system(size: 13, weight: .medium))
+        }
+        .foregroundStyle(Color.white.opacity(0.92))
+        .padding(.horizontal, 16)
+        .frame(width: width, height: height)
+        .background(Color.black.opacity(0.28))
+    }
+
+    private static func fakeDock(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(Color.white.opacity(0.16))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Color.white.opacity(0.22), lineWidth: 1))
+            .overlay(HStack(spacing: 12) {
+                ForEach(0..<9, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(hue: Double(index) / 9, saturation: 0.45, brightness: 0.85).opacity(0.85))
+                        .frame(width: height - 14, height: height - 14)
+                }
+            })
+            .frame(width: width, height: height)
+    }
+
+    /// The Settings window as it draws (its title bar is transparent and untitled: the traffic lights sit on the sheet).
+    private static func settingsSheet(_ model: DockSettingsModel) -> some View {
+        DockSettingsView(model: model)
+            .overlay(alignment: .topLeading) {
+                HStack(spacing: 8) {
+                    ForEach([Color(red: 1, green: 0.37, blue: 0.34), Color(red: 1, green: 0.74, blue: 0.18),
+                             Color(red: 0.16, green: 0.79, blue: 0.25)], id: \.self) { color in
+                        Circle().fill(color).frame(width: 12, height: 12)
+                    }
+                }
+                .padding(.leading, 13)
+                .padding(.top, 13)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+            .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
     }
 
     private static func panel(_ store: DockStore, _ ui: DockUIState, _ voice: DockVoiceSnapshot) -> some View {

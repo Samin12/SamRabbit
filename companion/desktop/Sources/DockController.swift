@@ -1082,11 +1082,14 @@ final class DockController: NSObject {
         carry([])
     }
 
-    /// Settings: the dock on or off (off for good, until it is turned on again).
+    /// Settings: the dock on or off (off for good, until it is turned on again). On also ends ⌃⌥D's hide: the switch
+    /// says it shows.
     func setEnabled(_ on: Bool) {
         guard started, on != enabled else { return }
         if on {
             turnOn()
+            _ = presence.handle(.showFromMenu, visibilityInput())
+            savePresence()
             refresh()
         } else {
             turnOff()

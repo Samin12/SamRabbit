@@ -164,17 +164,29 @@ streamed turns (`dev/fake_assistant.py`: `POST /dev/assistant {mode}`, `POST /de
 
 ## Agent Dock
 
-A floating glass pill at the bottom of the screen with the agents that are waiting for you (CONTRACTS-WAVE6 §B):
+A floating glass pill with the agents that are waiting for you (CONTRACTS-WAVE6 §B, WAVE7 §B2):
 T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, from the bridge's
 `/v1/desktop/inbox` (long poll, desktop token, loopback). Sources: `Sources/Dock*.swift`.
 
 - **The pill** (~44 pt on a laptop, bigger on wider screens): the orb (it moves for a moment when the counts change),
   "2 need you" (blue capsule), "4 working", and the mic (a dot when the "Hey Rabbit" listener is armed). Point at it
   for a moment and the list opens; click toggles the list (it opens with the compose field taking the keys);
-  double-click opens the main window; drag it along the bottom edge (and to other screens; remembered as a screen + a
-  fraction of its width, so it stays put when monitors change); drag an end of the pill up or down to size it (or
-  ⌘+ / ⌘− / ⌘0 while pointing at the dock or while it has the keys, or the menu).
-- **The list** opens above the pill: Needs you, Working, Recent chats, Earlier (folded). A row opens in place with its
+  double-click opens the main window; drag an end of the pill up or down to size it (or ⌘+ / ⌘− / ⌘0 while pointing
+  at the dock or while it has the keys, or the menu).
+- **Anywhere:** it rests at the bottom centre of the screen the pointer is on until you drag it (the pill or the orb)
+  anywhere on any screen. It stays wholly inside the visible frame (never under the menu bar or the Dock) and
+  soft-snaps to an edge, a corner or the middle of the screen within 16 pt. Where you leave it is remembered per
+  screen as its nearest corner and the gap from it (never a desktop point), so it stays in its corner when monitors are
+  plugged in, moved or change resolution; while that screen is away, the pointer's screen lends it its own spot, else
+  the same corner and gap. When it changes size (counts, the orb, the voice bar) the edges by its corner stay put.
+  "Move Back to the Middle" forgets it. Wave 6's bottom-edge spot is turned into a corner and gap once.
+- **Minimize:** a "–" appears at the pill's far end (away from the edge it is kept against) while you point at it;
+  it, "Minimize to Orb" in the menus, or **⌃⌥M** fold the dock to the orb: a ~36 pt glass circle with a count of what
+  needs you (it pulses once when that changes) and the mic's dot while "Hey Rabbit" listens. Click the orb for the
+  pill again; pointing still opens the list, a drag moves it, right-click has the menu. During a voice conversation
+  the orb becomes the voice bar, and the orb again after it. Remembered across launches.
+- **The list** opens on the side with room (above a low dock, below a high one), lined up with the dock's outer edge
+  (left edges on the left half, right edges on the right): Needs you, Working, Recent chats, Earlier (folded). A row opens in place with its
   last messages and what the item supports right now (`can`): Approve / Deny (each option), answers to questions,
   Reply (↩ sends, ⇧↩ new line), Stop, Open (`/open`; a SamRabbit chat opens in the main window), Mark seen. Actions
   show at once and roll back with a short inline error when the bridge says no; a live terminal session answers
@@ -184,13 +196,20 @@ T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, 
 - **Keys** (when the list has the keys and no field does — Esc leaves a field): J/K or ↓/↑, ↩ open a row (↩ again:
   Open), E approve the open row with the recommended option (only an open row: its command is on screen), R reply,
   N compose, Esc close the row, then the list. ⌘ keys in the dock never reach the app's menus (⌘0 there would open the
-  main window); editing keys and ⌃⌘Space still work in its fields. **⌃⌥K** anywhere opens the list on the compose
-  field, and turns a dock that was turned off back on (Carbon `RegisterEventHotKey`, no Accessibility permission; the
-  voice work owns ⌃⌥Space).
+  main window); editing keys and ⌃⌘Space still work in its fields.
+- **Shortcuts** (Carbon `RegisterEventHotKey`, no Accessibility permission, shown in the menus): **⌃⌥Space** talk,
+  **⌃⌥K** the list on the compose field (it also turns a dock that was turned off back on), **⌃⌥D** show / hide (hidden
+  until pressed again; pressed while the dock is on another screen it comes to yours; it lifts a hide for a while,
+  "off" and stepping aside for the main window), **⌃⌥M** orb ↔ pill. Each can be recorded anew in **Agent Dock
+  Settings…** (the dock's menu, the menu bar extra, the app menu): click it and press the new keys (Esc cancels; the
+  four are let go meanwhile so the keys reach the recorder). Keys you type with, macOS's own shortcuts and duplicates
+  are refused with why; one another app already has says "Not available — taken by another app" (there, in the menus,
+  and the old one keeps working). The talk shortcut goes through `MacVoice.setShortcut`.
 - **When it shows:** whenever the main window is minimised, closed or hidden, or another app is in front; it steps
-  aside while you are in the main window. Right-click (or "…"): Hide for 1 Hour, Hide Until Tomorrow (both come back by
-  themselves), Turn Off the Dock (until **Show Agent Dock** in the menu bar extra or the app menu, ⌃⌥K), Always Listen
-  for "Hey Rabbit", the voice shortcut, Open SamRabbit. During a voice conversation the pill becomes the voice bar
+  aside while you are in the main window. Right-click (or "…"): Minimize to Orb, Hide the Dock (⌃⌥D), Hide for 1 Hour,
+  Hide Until Tomorrow (both come back by themselves), Turn Off the Dock (until **Show Agent Dock** in the menu bar extra
+  or the app menu, ⌃⌥K, ⌃⌥D or Settings), Talk, New Task, Always Listen for "Hey Rabbit", Shortcuts & Settings…, sizes,
+  Open SamRabbit. During a voice conversation the pill becomes the voice bar
   (what was heard, the reply as it streams, mute, stop speaking, end). Esc ends it once the bar has the keys: started
   from the dock's mic, or after a click on the bar. The bar never takes Esc from the app you are in (a terminal's Esc
   interrupts Claude Code).
@@ -201,7 +220,9 @@ T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, 
   com.samrabbit.desktop AgentDockGlass hud` (or `liquid`) picks one.
 - **Notifications:** a new needs-you item posts one notification (once per need, not again while it keeps waiting);
   clicking it opens the list on that item.
-- Settings (UserDefaults of the app): `AgentDockEnabled`, `AgentDockHiddenUntil`, `AgentDockSpot`, `AgentDockZoom`.
+- Settings (UserDefaults of the app): `AgentDockEnabled`, `AgentDockHiddenUntil`, `AgentDockPlace` (the screen and
+  each screen's corner + gap; Wave 6's `AgentDockSpot` is read once and left alone), `AgentDockZoom`,
+  `AgentDockPutAway` (⌃⌥D), `AgentDockMinimized`, `AgentDockShortcuts` (only the changed ones, as "⌃⌥D").
 - Voice goes only through the `MacVoice` interface (`Sources/Voice*.swift`, "Talk to SamRabbit" above).
 
 Developing it without touching the real bridge:
@@ -218,9 +239,10 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
 ```
 
 - `--render-dock-snapshots <dir> [--dock-fixture dev/samples/inbox.json] [--dock-backdrop <image>]` draws the pill, its
-  states, the list, an open approval, a question, the compose menus, the voice bar, a terminal session, a white page
-  and the offline state to PNGs from the fixtures and quits (no window, no screen access; the glass is simulated by
-  blurring the backdrop).
+  states, the list, an open approval, a question, the compose menus, the voice bar, a terminal session, a white page,
+  the offline state, the orb, the "–", the dock on a screen at the top left (list below) and minimized in the bottom
+  right corner (list above), and the Settings sheet to PNGs from the fixtures and quits (no window, no screen access;
+  the glass is simulated by blurring the backdrop). Run it with `SAMRABBIT_NO_MIC=1`.
 - `SAMRABBIT_DOCK_SMOKE=<dir>` walks a running dev copy through open → expand → approve → new prompt → voice → hide →
   back without any synthetic click, logs what AppKit says about the windows at each step and draws each live state.
   It approves and creates a task, so it refuses to run unless the app points at the fake server: not the default

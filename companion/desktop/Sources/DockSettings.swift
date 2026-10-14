@@ -360,6 +360,8 @@ final class DockSettingsWindowController: NSWindowController, NSWindowDelegate {
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Agent Dock Settings"
+        // The sheet's own header names it; the title stays for the Window menu and VoiceOver.
+        window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(srgbRed: 9 / 255, green: 11 / 255, blue: 16 / 255, alpha: 1)
