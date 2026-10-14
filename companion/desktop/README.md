@@ -232,8 +232,11 @@ Say something and it is dealt with, no back and forth (CONTRACTS-WAVE8 §D1; `So
 - **The bar**: the pill becomes "Voice note 0:07 · Recording… ⌃⌥N to send" with the level, × (throw it away, or Esc once
   the bar has the keys) and ↑ (send now, or ↩); then "Sending…", then "Sent ✓ — Added to your journal" (or "Started a T3
   task", "On your calendar", "Saved as a note" with the bridge's suggestion as a button, "Start as task", "Add to
-  journal" or "Put on calendar": only what the bridge's act takes; a "Block the time?" stays words). Like the voice bar
-  it shows through every hide. It never speaks, and nothing plays.
+  journal" or "Put on calendar": only what the bridge's act takes; a "Block the time?" stays words). Nothing heard and a
+  failure are "Not sent" and "Voice note !", never a green check. The suggestion's button sits under the words, at the
+  bar's leading side (never where the pill's note button or the bar's ↑ was), and needs two clicks: the first only arms
+  it ("Yes, start the task", for 4 s; a double click counts once), so a click meant for the next note never writes a
+  journal line or starts an agent. Like the voice bar it shows through every hide. It never speaks, and nothing plays.
 - **The bridge does the work**: `POST /v1/desktop/capture` (a 16 kHz WAV, `X-SamRabbit-Capture` a UUID made when the
   note started, so a retry is never a second note; `X-SamRabbit-Captured-At` with its offset; `X-SamRabbit-Source: mac`)
   answers 202 at once; `GET /v1/desktop/capture/<id>?wait=8` says what it heard and did; a kept note's suggestion is
@@ -242,9 +245,21 @@ Say something and it is dealt with, no back and forth (CONTRACTS-WAVE8 §D1; `So
 - **Nothing is lost**: the WAV goes into `~/Library/Application Support/SamRabbit/capture-outbox/` (0700, files 0600)
   before it is sent and leaves once the bridge has it; when the bridge is down, too old or busy it waits ("Saved on this
   Mac") and is tried again after 5 s, 30 s, 2 min, then every 10 min, and at once when the bridge answers again (a
-  notification then says what became of it). At most 50 notes, none older than a week. A development copy (another
-  bundle id) or a harness has its own folder (`capture-outbox-<bundle id>`), so the installed app never sends a test
-  recording; `SAMRABBIT_CAPTURE_OUTBOX` names another.
+  notification then says what became of it). A pass through the outbox is never called off halfway (a "bridge is back"
+  meanwhile is picked up when it ends) and each note's outcome is followed on its own, so one note never holds up the
+  next; a try called off on this Mac is not counted as one, and an error the bridge marks `retryable` (a body that
+  didn't arrive whole) keeps the note: only too long, not audio, a refused id or another note's id drop it. A note still
+  recording when the app quits goes into the outbox as it is and is sent at the next launch. At most 50 notes, none
+  older than a week. A development copy (another bundle id) or a harness has its own folder (`capture-outbox-<bundle
+  id>`), so the installed app never sends a test recording; `SAMRABBIT_CAPTURE_OUTBOX` names another.
+- **What came of it, later**: the bar says it while it shows that note; when it doesn't any more (another note
+  started, the answer took over 20 s: it is asked for quietly for 3 minutes more), a failure, nothing heard or a late
+  answer comes as a notification.
+- **In the inbox**: a note the bridge kept (`note:<captureId>`, from any device) is a row in the dock's list and in
+  Tasks: its suggestion as the button ("Start as task", "Add to journal", "Put on calendar"; `POST
+  /v1/desktop/inbox/items/note:<id>/act {action}`), "Try again" for one that failed (`act` without an action: the
+  bridge retries it), Mark seen, and Dismiss with W8's dismiss. A failed note counts as needing you until it is seen;
+  notes post no "needs you" notification of their own (the bar, the phone and the R1 already say how it went).
 - **One microphone**: no note during a conversation; while one records, "Hey Rabbit" waits and ⌃⌥Space does nothing.
   The recorder is its own `AVAudioEngine` tap without voice processing (`VoiceNoteRecorder`); in fixture mode
   (`SAMRABBIT_VOICE_FIXTURE`) it hears the fixture microphone's next file instead, and `SAMRABBIT_NO_MIC=1` keeps it off.
@@ -267,6 +282,11 @@ noon: on Home (`web/morning.js`, the rules in `web/briefing.js`) and at the top 
   at?}` (only the verbs the item `can`; the answer `{ok, item, result, revision}`, the item's state in the bridge's
   words: drafted, tasked, blocked, reminded, done, dismissed), `POST …/briefing/refresh` (Refresh / ↻; at most once in
   5 minutes, else 429 `refresh_too_soon`). A result shows at once and rolls back with a note when the bridge says no.
+- **Make task** asks first: the T3 task's exact words (the item's title and why, what the brief shows, sent as the
+  action's `text`, never the model's own `taskText` written from the email) and that the bridge adds which email it
+  came from; then **Start task** or Cancel.
+- **Refresh / ↻** keeps "Reading…" (the dock's spinner) until the new brief is built (a long poll past the revision
+  the refresh answered, up to about two minutes), or says why it didn't (read a moment ago, the bridge away).
 - **Draft reply** makes a Gmail **draft** on the bridge and opens it in the browser, in the item's own Google account
   (the bridge's links carry `authuser=<that mailbox>`, so a personal thread doesn't open in the business one; a link
   without it gets the item's address). The draft stays on the item (`result.url`), so "Open draft" works after a
@@ -395,9 +415,10 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
   shortcuts first (`defaults write <dev bundle id> AgentDockShortcuts -dict talk "⌃⌥⇧F17" compose "⌃⌥⇧F18" showHide
   "⌃⌥⇧F19" minimize "⌃⌥⇧F20" voiceNote "⌃⌥⇧F16"`) so it never takes the installed app's or anyone's ⌃⌥D / ⌃⌥M / ⌃⌥N.
 - The same `--render-dock-snapshots` also draws Wave 8's `dock-19-note.png` (the voice note's bar: recording tapped and
-  held, sending, sent with what the bridge did, kept with a suggestion, saved on this Mac, too short, not finished),
-  `dock-20-morning.png` (the list's Morning section at 8:20 AM from `dev/samples/briefing.json`) and
-  `dock-21-morning-acted.png` (drafted, tasked, Remind me open, a failed try).
+  held, sending, sent with what the bridge did, kept with a suggestion and with it armed, saved on this Mac, too short,
+  nothing heard, not finished), `dock-22-notes.png` (voice notes in the list: kept with "Start as task", failed with
+  "Try again"), `dock-20-morning.png` (the list's Morning section at 8:20 AM from `dev/samples/briefing.json`) and
+  `dock-21-morning-acted.png` (drafted, Make task asking first with the task's words, Remind me open, a failed try).
 - `SAMRABBIT_DOCK_FIXTURE_WAKE=1` makes the voice placeholder report the wake listener as armed (the mic's dot).
 
 ## Developing the UI
@@ -440,10 +461,13 @@ filed, drafted or sent), in the bridge's own shapes (`companion/mac-bridge/samra
 /v1/desktop/capture/<id>?wait=` (received, then done with in turn a journal line, a T3 task, a note with a suggestion,
 a calendar event; `nothing` heard and `failed` too), `GET /v1/desktop/captures`, `POST …/captures/<id>/act {action:
 task|journal|event|note|undo|dismiss|seen|retry}`; `POST /dev/capture {mode: ok|outdated|busy|refuse|no_speech|fail,
-delay, script}`, `GET /dev/capture` (what arrived: ids, sources, sizes and lengths, never the audio;
-`$SAMRABBIT_FAKE_CAPTURE_SAVE` keeps the WAVs for the tests). `GET /v1/desktop/briefing` (`dev/samples/briefing.json`,
+delay, hold, script}` (`hold`: a slow bridge, each upload answered late), `GET /dev/capture` (what arrived: ids,
+sources, sizes and lengths, never the audio; `polls`: the outcome reads; `$SAMRABBIT_FAKE_CAPTURE_SAVE` keeps the WAVs
+for the tests); `POST /dev/inbox/notes` puts two voice notes in the inbox as the bridge lists them (kept with a
+suggestion, failed), whose `act` and `seen` answer as the bridge does. `GET /v1/desktop/briefing` (`dev/samples/briefing.json`,
 the bridge's `view()`, moved to today), `POST …/briefing/refresh` (429 within 5 minutes), `POST
-…/briefing/items/<id>/act` (only what the item `can`; a draft answers a Gmail drafts link in the item's account);
+…/briefing/items/<id>/act` (only what the item `can`; a draft answers a Gmail drafts link in the item's account; Make
+task's `text` is kept in `GET /dev/briefing`'s `acts`);
 `POST /dev/briefing {status: ready|building|waiting|failed|off, fail: <action>}`, `GET /dev/briefing`. The summary
 carries `briefing` and `captures` as the bridge's.
 
@@ -463,7 +487,8 @@ at most once a second; anything else, including a UI navigating its own frame, o
 ```sh
 node --test companion/desktop/tests/*.mjs                   # timeline/store logic, API paging, the inbox and its long
                                                             # poll, agenda, devices/ChatGPT status, the voice transcript,
-                                                            # the morning brief and the voice note button
+                                                            # the morning brief, the voice note button and voice
+                                                            # notes in the inbox
 python3 -m unittest discover -s companion/desktop/tests     # install.sh / uninstall.sh, the fake inbox, desktop, capture
                                                             # and briefing routes
 companion/desktop/tests/window/run.sh                       # the window bridge's rules (page requests, voice and note pushes)
@@ -489,7 +514,9 @@ be the question without the phrase —, `bargein` (barge-in, whose cancel names 
 with the conversation; muted, "Hey Rabbit" waits and says why; a muted conversation still ends by itself), `devices`
 (this Mac's audio inputs and the listener's choice, read only), and the voice notes: `note` (the dock's button; it ends
 on the pause; "Hey Rabbit" waits and Talk doesn't start meanwhile; the bar says what the bridge did), `note-hold` (⌃⌥N
-held, sent on the release), `note-offline` (the bridge busy: kept in the outbox, sent when it takes it) and
-`note-suggest` (kept as a note, the bar's "Start as task" does it) — the WAV that went up is transcribed again on
+held, sent on the release), `note-offline` (the bridge busy: kept in the outbox, sent when it takes it),
+`note-suggest` (kept as a note, the bar's "Start as task" arms on the first click and does it on the second) and
+`note-retry` (two notes waiting in the outbox go to a slow bridge while "the bridge is back" comes again mid-pass:
+both arrive once, neither counted as a failed try, each outcome said) — the WAV that went up is transcribed again on
 device, and the temp outbox (`SAMRABBIT_CAPTURE_OUTBOX`) must end empty. Fixture voices come from `say -o` (written to a file, never played).
 `tests/test_install.py` also checks `build.sh`'s ad-hoc fallback and the SamRabbitKit cache.

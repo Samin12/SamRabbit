@@ -368,8 +368,9 @@ enum DockSnapshots {
             }
         }
         // 19. The voice note's bar (CONTRACTS-WAVE8 §D1): recording after a tap and while ⌃⌥N is held, sending, sent
-        //     with what the bridge did (its own outcomes: a journal line, a T3 task, a note with a suggestion), kept on
-        //     this Mac while the bridge is away, too short, and a note the bridge couldn't finish.
+        //     with what the bridge did (its own outcomes: a journal line, a T3 task, a note with a suggestion, its button
+        //     under the words and armed by a first click), kept on this Mac while the bridge is away, too short, nothing
+        //     heard, and a note the bridge couldn't finish.
         do {
             let (_, ui) = fixture.make()
             func note(_ phase: VoiceNoteSnapshot.Phase, _ line: String = "", _ detail: String = "", level: Double = 0,
@@ -393,19 +394,33 @@ enum DockSnapshots {
                     kept.offer = "Start as task"
                     return kept
                 }(),
+                {
+                    var armed = note(.sent, "Saved as a note", "Add it to your journal?")
+                    armed.offer = VoiceNoteText.confirm("journal")
+                    armed.offerArmed = true
+                    return armed
+                }(),
                 note(.queued, "Saved on this Mac", "The bridge isn’t running — it goes as soon as it can."),
                 note(.discarded, "Too short", "Hold ⌃⌥N while you talk, or tap it, talk, and tap again."),
+                {
+                    // Nothing heard is not a "Sent ✓" (VoiceNoteText.phase).
+                    let nothing = CaptureStatus(captureId: "", state: "done", heard: nil,
+                                                outcome: CaptureOutcome(kind: "nothing", title: "Nothing heard", detail: "I didn't catch anything."))
+                    let lines = VoiceNoteText.outcome(nothing)
+                    return note(VoiceNoteText.phase(nothing), lines.line, lines.detail)
+                }(),
                 note(.failed, "The bridge couldn’t finish it", "Couldn't save it: T3 Code isn't connected."),
             ]
-            save("dock-19-note.png", CGSize(width: 760, height: 820), VStack(spacing: 16) {
+            save("dock-19-note.png", CGSize(width: 760, height: 1010), VStack(spacing: 16) {
                 ForEach(Array(states.enumerated()), id: \.offset) { _, state in
                     DockNoteBar(note: state, scale: ui.pillScale, commands: DockCommands()).fixedSize()
                 }
             }.padding(.bottom, 24))
         }
         // 20–21. Before noon, the list opens with the morning brief (CONTRACTS-WAVE8 §D2): the headline, what to do first
-        //        with its verbs, today's next events. Then after Draft reply (saved in Gmail, opened, nothing sent) and
-        //        Make task, with "Remind me" open on the clash and a failed try's note. At 8:20 today, whatever the time.
+        //        with its verbs, today's next events. Then after Draft reply (saved in Gmail, opened, nothing sent), Make
+        //        task asking first (the task's exact words), "Remind me" open on the clash and a failed try's note. At
+        //        8:20 today, whatever the time.
         if let start = Calendar.current.date(bySettingHour: 8, minute: 20, second: 0, of: Date()),
            let early = Fixture.load(now: start), let brief = early.brief {
             do {
@@ -419,7 +434,7 @@ enum DockSnapshots {
                 let first = brief.section(.doFirst)?.items ?? []
                 if first.count == 3 {
                     store.morning.act(first[0], "draft_reply")
-                    store.morning.act(first[1], "make_task")
+                    store.morning.taskOpen = first[1].id
                     store.morning.showNote(DockStore.note(for: DockAPI.Failure(status: 502, code: "gmail_failed",
                                                                                message: "Gmail didn’t answer. Nothing was changed.")),
                                            for: first[2].id)
@@ -428,8 +443,25 @@ enum DockSnapshots {
                 save("dock-21-morning-acted.png", CGSize(width: 680, height: 1200), Stage { panel(store, ui, idleVoice) })
             }
         }
+        // 22. Voice notes in the list (samrabbit_capture `inbox_items`): one kept with a suggestion, open with its button
+        //     ("Start as task"), and one that failed (in Needs you with "Try again" once open, beside).
+        do {
+            let notes = Fixture.withNotes(fixture)
+            let (kept, keptUI) = notes.make()
+            keptUI.expanded = true
+            keptUI.selected = Fixture.keptNoteId
+            keptUI.expandedRow = Fixture.keptNoteId
+            let (failed, failedUI) = notes.make()
+            failedUI.expanded = true
+            failedUI.selected = Fixture.failedNoteId
+            failedUI.expandedRow = Fixture.failedNoteId
+            save("dock-22-notes.png", CGSize(width: 1360, height: 1000), HStack(alignment: .top, spacing: 0) {
+                Stage { panel(kept, keptUI, idleVoice) }
+                Stage { panel(failed, failedUI, idleVoice) }
+            })
+        }
         for path in written { print(path) }
-        return written.count == 3
+        return written.count == 4
     }
 
     private static func panel(_ store: DockStore, _ ui: DockUIState, _ voice: DockVoiceSnapshot) -> some View {
@@ -483,6 +515,45 @@ enum DockSnapshots {
                 return Fixture(inbox: inbox, details: details, targets: targets, now: now, brief: brief)
             }
             return nil
+        }
+
+        static let keptNoteId = "note:3f2b8c1e-7d4a-4e9b-8f21-6a5c0d9e1b47"
+        static let failedNoteId = "note:9c4e2a7b-1f3d-4b8e-a6c5-2d7f0e8b3a91"
+
+        /// The fixture with two voice notes in the bridge's own shape (samrabbit_capture `inbox_items`): kept with a
+        /// suggestion, and one the Mac couldn't hear.
+        static func withNotes(_ base: Fixture) -> Fixture {
+            let formatter = ISO8601DateFormatter()
+            func note(_ id: String, status: String, label: String, title: String, summary: String, minutes: Double,
+                      suggestion: [String: Any]?) -> [String: Any] {
+                ["id": id, "source": "note", "agent": NSNull(), "title": title, "project": "Voice note", "cwd": NSNull(),
+                 "status": status, "statusLabel": label, "summary": summary,
+                 "updatedAt": formatter.string(from: base.now.addingTimeInterval(-minutes * 60)), "unread": true,
+                 "pending": ["approvals": [], "inputs": []], "can": ["act", "dismiss", "seen"], "live": false,
+                 "progress": NSNull(), "phase": NSNull(), "suggestion": suggestion ?? NSNull(),
+                 "captureId": String(id.dropFirst(5))]
+            }
+            let raw = [
+                note(keptNoteId, status: "needs-input", label: "Start it as a T3 task?", title: "Look into why the watch build is slow",
+                     summary: "Look into why the watch build is slow on the release machine.", minutes: 3,
+                     suggestion: ["action": "task", "label": "Start it as a T3 task?"]),
+                note(failedNoteId, status: "error", label: "Couldn't hear it", title: "Voice note",
+                     summary: "Couldn't save it: transcription is not installed on the Mac bridge.", minutes: 41, suggestion: nil),
+            ]
+            var inbox = base.inbox
+            let added = raw.compactMap { entry -> DockItem? in
+                (try? JSONSerialization.data(withJSONObject: entry)).flatMap { try? JSONDecoder().decode(DockItem.self, from: $0) }
+            }
+            inbox.items = DockOrder.sorted(inbox.items + added)
+            inbox.counts = DockCounts(needsYou: inbox.items.filter(\.needsYou).count,
+                                      working: inbox.items.filter { $0.status == .working }.count, total: inbox.items.count)
+            var details = base.details
+            details[keptNoteId] = [DockMessage(role: "user", text: "Look into why the watch build is slow on the release machine.",
+                                               at: base.now.addingTimeInterval(-180)),
+                                   DockMessage(role: "assistant", text: "Saved as a note.", at: base.now.addingTimeInterval(-175))]
+            details[failedNoteId] = [DockMessage(role: "assistant", text: "Couldn't save it: transcription is not installed on the Mac bridge.",
+                                                 at: base.now.addingTimeInterval(-41 * 60))]
+            return Fixture(inbox: inbox, details: details, targets: base.targets, now: base.now, brief: base.brief)
         }
 
         /// briefing.json beside the inbox fixture, moved by whole days to `now`'s (its clock times stay, like the fake's).
