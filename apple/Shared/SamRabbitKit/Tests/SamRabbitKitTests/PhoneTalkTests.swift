@@ -82,6 +82,29 @@ struct PhoneTalkTests {
         #expect(m.live?.heard == "Never mind")
     }
 
+    /// The Mac's reply is over (`done` came) but its audio still plays here: a typed turn stops the playback and goes,
+    /// with no cancel. The Mac cancels whatever turn holds the conversation, so a cancel sent with the typed turn
+    /// could reach the Mac after it and stop the typed turn itself.
+    @Test func aTypedTurnAfterTheReplyCameSendsNoCancel() {
+        var m = listening()
+        _ = m.handle(.utterance(wav), at: t0)
+        _ = m.handle(.turn("t1", .sayDelta("Here is everything that changed")), at: t0)
+        _ = m.handle(.playing, at: t0)
+        _ = m.handle(done("t1"), at: t0 + 1)
+        #expect(m.phase == .speaking) // the rest of the reply plays here
+        let effects = m.handle(.typed("Never mind"), at: t0 + 2)
+        #expect(effects == [.stopPlayback, .closeMic,
+                            .send(.init(turnId: "t2", conversationId: "pc_1", input: .text("Never mind"))),
+                            .haptic(.click)])
+        #expect(m.exchanges.first { $0.id == "t1" }?.interrupted == true)
+        #expect(m.currentTurnId == "t2")
+        // A reply still coming from the Mac is cancelled there (the app sends the typed turn once that is through).
+        _ = m.handle(.turn("t2", .sayDelta("Okay")), at: t0 + 2)
+        _ = m.handle(.playing, at: t0 + 2)
+        let again = m.handle(.typed("Actually, what's next?"), at: t0 + 3)
+        #expect(again.first == .cancel(turnId: "t2", conversationId: "pc_1"))
+    }
+
     @Test func nothingIsTypedOutsideAConversationOrWhileAFailureIsSaid() {
         var idle = ConversationMachine()
         #expect(idle.handle(.typed("Hello"), at: t0).isEmpty)
@@ -99,21 +122,107 @@ struct PhoneTalkTests {
 
     // MARK: - Mute
 
-    @Test func theQuietEndWaitsWhileMuted() {
+    /// Muted, the quiet end waits longer (he is talking to someone else), but it still comes: muted and pocketed, the
+    /// conversation doesn't hold the microphone and read announcements out loud until he is back.
+    @Test func aMutedConversationEndsAfterALongerQuiet() {
         var m = listening(idle: 120)
+        #expect(m.mutedTimeout == 300)
         #expect(m.handle(.muted(true), at: t0 + 10).isEmpty)
         #expect(m.micMuted)
-        // Long past the quiet end: muted, it keeps going (he is listening, or talking to someone else).
-        #expect(m.handle(.tick, at: t0 + 600).isEmpty)
+        #expect(m.lastActivity == t0 + 10) // counted from the mute
+        // Past the usual two minutes: muted, it goes on.
+        #expect(m.handle(.tick, at: t0 + 10 + 200).isEmpty)
         #expect(m.phase == .listening)
-        // Unmuted: the quiet counts from now.
-        #expect(m.handle(.muted(false), at: t0 + 700).isEmpty)
-        #expect(m.lastActivity == t0 + 700)
-        #expect(m.handle(.tick, at: t0 + 700 + 119).isEmpty)
-        let ended = m.handle(.tick, at: t0 + 700 + 121)
+        // An announcement still plays while muted, but T3 events alone don't keep it open.
+        let items = [Announcement(id: "a1", say: "“Fix login” finished.", kind: "done")]
+        #expect(m.handle(.announcements(items), at: t0 + 250).contains(.send(.init(turnId: "t1", conversationId: "pc_1",
+                                                                                      input: .announce("a1")))))
+        _ = m.handle(.playing, at: t0 + 251)
+        _ = m.handle(done("t1"), at: t0 + 251)
+        #expect(m.handle(.drained, at: t0 + 254) == [.openMic])
+        #expect(m.lastActivity == t0 + 10)
+        #expect(m.handle(.tick, at: t0 + 10 + 299).isEmpty)
+        let ended = m.handle(.tick, at: t0 + 10 + 301)
         #expect(ended.contains(.stopAudio))
-        #expect(ended.contains(.end(conversationId: "pc_1")))
+        #expect(ended.contains(.end(conversationId: "pc_1")), "the Mac is told, like any quiet end")
         #expect(m.phase == .idle)
+        #expect(m.problem == nil)
+
+        // Unmuted: the usual quiet end, counted from the unmute.
+        var u = listening(idle: 120)
+        _ = u.handle(.muted(true), at: t0 + 10)
+        #expect(u.handle(.muted(false), at: t0 + 200).isEmpty)
+        #expect(u.lastActivity == t0 + 200)
+        #expect(u.handle(.tick, at: t0 + 200 + 119).isEmpty)
+        #expect(u.handle(.tick, at: t0 + 200 + 121).contains(.end(conversationId: "pc_1")))
+
+        // A turn that finishes long after the mute ends it too (not only the tick).
+        var n = listening(idle: 120)
+        _ = n.handle(.muted(true), at: t0)
+        _ = n.handle(.announcements(items), at: t0 + 299)
+        _ = n.handle(done("t1"), at: t0 + 299)
+        #expect(n.phase == .thinking) // said by the phone itself (no audio came)
+        #expect(n.handle(.drained, at: t0 + 302).contains(.stopAudio))
+    }
+
+    /// A call pauses the conversation (`interrupted`): it keeps its mute when it goes on. End or Close on the paused
+    /// screen means it: the end of the call doesn't bring the microphone back.
+    @Test func aPausedConversationKeepsItsMuteAndStopWhilePausedMeansIt() {
+        var m = listening()
+        _ = m.handle(.muted(true), at: t0 + 1)
+        let paused = m.handle(.interrupted, at: t0 + 2)
+        #expect(paused.contains(.stopAudio))
+        #expect(!paused.contains(.end(conversationId: "pc_1")), "paused, not ended")
+        #expect(m.phase == .idle)
+        #expect(m.problem == "Paused. Tap to talk.")
+        #expect(m.micMuted, "the mute stays across the pause")
+        // The call is over: the same conversation goes on, still muted.
+        #expect(m.handle(.resume, at: t0 + 30) == [.startAudio, .warmUp(conversationId: "pc_1")])
+        _ = m.handle(.audioReady, at: t0 + 31)
+        #expect(m.phase == .listening)
+        #expect(m.micMuted)
+        #expect(TalkPhase(m.phase, muted: m.micMuted) == .muted)
+
+        // Paused again, then End while paused: nothing goes on by itself afterwards.
+        _ = m.handle(.interrupted, at: t0 + 40)
+        #expect(m.handle(.stop, at: t0 + 41).isEmpty)
+        #expect(m.handle(.resume, at: t0 + 60).isEmpty)
+        #expect(m.phase == .idle)
+        // Talk again: a new conversation, unmuted.
+        #expect(m.handle(.start, at: t0 + 70) == [.startAudio, .warmUp(conversationId: nil)])
+        #expect(!m.micMuted)
+        #expect(m.exchanges.isEmpty)
+    }
+
+    // MARK: - The audio session
+
+    /// The audio session is the app's, shared by Talk and dictation: a mic button that never listened (its screen
+    /// went away) gives nothing back, and dictation never deactivates the session under a conversation using it.
+    @Test func onlyTheLastHolderGivesTheAudioSessionBack() {
+        var claims = AudioSessionClaims()
+        // An idle mic button leaving its screen: nothing to give back.
+        var deactivate = claims.release(.dictation)
+        #expect(!deactivate)
+        #expect(claims.holders.isEmpty)
+        // Talk runs; dictation that started meanwhile stops: the session stays for Talk.
+        claims.claim(.conversation)
+        claims.claim(.dictation)
+        deactivate = claims.release(.dictation)
+        #expect(!deactivate)
+        deactivate = claims.release(.dictation)
+        #expect(!deactivate)
+        #expect(claims.holders == [.conversation])
+        // Talk ends: it was the last one.
+        deactivate = claims.release(.conversation)
+        #expect(deactivate)
+        #expect(claims.holders.isEmpty)
+        // Dictation alone, claimed twice (a restart without the on-device model): one release gives it back.
+        claims.claim(.dictation)
+        claims.claim(.dictation)
+        deactivate = claims.release(.dictation)
+        #expect(deactivate)
+        deactivate = claims.release(.conversation)
+        #expect(!deactivate)
     }
 
     @Test func mutedRepliesStillPlayAndTypedTurnsStillGo() {
