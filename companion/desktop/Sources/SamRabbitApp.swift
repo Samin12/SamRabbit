@@ -230,6 +230,8 @@ struct MenuContent: View {
         Text(model.headline)
         Text(model.lastSeenLine)
         Divider()
+        VoiceMenuItems()
+        Divider()
         if !model.conversations.isEmpty {
             Text("Recent conversations")
             ForEach(Array(model.conversations.prefix(6))) { conversation in
@@ -261,6 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   + (Config.isDefaultBase ? "" : " (override)") + (atLogin ? " at-login" : ""))
         MainActor.assumeIsolated {
             AppModel.shared.start(showWindow: !atLogin)
+            MacVoice.shared.activate()
         }
     }
 

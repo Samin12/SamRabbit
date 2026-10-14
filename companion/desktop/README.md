@@ -34,8 +34,13 @@ the background without a window), opens the app, and tells you whether the bridg
 the app's settings).
 
 Build only: `companion/desktop/build.sh` → `companion/desktop/build/SamRabbit.app` (needs Xcode's command
-line tools; ~5 s; ad-hoc signed). The app icon is rendered from the R1's fluid-orb math
-(`tools/render_icon.swift` + `Sources/OrbRenderer.swift`) and packed with `iconutil`.
+line tools and the macOS 26+ SDK; macOS 26 or later; ~15 s, plus ~25 s the first time for SamRabbitKit). The voice
+reuses `apple/Shared/SamRabbitKit`, compiled by `tools/build_samrabbitkit.sh` into a Swift 6 static library next to
+the app (cached until its sources change). The app is signed with the keychain's "Apple Development" identity when
+there is one (`security find-identity -v -p codesigning`), so macOS keeps its microphone grant across rebuilds;
+otherwise, or with `--adhoc`, ad-hoc. `--bundle-id com.samrabbit.desktop.dev` builds a development copy with its own
+settings and grants. The app icon is rendered from the R1's fluid-orb math (`tools/render_icon.swift` +
+`Sources/OrbRenderer.swift`) and packed with `iconutil`.
 
 ## How it connects
 
@@ -102,6 +107,40 @@ The code is shown only in this window and the tokens never reach the app; the lo
 "chatgpt connected". Without the desktop app, `companion/mac-bridge/connect-chatgpt.sh` does the same in the
 terminal.
 
+## Talk to SamRabbit
+
+The Mac has the watch's voice assistant (`Sources/Voice*.swift`; CONTRACTS-WAVE6 "Mac voice"). Start a conversation
+with the dock's mic button, **⌃⌥Space** from any app (Carbon `RegisterEventHotKey`: no Accessibility permission),
+**Talk to SamRabbit** in the menu bar extra, or by saying **"Hey Rabbit"**. A soft chime says it is listening.
+
+- **The conversation** (`MacVoice`, `VoiceEngine.swift`) runs SamRabbitKit's `ConversationMachine` (the watch's rules,
+  with Mac wording), its `SpeechDetector` (end of utterance after about a second of quiet) and its streaming turns,
+  through the bridge's desktop routes: `POST /v1/desktop/assistant/session` on start (warm-up),
+  `POST /v1/desktop/assistant/turn` per utterance (16 kHz WAV, `Accept: application/x-samrabbit-stream`; `heard`,
+  `say.delta` as the live caption, PCM frames played as they arrive through the jitter buffer), `/cancel` on
+  barge-in (`stopSpeaking()`), `/end` on `end()`, and `/announcements` about every 20 s (T3 tasks that finished or
+  need you, said between turns as `{"announce": id}` turns). Loopback, the desktop token. It listens again after
+  each reply and ends when the assistant says so ("bye", "that's all"), on ⌃⌥Space or after 90 s without speech.
+- **Audio** (`VoiceAudio.swift`): one `AVAudioEngine` per conversation with voice processing on the microphone (echo
+  cancellation: the assistant's voice through the speakers never counts as you speaking; other apps are ducked as
+  little as macOS allows). Muting the microphone uses voice processing's own mute and pauses the quiet end.
+- **"Hey Rabbit"** (`VoiceWake.swift`, `VoiceWakeMatcher.swift`) listens whenever no conversation does, entirely on
+  this Mac: `SpeechAnalyzer` + `SpeechTranscriber` (macOS 26, on device; no Speech Recognition permission, no
+  network), fed only while the room is loud enough for speech (an energy gate, so a quiet room costs about nothing).
+  Partial results are matched for "hey rabbit", "hey sam rabbit" and "okay rabbit" (normalized, with common
+  mishearings); the final words' times say where the phrase ended, and what you said after it ("Hey Rabbit, what's
+  on my calendar?") becomes the conversation's first question. Nothing heard is sent anywhere before the phrase, and
+  transcripts are never logged. It pauses for conversations and while the microphone is muted. Turn it off in the
+  menu bar extra (or the dock); other phrases: `defaults write com.samrabbit.desktop WakePhrases -array "hey rabbit"
+  "computer"`. When it can't listen (no on-device speech, the microphone refused), the menu says why.
+- The app asks for the microphone the first time it listens (`NSMicrophoneUsageDescription`).
+
+Development: `SAMRABBIT_VOICE_FIXTURE=/tmp/a.wav,/tmp/b.wav` makes the microphone "say" those files (one each time it
+opens; `SAMRABBIT_VOICE_FIXTURE_WAKE=1` plays the first to the wake listener) and renders all playback silently into
+memory: nothing is recorded and nothing plays out loud. `SAMRABBIT_NO_MIC=1` keeps the microphone off altogether.
+`SAMRABBIT_VOICE_IDLE=<s>` changes the quiet end. The fake sync server answers `/v1/desktop/assistant/*` with canned
+streamed turns (`dev/fake_assistant.py`: `POST /dev/assistant {mode}`, `POST /dev/announce {say}`).
+
 ## Developing the UI
 
 `dev/fake_sync_server.py` is a stdlib stand-in for the bridge's sync API with realistic sample conversations
@@ -138,4 +177,13 @@ at most once a second; anything else, including a UI navigating its own frame, o
 node --test companion/desktop/tests/*.mjs                   # timeline/store logic, API paging
 python3 -m unittest discover -s companion/desktop/tests     # install.sh / uninstall.sh in a throwaway home
 python3 -m unittest discover -s companion/mac-bridge/tests  # includes the /app/ route (test_desktop_app.py)
+companion/desktop/tests/voice/run.sh                        # the wake phrase matcher, energy gate, sample ring
+companion/desktop/tests/voice/headless.sh                   # the voice end to end against the fake, silently
+companion/desktop/tests/voice/headless.sh listen 60         # the wake listener's CPU in a quiet room
 ```
+
+`headless.sh` builds a harness from `Sources/Voice*.swift` and SamRabbitKit and runs it in fixture mode against
+its own fake server (a free port, a temp token): `turns` (⌃⌥Space, two turns, the assistant ends it), `wake` ("Hey
+Rabbit, what's on my calendar this afternoon?" in one breath: the first utterance sent is transcribed again by the
+bridge's on-device transcriber and must be the question without the phrase), `bargein` (barge-in, an announcement,
+`end()`). Fixture voices come from `say -o` (written to a file, never played).
