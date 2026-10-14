@@ -822,6 +822,19 @@ function focusSearch() {
 els.scroller.addEventListener('scroll', () => {
   if (nearBottom()) els.jump.hidden = true;
 }, { passive: true });
+
+// The first time the view comes to the front, generated UIs and images laid out while it was hidden grow into place
+// (the frame's height transition only runs once it is displayed): it keeps to the end until they settle, unless the
+// user scrolls.
+let settleUntil = 0;
+if (typeof ResizeObserver === 'function') {
+  new ResizeObserver(() => {
+    if (Date.now() < settleUntil) stickToBottom();
+  }).observe(els.timeline);
+}
+els.scroller.addEventListener('wheel', () => {
+  settleUntil = 0;
+}, { passive: true });
 els.jump.prepend(icon('arrowDown', { size: 13 }));
 els.jump.addEventListener('click', () => stickToBottom(true));
 window.addEventListener('hashchange', () => {
@@ -875,7 +888,10 @@ export const chats = {
   show: null,
   /** The view came to the front: draw what changed while it was hidden, at the bottom if it was there. */
   shown() {
-    if (state.stickOnShow !== false) pendingScrollToBottom = true;
+    if (state.stickOnShow !== false) {
+      pendingScrollToBottom = true;
+      settleUntil = Date.now() + 1200;
+    }
     schedule('list', 'status', 'head', 'main', 'foot');
     reportDragExclusions();
   },
