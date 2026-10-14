@@ -20,7 +20,7 @@ Routes (CONTRACTS-WAVE4 "Mobile API"):
   (recorded into the day's "Phone" conversation, so the desktop app shows it too).
 * T3 (``samrabbit_t3``): ``GET /v1/mobile/t3/threads?filter=``, ``GET /v1/mobile/t3/threads/<id>``,
   ``POST .../message|respond|stop``, ``POST /v1/mobile/t3/threads {text, projectId?}``, ``GET /v1/mobile/t3/projects``.
-* Calendar (Composio, ``samrabbit_calendar``): ``GET /v1/mobile/calendar/agenda?hours=24``,
+* Calendar (Composio, ``samrabbit_calendar``): ``GET /v1/mobile/calendar/agenda?hours=24`` (or ``?days=``: whole days),
   ``POST /v1/mobile/calendar/block {minutes, title?}``, ``POST /v1/mobile/calendar/events {title, startsAt, endsAt}``.
 * ``POST /v1/mobile/journal {text}``: ``**HH:MM** <text>`` appended to today's Heptabase journal (explicit notes only;
   codes, passwords and API keys in the words are redacted first, as on the R1).
@@ -39,7 +39,15 @@ Routes (CONTRACTS-WAVE4 "Mobile API"):
 * The desktop app's voice (the Agent Dock): ``/v1/desktop/assistant/turn|session|cancel|end|announcements``, the same
   handlers as the watch's, for the desktop token from this Mac only, as the one device ``mac``
   (``samrabbit_assistant.MAC_DEVICE``: "Mac" conversations, the Mac's instructions). The dock's list itself is
-  ``samrabbit_inbox`` (``/v1/desktop/inbox*``), which checks the desktop token with ``desktop_denied`` here.
+  ``samrabbit_inbox`` (``/v1/desktop/inbox*``), which checks the desktop token with ``desktop_denied`` here; its
+  phone twin ``/v1/mobile/inbox*`` checks the mobile token with ``device_denied``.
+* The SamRabbit window on the Mac (CONTRACTS-WAVE7), the same handlers for the desktop token from this Mac only:
+  ``GET /v1/desktop/summary`` (the phone's summary, plus ``r1.online`` and the paired ``devices``),
+  ``GET /v1/desktop/calendar/agenda?days=`` (today from its midnight and the days after it),
+  ``POST /v1/desktop/calendar/block {minutes, title?}``, ``POST /v1/desktop/journal {text}`` (an explicit note, as
+  from the phone), ``GET /v1/desktop/devices`` and ``DELETE /v1/desktop/devices/<id>``. Whatever talks to the bridge
+  with the R1's token from the network (the journal, Mac control, conversation sync) tells this module the R1 was there
+  (``r1_heard``).
 
 Errors are ``{"error": {"code", "message", "retryable"}}``. Times in the routes this module answers itself are ISO
 8601 (``...Z`` or with the calendar's offset); the reused sync routes keep their epoch milliseconds. Tokens, codes,
@@ -100,6 +108,8 @@ _LOG = logging.getLogger("samrabbit-bridge.mobile")
 PREFIX = "/v1/mobile/"
 ASSISTANT_PREFIX = "/v1/assistant/"
 DESKTOP_ASSISTANT_PREFIX = "/v1/desktop/assistant/"  # the desktop app's voice: the same handlers, the "mac" device
+# The SamRabbit window's twins of the phone's routes (the inbox's /v1/desktop/inbox* is samrabbit_inbox's).
+DESKTOP_TWINS = ("/v1/desktop/summary", "/v1/desktop/calendar/", "/v1/desktop/journal", "/v1/desktop/devices")
 DEFAULT_DEVICES_FILE = "~/.config/samrabbit/mobile-devices.json"
 DEFAULT_TIMEZONE = "America/New_York"
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no I, O, 0 or 1
@@ -117,12 +127,15 @@ MIN_BLOCK_MINUTES = 5
 MAX_BLOCK_MINUTES = 12 * 60
 DEFAULT_BLOCK_TITLE = "Focus"
 MAX_AGENDA_HOURS = 7 * 24
+MAX_AGENDA_DAYS = 7
+MAX_AGENDA_EVENTS = 250  # a week of a busy calendar (a day's agenda asks for 50)
 SUMMARY_CACHE_SECONDS = 2.0
 T3_REFRESH_SECONDS = 10.0
 CALENDAR_REFRESH_SECONDS = 120.0
 JOURNAL_REFRESH_SECONDS = 300.0  # the probe reads today's journal; a phone note also tells
 SCREEN_REFRESH_SECONDS = 15.0
 TRANSCRIBE_REFRESH_SECONDS = 60.0  # the transcriber caches its own check for 10 minutes; this only reads it
+R1_ONLINE_SECONDS = 15 * 60  # the R1 sends no heartbeat: "online" is "talked to this bridge this recently"
 FAILED_REFRESH_SECONDS = 20.0
 DEMAND_WINDOW_SECONDS = 10 * 60
 COLD_WAIT_SECONDS = 1.5
@@ -182,6 +195,16 @@ def mobile_peer_allowed(address: str) -> bool:
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     return any(ip in network for network in (_PRIVATE_V4 if ip.version == 4 else _PRIVATE_V6))
+
+
+def _loopback(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(str(address).split("%", 1)[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
 
 
 def load_zone(name: Optional[str]) -> tzinfo:
@@ -692,6 +715,14 @@ ROUTES: Tuple[_Route, ...] = (
     _Route(r"/v1/desktop/assistant/session", "/v1/desktop/assistant/session",
            {"POST": ("assistant_session", DESKTOP)}),
     _Route(r"/v1/desktop/assistant/cancel", "/v1/desktop/assistant/cancel", {"POST": ("assistant_cancel", DESKTOP)}),
+    # The SamRabbit window (CONTRACTS-WAVE7): the phone's own handlers for the desktop token from this Mac only.
+    _Route(r"/v1/desktop/summary", "/v1/desktop/summary", {"GET": ("desktop_summary", DESKTOP)}),
+    _Route(r"/v1/desktop/calendar/agenda", "/v1/desktop/calendar/agenda", {"GET": ("agenda", DESKTOP)}),
+    _Route(r"/v1/desktop/calendar/block", "/v1/desktop/calendar/block", {"POST": ("block", DESKTOP)}),
+    _Route(r"/v1/desktop/journal", "/v1/desktop/journal", {"POST": ("journal", DESKTOP)}),
+    _Route(r"/v1/desktop/devices", "/v1/desktop/devices", {"GET": ("devices", DESKTOP)}),
+    _Route(r"/v1/desktop/devices/(?P<id>[A-Za-z0-9_]{1,40})", "/v1/desktop/devices/{id}",
+           {"DELETE": ("revoke", DESKTOP)}),
     _Route(r"/v1/assistant/chatgpt/start", "/v1/assistant/chatgpt/start", {"POST": ("chatgpt_start", DESKTOP)}),
     _Route(r"/v1/assistant/chatgpt/status", "/v1/assistant/chatgpt/status", {"GET": ("chatgpt_status", DESKTOP)}),
     _Route(r"/v1/assistant/chatgpt/disconnect", "/v1/assistant/chatgpt/disconnect",
@@ -701,6 +732,9 @@ ROUTES: Tuple[_Route, ...] = (
 INTERNAL_ROUTES = frozenset({"summary", "sync", "t3_threads", "t3_thread", "t3_action", "t3_create", "t3_projects",
                              "agenda", "block", "event", "journal", "mac_state", "mac_open", "mac_screenshot",
                              "ui_generate", "ui_artifact"})
+# Desktop routes that keep the summary's caches warm while the SamRabbit window reads them (a device's every request
+# does).
+WARMING_ROUTES = frozenset({"desktop_summary", "agenda"})
 
 
 class _Bytes:
@@ -755,9 +789,10 @@ class MobileService:
         self._cache: Dict[str, Tuple[float, Any]] = {}
         self._loading: Dict[str, bool] = {}
         self._summary: Optional[Tuple[float, Dict[str, Any]]] = None
-        self._agenda: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+        self._agenda: Dict[Any, Tuple[float, Dict[str, Any]]] = {}  # hours, or ("days", days, today's date)
         self._hosts: Optional[Tuple[float, List[str]]] = None
         self._streams: Dict[str, List[Any]] = {}  # device id -> handlers of its open live streams (oldest first)
+        self._r1_heard: Optional[float] = None  # when the R1 last talked to the bridge (this run only)
         self._demand_at = -1e12
         self._worker: Optional[threading.Thread] = None
         self._wake = threading.Event()
@@ -799,7 +834,7 @@ class MobileService:
     @staticmethod
     def handles(route: str) -> bool:
         return route.startswith(PREFIX) or route.startswith(ASSISTANT_PREFIX) or \
-            route.startswith(DESKTOP_ASSISTANT_PREFIX)
+            route.startswith(DESKTOP_ASSISTANT_PREFIX) or route.startswith(DESKTOP_TWINS)
 
     @staticmethod
     def route_label(route: str) -> str:
@@ -808,7 +843,9 @@ class MobileService:
             if match:
                 action = match.groupdict().get("action")
                 return spec.label.replace("{action}", action) if action else spec.label
-        return "/v1/desktop/assistant/(other)" if route.startswith(DESKTOP_ASSISTANT_PREFIX) else "/v1/mobile/(other)"
+        if route.startswith(DESKTOP_ASSISTANT_PREFIX):
+            return "/v1/desktop/assistant/(other)"
+        return "/v1/desktop/(other)" if route.startswith(DESKTOP_TWINS) else "/v1/mobile/(other)"
 
     def health(self) -> Dict[str, Any]:
         status = self.t3.status() if self.t3 is not None else {"paired": False, "ok": False}
@@ -839,7 +876,7 @@ class MobileService:
                     found = (spec, match.groupdict())
                     break
             if found is None:
-                self._authorize(handler, DESKTOP if route.startswith(DESKTOP_ASSISTANT_PREFIX) else DEVICE)
+                self._authorize(handler, DESKTOP if route.startswith("/v1/desktop/") else DEVICE)
                 raise MobileError(404, "not_found", "Not found.")
             spec, params = found
             entry = spec.methods.get(method)
@@ -852,6 +889,8 @@ class MobileService:
             if device is not None and device.get("internal") and (
                     name not in INTERNAL_ROUTES or (name == "sync" and route != PREFIX + "conversations")):
                 raise MobileError(403, "forbidden", "The assistant's tools cannot use this route.")
+            if auth == DESKTOP and name in WARMING_ROUTES:
+                self._wanted()  # the SamRabbit window reads the summary: keep its caches warm, as for a phone
             result = getattr(self, "_r_" + name)(handler, params, device, route)
             if isinstance(result, _Written):
                 return result.status, None
@@ -876,6 +915,20 @@ class MobileService:
             return _sync._desktop_denied(handler, self._desktop_token)  # noqa: SLF001 - the same rule
         return MobileError(503, "desktop_unavailable", "The desktop token check is not installed.")
 
+    def device_denied(self, handler: Any) -> Optional[Exception]:
+        """The phone's rule (a LAN or tailnet peer with a paired device's own token; never the assistant's internal
+        token), as every ``/v1/mobile/*`` route here applies it: None when allowed, else the error to answer. The
+        inbox's phone routes (``samrabbit_inbox``, ``/v1/mobile/inbox*``) use it."""
+        if not mobile_peer_allowed(str(handler.client_address[0])):
+            return MobileError(403, "forbidden", "Only devices on your local network or tailnet may use this.")
+        try:
+            device = self._device(handler)
+        except MobileError as error:
+            return error
+        if device.get("internal"):
+            return MobileError(403, "forbidden", "The assistant's tools cannot use this route.")
+        return None
+
     def _authorize(self, handler: Any, auth: str) -> Optional[Dict[str, Any]]:
         if auth == PUBLIC:
             return None
@@ -897,9 +950,13 @@ class MobileService:
             device = self.devices.authenticate(value.strip())
         if device is None:
             raise MobileError(401, "unauthorized", "Pair this device with the Mac again.")
+        self._wanted()
+        return device
+
+    def _wanted(self) -> None:
+        """Someone reads the summary's parts: the worker keeps them fresh for the next ``DEMAND_WINDOW_SECONDS``."""
         self._demand_at = self._monotonic()
         self._wake.set()
-        return device
 
     # ------------------------------------------------------------------ pairing
     def bridge_name(self) -> str:
@@ -1188,7 +1245,11 @@ class MobileService:
             return {"available": False, "reason": "check_failed"}
 
     def _r1_part(self) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """``lastSeenAt``: the later of the R1's last conversation activity and its last request to the bridge."""
         r1: Dict[str, Any] = {"lastSeenAt": None, "live": False, "liveConversationId": None, "liveTitle": None}
+        heard = self._r1_heard
+        if heard is not None:
+            r1["lastSeenAt"] = iso_utc(heard)
         service = getattr(self.server, "sync", None)
         if service is None:
             return r1, None
@@ -1199,7 +1260,9 @@ class MobileService:
             return r1, None
         mine = [item for item in conversations if (item.get("device") or "r1") != "mac"]
         if mine:
-            r1["lastSeenAt"] = _ms_iso(max(int(item.get("lastAt") or 0) for item in mine))
+            latest = max(int(item.get("lastAt") or 0) for item in mine)
+            if heard is None or latest / 1000.0 > heard:
+                r1["lastSeenAt"] = _ms_iso(latest) or r1["lastSeenAt"]
         live = next((item for item in mine if item.get("live")), None)
         if live is not None:
             r1.update({"live": True, "liveConversationId": live["conversationId"],
@@ -1211,6 +1274,27 @@ class MobileService:
 
     def _r_summary(self, _handler: Any, _params: Dict[str, str], _device: Any, _route: str) -> Tuple[int, Any]:
         return 200, self.summary()
+
+    def desktop_summary(self) -> Dict[str, Any]:
+        """The phone's summary for the SamRabbit window on the Mac, plus what the Mac's Home and Settings show:
+        ``r1.online`` (it talked to this bridge in the last ``R1_ONLINE_SECONDS``, or a conversation on it is live; the
+        R1 reports no battery) and the paired phones and watches (``devices``, as ``GET /v1/desktop/devices``)."""
+        value = dict(self.summary())  # the cached summary is shared: never changed in place
+        r1 = dict(value.get("r1") or {})
+        heard = self._r1_heard
+        r1["online"] = bool(r1.get("live")) or (heard is not None and self._clock() - heard < R1_ONLINE_SECONDS)
+        value["r1"] = r1
+        value["devices"] = self.devices.list()
+        return value
+
+    def r1_heard(self, address: str) -> None:
+        """The bridge took a request with the R1's own token (the journal, Mac control, conversation sync, ``/health``)
+        from ``address``. Only a peer on the network counts: on this Mac's loopback that token is install.sh's check."""
+        if mobile_peer_allowed(address) and not _loopback(address):
+            self._r1_heard = self._clock()
+
+    def _r_desktop_summary(self, _handler: Any, _params: Dict[str, str], _device: Any, _route: str) -> Tuple[int, Any]:
+        return 200, self.desktop_summary()
 
     # ------------------------------------------------------------------ conversations (samrabbit_sync handlers)
     def _r_sync(self, handler: Any, _params: Dict[str, str], device: Dict[str, Any], route: str) -> Any:
@@ -1424,21 +1508,32 @@ class MobileService:
             raise MobileError(503, code, message)
         return writer
 
-    def agenda(self, hours: int, *, fresh: bool = False) -> Dict[str, Any]:
+    def agenda(self, hours: int = 24, *, days: Optional[int] = None, fresh: bool = False) -> Dict[str, Any]:
         """The next ``hours`` of the configured Google calendar (``GOOGLECALENDAR_EVENTS_LIST``, single events,
-        ordered by start), cached for ``CALENDAR_REFRESH_SECONDS``."""
+        ordered by start), cached for ``CALENDAR_REFRESH_SECONDS``. ``days``: whole days in the bridge's timezone
+        instead, today (from its midnight, so what already happened today is there too) and the ``days - 1`` after
+        it (the SamRabbit window's agenda by day)."""
+        now = self._now()
+        if days is not None:
+            # Midnights by calendar date: same-zone arithmetic is wall time, so a daylight-saving change in between
+            # makes that day 23 or 25 hours long instead of moving the next midnight.
+            low = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            high = low + timedelta(days=days)
+            key: Any = ("days", days, low.date().isoformat())
+        else:
+            low, high, key = now, now + timedelta(hours=hours), hours
         with self._lock:
-            cached = self._agenda.get(hours)
+            cached = self._agenda.get(key)
         if cached is not None and not fresh and self._monotonic() - cached[0] < CALENDAR_REFRESH_SECONDS:
             return dict(cached[1], cached=True)
         try:
             writer = self._writer()
         except MobileError as error:
             return {"available": False, "reason": error.code, "events": []}
-        now = self._now()
-        arguments = {"calendarId": writer.calendar_id, "timeMin": now.isoformat(timespec="seconds"),
-                     "timeMax": (now + timedelta(hours=hours)).isoformat(timespec="seconds"), "singleEvents": True,
-                     "orderBy": "startTime", "maxResults": 50, "maxAttendees": 1, "timeZone": self.zone_name}
+        arguments = {"calendarId": writer.calendar_id, "timeMin": low.isoformat(timespec="seconds"),
+                     "timeMax": high.isoformat(timespec="seconds"), "singleEvents": True, "orderBy": "startTime",
+                     "maxResults": 50 if (high - low) <= timedelta(hours=24) else MAX_AGENDA_EVENTS,
+                     "maxAttendees": 1, "timeZone": self.zone_name}
         try:
             data = writer._call("GOOGLECALENDAR_EVENTS_LIST", arguments, writing=False)  # noqa: SLF001
         except Exception as error:  # noqa: BLE001 - CalendarError: Composio missing, signed out, Google busy
@@ -1455,7 +1550,10 @@ class MobileService:
                  "to": arguments["timeMax"], "calendarId": writer.calendar_id, "events": events,
                  "updatedAt": iso_utc(self._clock())}
         with self._lock:
-            self._agenda[hours] = (self._monotonic(), value)
+            if days is not None:  # the days read on an earlier date are never asked for again
+                for name in [name for name in self._agenda if isinstance(name, tuple) and name[2] != key[2]]:
+                    del self._agenda[name]
+            self._agenda[key] = (self._monotonic(), value)
         return dict(value, cached=False)
 
     def _calendar_changed(self) -> None:
@@ -1465,8 +1563,13 @@ class MobileService:
             self._summary = None
 
     def _r_agenda(self, handler: Any, _params: Dict[str, str], _device: Any, _route: str) -> Tuple[int, Any]:
-        hours = _int(_query(handler), "hours", 24, 1, MAX_AGENDA_HOURS)
-        value = self.agenda(hours)
+        """``?hours=`` (the phone; default 24, from now) or ``?days=`` (the SamRabbit window's agenda by day: today
+        from its midnight and the days after it, 1 to 7 days)."""
+        query = _query(handler)
+        if _one(query, "days") is not None:
+            value = self.agenda(days=_int(query, "days", 1, 1, MAX_AGENDA_DAYS))
+        else:
+            value = self.agenda(_int(query, "hours", 24, 1, MAX_AGENDA_HOURS))
         if not value.get("available") and not value.get("events"):
             raise MobileError(503, str(value.get("reason") or "calendar_unavailable"),
                               "Google Calendar can't be read from the Mac right now.", retryable=True)

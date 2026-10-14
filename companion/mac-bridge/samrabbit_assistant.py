@@ -46,8 +46,9 @@ Routes (through ``samrabbit_mobile``: a paired device's token and the LAN / Tail
     ``reason``), ``assistant_timeout``, ``assistant_busy``, ``assistant_interrupted``, ``transcribe_*``, ``invalid_*``.
 * ``POST /v1/mobile/assistant/session {conversationId?}`` -> ``{conversationId, brain, ready}``: warm up (the
   realtime session opens in the background, so the first turn does not wait for it).
-* ``POST /v1/mobile/assistant/cancel {conversationId}`` -> ``{ok, cancelled}``: stop the current reply (tap to
-  interrupt); its stream ends with ``done {interrupted: true}``.
+* ``POST /v1/mobile/assistant/cancel {conversationId, turnId?}`` -> ``{ok, cancelled}``: stop the current reply (tap
+  to interrupt); its stream ends with ``done {interrupted: true}``. With ``turnId`` only that turn is stopped: a cancel
+  that arrives after it ended never stops the next one (``cancelled: false``).
 * ``GET /v1/mobile/assistant/announcements?conversationId=&since=`` -> ``{items: [{id, say, audio | null, kind:
   "needs_you" | "done" | "error", threadId, title}], cursor}``: T3 tasks that started needing Samin, finished or
   failed since the conversation began, each announced once per conversation (the watch polls about every 20 s).
@@ -1306,12 +1307,19 @@ class _Conversation:
         self.ended = False
         self.turns = 0
         # The realtime brain: this conversation's session (opened in the background), what was said (for the summary
-        # a new session starts with after 55 minutes), the current turn's cancel switch.
+        # a new session starts with after 55 minutes). ``current``: the turn being answered, its id and its cancel
+        # switch as one value (set and cleared at once), so a cancel that names a turn reads that turn's own switch.
         self.realtime: Any = None
         self.realtime_lock = threading.Lock()
         self.history: Deque[Tuple[str, str]] = deque(maxlen=HISTORY_TURNS)
         self.said: Deque[str] = deque(maxlen=3)
-        self.cancel: Optional[threading.Event] = None
+        self.current: Optional[Tuple[str, threading.Event]] = None
+
+    @property
+    def cancel(self) -> Optional[threading.Event]:
+        """The current turn's cancel switch (None between turns)."""
+        current = self.current
+        return current[1] if current is not None else None
 
     def record(self) -> Dict[str, Any]:
         return {"sessionId": self.session_id, "started": self.started, "deviceId": self.device_id,
@@ -2396,7 +2404,7 @@ class AssistantService:
         result.brain = brain
         if not conversation.lock.acquire(blocking=False):
             raise AssistantError(409, "assistant_busy", "Still answering the last thing you said.", retryable=True)
-        conversation.cancel = sink.cancel
+        conversation.current = (request.turn_id, sink.cancel)
         try:
             conversation.last_at = self._clock()
             conversation.ended = False
@@ -2470,7 +2478,7 @@ class AssistantService:
             conversation.history.append((heard, result.say))
             self._done(conversation, request, result, run)
         finally:
-            conversation.cancel = None
+            conversation.current = None
             conversation.lock.release()
 
     def _realtime_failed(self, conversation: _Conversation, error: Any) -> None:
@@ -2873,17 +2881,27 @@ class AssistantService:
         return max(going, key=lambda item: item.last_at) if going else None
 
     def cancel(self, handler: Any, device: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        """Stop the reply being made. ``turnId`` (optional) names the turn the client means: a tap on a reply that
+        ended meanwhile must not stop the next turn (one typed right after it), so a cancel for any other turn than
+        the current one stops nothing."""
         if device.get("internal"):
             raise AssistantError(403, "forbidden", "Not for the assistant itself.")
-        conversation_id = _json_body(handler).get("conversationId")
+        body = _json_body(handler)
+        conversation_id = body.get("conversationId")
         if not isinstance(conversation_id, str) or not _CONVERSATION_ID.match(conversation_id):
             raise AssistantError(400, "invalid_conversation", "conversationId is required.")
+        turn_id = body.get("turnId")
+        if turn_id is not None and (not isinstance(turn_id, str) or not _TURN_ID.match(turn_id.strip())):
+            raise AssistantError(400, "invalid_turn", "turnId must be the turn's id.")
         with self._lock:
             found = self._conversations.get(conversation_id)
         if found is None or found.device_id != str(device.get("deviceId") or ""):
             return 200, {"ok": True, "cancelled": False}
-        switch = found.cancel
-        if switch is None or switch.is_set():
+        current = found.current  # the turn being answered and its switch, read together
+        if current is None or (turn_id is not None and current[0] != turn_id.strip()):
+            return 200, {"ok": True, "cancelled": False}
+        switch = current[1]
+        if switch.is_set():
             return 200, {"ok": True, "cancelled": False}
         switch.set()
         _LOG.info("assistant reply cancelled")

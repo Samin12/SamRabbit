@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 import struct
 import sys
+import threading
 import unittest
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -124,8 +125,8 @@ class DesktopTurnTest(DesktopVoiceMixin, AssistantBase):
         self.assertEqual(("claude", True), (warm["brain"], warm["ready"]))
         conversation = warm["conversationId"]
         self.script({"reply": REPLY})
-        status, value = self.desk(UTTERANCE, conversation=conversation)
-        self.assertEqual((200, conversation), (status, value["conversationId"]))
+        status, turn = self.desk(UTTERANCE, conversation=conversation)
+        self.assertEqual((200, conversation), (status, turn["conversationId"]))
         status, value = self.call("GET", f"/v1/desktop/assistant/announcements?conversationId={conversation}",
                                   desktop=True)
         self.assertEqual(200, status, value)
@@ -133,12 +134,50 @@ class DesktopTurnTest(DesktopVoiceMixin, AssistantBase):
         status, value = self.call("POST", "/v1/desktop/assistant/cancel", {"conversationId": conversation},
                                   desktop=True)
         self.assertEqual((200, {"ok": True, "cancelled": False}), (status, value), "nothing was being said")
+        status, value = self.call("POST", "/v1/desktop/assistant/cancel",
+                                  {"conversationId": conversation, "turnId": turn["turnId"]}, desktop=True)
+        self.assertEqual((200, {"ok": True, "cancelled": False}), (status, value), "a cancel may name its turn")
+        status, value = self.call("POST", "/v1/desktop/assistant/cancel",
+                                  {"conversationId": conversation, "turnId": ["x"]}, desktop=True)
+        self.assertEqual((400, "invalid_turn"), (status, value["error"]["code"]))
         status, value = self.call("POST", "/v1/desktop/assistant/end", {"conversationId": conversation}, desktop=True)
         self.assertEqual((200, {"ok": True, "ended": True}), (status, value))
         self.assertEqual("conversation.ended", self.mac_events(conversation)[-1]["type"])
         # The same warm-up from a reopened dock reuses nothing that ended.
         status, again = self.call("POST", "/v1/desktop/assistant/session", {}, desktop=True)
         self.assertNotEqual(conversation, again["conversationId"])
+
+    def test_a_cancel_from_the_dock_stops_only_the_turn_it_names(self) -> None:
+        # The iPhone review: a stop pressed on a reply that had just ended stopped the turn said right after it.
+        self.script({"reply": REPLY}, {"reply": REPLY, "sleep": 1.5}, {"reply": REPLY, "sleep": 1.5})
+        status, first = self.desk(UTTERANCE)
+        self.assertEqual(200, status, first)
+        conversation = first["conversationId"]
+        found = self.service.assistant._conversations[conversation]  # noqa: SLF001
+        for name, named, stopped in (("an earlier turn", first["turnId"], False), ("this turn", None, True)):
+            with self.subTest(cancel=name):
+                turn = str(uuid.uuid4())
+                answers: List[Tuple[int, Dict[str, Any]]] = []
+
+                def ask(turn: str = turn, answers: List[Any] = answers) -> None:
+                    answers.append(self.desk("and then?", conversation=conversation, turn=turn))
+
+                runner = threading.Thread(target=ask)
+                runner.start()
+                self.wait_for(lambda: found.current is not None and found.current[0] == turn)
+                status, value = self.call("POST", "/v1/desktop/assistant/cancel",
+                                          {"conversationId": conversation, "turnId": named or turn}, desktop=True)
+                self.assertEqual((200, {"ok": True, "cancelled": stopped}), (status, value))
+                runner.join(timeout=15)
+                [(status, value)] = answers
+                self.assertEqual(200, status, value)
+                self.assertEqual((turn, REPLY), (value["turnId"], value["say"]))
+                if stopped:
+                    self.assertEqual((None, False), (value["audio"], value["expectReply"]), "stopped: never spoken")
+                else:
+                    self.assertIsNotNone(value["audio"], "the turn after it was spoken to the end")
+        self.assertEqual(3, len(self.claude_calls()))
+        self.assertIsNone(found.current, "between turns there is nothing to stop")
 
     def test_the_mac_and_the_watch_never_share_a_conversation(self) -> None:
         self.script({"reply": REPLY})
