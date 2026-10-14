@@ -23,6 +23,12 @@ final class DockUIState: ObservableObject {
     @Published var maxPanelHeight: CGFloat = 640
     @Published var pillHover = false
     @Published var dragging = false
+    /// Folded to the orb (⌃⌥M, the "–", "Minimize to Orb").
+    @Published var minimized = false
+    /// The "–" on the pill while the pointer is on it, at the end away from the edge the pill is kept against.
+    @Published var minimizeSlot: HorizontalEdge?
+    /// The list opens below the dock (it sits high on its screen).
+    @Published var listBelow = false
 }
 
 /// The voice state as the dock draws it. Live it comes from `MacVoice` (owned by the voice workstream); snapshots and
@@ -101,6 +107,7 @@ struct DockCommands {
     var collapse: () -> Void = {}
     var interact: () -> Void = {}
     var openItem: (DockItem) -> Void = { _ in }
+    var minimize: () -> Void = {}
 }
 
 /// The pill's controls report their frames, so a press anywhere else on the pill can drag it.
@@ -114,6 +121,21 @@ struct DockSizeKey: PreferenceKey {
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
         let next = nextValue()
         if next != .zero { value = next }
+    }
+}
+
+/// What the pill window measures in one pass: its whole size, and how much of its width is the "–" (so the
+/// controller places the pill's resting frame by its corner and adds the button on its side).
+struct DockPillMeasure: Equatable {
+    var size: CGSize = .zero
+    var slot: CGFloat = 0
+}
+
+struct DockPillMeasureKey: PreferenceKey {
+    static let defaultValue = DockPillMeasure()
+    static func reduce(value: inout DockPillMeasure, nextValue: () -> DockPillMeasure) {
+        let next = nextValue()
+        value = DockPillMeasure(size: next.size == .zero ? value.size : next.size, slot: max(value.slot, next.slot))
     }
 }
 
@@ -132,7 +154,8 @@ extension View {
 // MARK: the pill
 
 /// The collapsed dock (~44 pt tall on a laptop): the orb, "2 need you" (accent capsule, hidden at 0), "4 working"
-/// (muted), and the mic, with a dot when the "Hey Rabbit" listener is armed.
+/// (muted), and the mic, with a dot when the "Hey Rabbit" listener is armed. While the pointer is on it a "–" appears
+/// at its far end (DockUIState.minimizeSlot): it folds the dock to the orb.
 struct DockPill: View {
     @ObservedObject var store: DockStore
     @ObservedObject var ui: DockUIState
@@ -142,17 +165,21 @@ struct DockPill: View {
 
     var body: some View {
         let s = ui.pillScale
-        HStack(spacing: 9 * s) {
-            DockOrbMark(size: 36 * s, moving: moving, dim: offline)
-                .padding(.leading, 4 * s)
-                .padding(.trailing, -2 * s)
-            words(s)
-            Rectangle().fill(Color.white.opacity(0.13)).frame(width: 1, height: 18 * s)
-            DockRoundButton(symbol: "mic.fill", size: 32 * s, badge: voice.wakeArmed,
-                            help: voice.shortcut.isEmpty ? "Talk to SamRabbit"
-                                : "Talk to SamRabbit (\(voice.shortcut))") { commands.toggleVoice() }
-                .dockControl()
-                .padding(.trailing, 6 * s)
+        HStack(spacing: 0) {
+            if ui.minimizeSlot == .leading { minimizeButton(s, leading: true) }
+            HStack(spacing: 9 * s) {
+                DockOrbMark(size: 36 * s, moving: moving, dim: offline)
+                    .padding(.leading, 4 * s)
+                    .padding(.trailing, -2 * s)
+                words(s)
+                Rectangle().fill(Color.white.opacity(0.13)).frame(width: 1, height: 18 * s)
+                DockRoundButton(symbol: "mic.fill", size: 32 * s, badge: voice.wakeArmed,
+                                help: voice.shortcut.isEmpty ? "Talk to SamRabbit"
+                                    : "Talk to SamRabbit (\(voice.shortcut))") { commands.toggleVoice() }
+                    .dockControl()
+                    .padding(.trailing, 6 * s)
+            }
+            if ui.minimizeSlot == .trailing { minimizeButton(s, leading: false) }
         }
         .frame(height: (DockMetrics.pillBaseHeight * s).rounded())
         .background(DockGlass(shape: Capsule(), firmness: ui.pillHover || ui.expanded ? 1.18 : 1))
@@ -168,6 +195,20 @@ struct DockPill: View {
     private var offline: Bool {
         if case .offline = store.connection { return true }
         return false
+    }
+
+    /// The "–": a small round button, measured with its padding (DockPillMeasure.slot).
+    private func minimizeButton(_ s: CGFloat, leading: Bool) -> some View {
+        DockRoundButton(symbol: "minus", size: 22 * s, fill: Color.white.opacity(0.07), help: "Minimize to the orb") {
+            commands.minimize()
+        }
+        .dockControl()
+        .padding(.leading, leading ? 8 * s : 0)
+        .padding(.trailing, leading ? 2 * s : 7 * s)
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: DockPillMeasureKey.self, value: DockPillMeasure(slot: proxy.size.width))
+        })
+        .transition(.opacity)
     }
 
     @ViewBuilder private func words(_ s: CGFloat) -> some View {
@@ -217,6 +258,92 @@ struct DockWorkingDot: View {
 
     var body: some View {
         Circle().fill(Palette.pale.opacity(0.85)).frame(width: size, height: size)
+    }
+}
+
+// MARK: the orb (minimized)
+
+/// The dock folded to its mark (⌃⌥M, the "–" on the pill, "Minimize to Orb"): a ~36 pt glass circle with the orb, a
+/// small count of what needs Samin (it pulses once when that changes) and the mic's dot while "Hey Rabbit" listens.
+/// A click opens it back into the pill; pointing at it still opens the list, a drag moves it, right-click has the
+/// menu. Its window is the circle plus a little room above and to the right, where the count sits over its edge.
+struct DockOrb: View {
+    @ObservedObject var store: DockStore
+    @ObservedObject var ui: DockUIState
+    let voice: DockVoiceSnapshot
+    @State private var moving = false
+    @State private var pulse = false
+
+    var body: some View {
+        let s = ui.pillScale
+        let size = (DockMetrics.orbBaseSize * s).rounded()
+        let room = (DockMetrics.orbBadgeRoom * s).rounded()
+        let needs = offline ? 0 : store.needsYouCount
+        ZStack(alignment: .topTrailing) {
+            ZStack(alignment: .bottomTrailing) {
+                DockOrbMark(size: size * 1.04, moving: moving, dim: offline)
+                    .frame(width: size, height: size)
+                if voice.wakeArmed {
+                    Circle()
+                        .fill(Palette.pale)
+                        .overlay(Circle().strokeBorder(Color.black.opacity(0.4), lineWidth: 0.75))
+                        .frame(width: 7 * s, height: 7 * s)
+                        .offset(x: -size * 0.12, y: -size * 0.12)
+                }
+            }
+            .frame(width: size, height: size)
+            .background(DockGlass(shape: Circle(), firmness: ui.pillHover || ui.expanded ? 1.18 : 1))
+            .contentShape(Circle())
+            .padding(.top, room)
+            .padding(.trailing, room)
+            if needs > 0 {
+                DockCountBadge(count: needs, scale: s)
+                    .scaleEffect(pulse ? 1.3 : 1)
+            }
+        }
+        .onChange(of: needs) { old, new in
+            guard old != new, new > 0 else { return }
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.45)) { pulse = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                withAnimation(.easeOut(duration: 0.3)) { pulse = false }
+            }
+        }
+        .onChange(of: store.beat) { _, _ in
+            moving = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { moving = false }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var offline: Bool {
+        if case .offline = store.connection { return true }
+        return false
+    }
+
+    private var accessibilityText: String {
+        if offline { return "SamRabbit dock, minimized: the Mac bridge isn’t running" }
+        return "SamRabbit dock, minimized: \(store.needsYouCount) need you, \(store.workingCount) working"
+    }
+}
+
+/// The orb's count: a small blue capsule, white figures.
+struct DockCountBadge: View {
+    let count: Int
+    let scale: CGFloat
+
+    var body: some View {
+        let s = scale
+        Text(count > 99 ? "99+" : "\(count)")
+            .font(.system(size: 10.5 * s, weight: .bold))
+            .monospacedDigit()
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 4.5 * s)
+            .frame(minWidth: 17 * s, minHeight: 17 * s)
+            .background(Capsule().fill(DockPalette.accentFill))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
+            .background(Capsule().strokeBorder(Color.black.opacity(0.35), lineWidth: 1).padding(-0.75))
+            .fixedSize()
     }
 }
 
@@ -327,14 +454,15 @@ struct DockVoiceBar: View {
 
 // MARK: roots (what each window hosts)
 
-/// The pill window's content: the pill, or the voice bar during a conversation. It sizes itself; the window follows.
+/// The pill window's content: the pill, the orb when minimized, or the voice bar during a conversation (and the orb
+/// again after it). It sizes itself; the window follows.
 struct DockPillRoot: View {
     @ObservedObject var store: DockStore
     @ObservedObject var ui: DockUIState
     @ObservedObject var voice: DockVoiceFeed
     let commands: DockCommands
     let render: DockRender
-    var onSize: (CGSize) -> Void
+    var onMeasure: (DockPillMeasure) -> Void
     var onHitRects: ([CGRect]) -> Void
 
     var body: some View {
@@ -342,15 +470,19 @@ struct DockPillRoot: View {
         Group {
             if snapshot.active {
                 DockVoiceBar(voice: snapshot, scale: ui.pillScale, commands: commands)
+            } else if ui.minimized {
+                DockOrb(store: store, ui: ui, voice: snapshot)
             } else {
                 DockPill(store: store, ui: ui, voice: snapshot, commands: commands)
             }
         }
         .fixedSize()
-        .dockReportSize()
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: DockPillMeasureKey.self, value: DockPillMeasure(size: proxy.size))
+        })
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .coordinateSpace(name: "dockPill")
-        .onPreferenceChange(DockSizeKey.self) { size in onSize(size) }
+        .onPreferenceChange(DockPillMeasureKey.self) { measure in onMeasure(measure) }
         .onPreferenceChange(DockHitRectsKey.self) { rects in onHitRects(rects) }
         .environment(\.dockRender, render)
         .environment(\.colorScheme, .dark)

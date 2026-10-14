@@ -269,7 +269,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   + (Config.isDefaultBase ? "" : " (override)") + (atLogin ? " at-login" : ""))
         MainActor.assumeIsolated {
             AppModel.shared.start(showWindow: !atLogin)
-            MacVoice.shared.activate()
+            // The talk shortcut is one of the four Settings can record anew: the dock's shortcut center registered it
+            // (through MacVoice.setShortcut) when the dock started.
+            MacVoice.shared.activate(shortcut: false)
         }
     }
 
