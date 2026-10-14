@@ -92,6 +92,9 @@ struct BriefCard: View {
                 Label(label, systemImage: "checkmark.circle.fill")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(SamTheme.mint)
+                if let line = item.resultLine {
+                    Text(line).font(.system(size: 11.5)).foregroundStyle(SamTheme.muted).lineLimit(2)
+                }
             }
             HStack(spacing: 6) {
                 if item.state == .open, let verb = item.verbs.first(where: { $0.kind != .open }) {
@@ -105,17 +108,20 @@ struct BriefCard: View {
                     .tint(SamTheme.orb)
                     .accessibilityIdentifier("brief-verb-\(item.id)")
                 }
-                Button {
-                    Task { await model.briefAct(item, .done) }
-                } label: {
-                    Image(systemName: "checkmark").font(.system(size: 13, weight: .bold))
+                if item.allows(.done) {
+                    let beside = item.state == .open && item.verbs.contains { $0.kind != .open }
+                    Button {
+                        Task { await model.briefAct(item, .done) }
+                    } label: {
+                        Image(systemName: "checkmark").font(.system(size: 13, weight: .bold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(SamTheme.mint)
+                    .frame(width: beside ? 44 : nil)
+                    .frame(maxWidth: beside ? nil : .infinity)
+                    .accessibilityLabel("Done")
+                    .accessibilityIdentifier("brief-done-\(item.id)")
                 }
-                .buttonStyle(.bordered)
-                .tint(SamTheme.mint)
-                .frame(width: item.state == .open && item.verbs.contains { $0.kind != .open } ? 44 : nil)
-                .frame(maxWidth: item.state == .open && item.verbs.contains { $0.kind != .open } ? nil : .infinity)
-                .accessibilityLabel("Done")
-                .accessibilityIdentifier("brief-done-\(item.id)")
             }
             .disabled(busy)
         }

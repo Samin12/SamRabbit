@@ -22,6 +22,15 @@ struct MorningSection: View {
                 if !today.isEmpty { todayCard(today) }
                 let fyi = brief.items(in: .fyi)
                 if !fyi.isEmpty { fyiCard(fyi) }
+                if let footer = brief.footer {
+                    // What it read, for trust ("Read 105 emails · 14 worth a look").
+                    Text(footer)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(SamTheme.faint)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 6)
+                        .accessibilityIdentifier("brief-footer")
+                }
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("home-brief")
@@ -129,14 +138,23 @@ struct MorningSection: View {
                 ForEach(items) { item in
                     HStack(alignment: .top, spacing: 10) {
                         Circle().fill(SamTheme.faint).frame(width: 5, height: 5).padding(.top, 7)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(item.title).font(.system(size: 14.5, weight: .semibold)).foregroundStyle(SamTheme.ink2)
-                            if !item.why.isEmpty {
-                                Text(item.why).font(.system(size: 12.5)).foregroundStyle(SamTheme.muted)
+                        // Tap: the email in Gmail, in its own account.
+                        Button {
+                            if let url = item.openURL { UIApplicationOpener.open(url) }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(item.title).font(.system(size: 14.5, weight: .semibold)).foregroundStyle(SamTheme.ink2)
+                                if !item.why.isEmpty {
+                                    Text(item.why).font(.system(size: 12.5)).foregroundStyle(SamTheme.muted)
+                                }
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(.rect)
                         }
+                        .buttonStyle(.plain)
+                        .disabled(item.openURL == nil)
                         Spacer(minLength: 0)
-                        BriefCircleButton(item: item, kind: .dismiss)
+                        if item.allows(.dismiss) { BriefCircleButton(item: item, kind: .dismiss) }
                     }
                 }
             }
@@ -194,16 +212,28 @@ struct BriefItemCard: View {
                 Spacer(minLength: 0)
             }
             if let label = item.state.label {
-                HStack(spacing: 8) {
-                    Label(label, systemImage: "checkmark.circle.fill")
-                        .font(.system(size: 13.5, weight: .semibold))
-                        .foregroundStyle(SamTheme.mint)
-                        .accessibilityIdentifier("brief-state-\(item.id)")
-                    if let draft = item.draftUrl {
-                        Link("Open draft", destination: draft)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Label(label, systemImage: "checkmark.circle.fill")
                             .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(SamTheme.mint)
+                            .accessibilityIdentifier("brief-state-\(item.id)")
+                        if let draft = item.draftUrl {
+                            Button("Open draft") { UIApplicationOpener.open(draft) }
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .buttonStyle(.plain)
+                                .foregroundStyle(SamTheme.orbPale)
+                                .accessibilityIdentifier("brief-open-draft-\(item.id)")
+                        }
+                        Spacer()
                     }
-                    Spacer()
+                    // What the Mac did, in its words ("Blocked 30 min at 10:05 AM.").
+                    if let line = item.resultLine, item.state != .done, item.state != .dismissed {
+                        Text(line)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(SamTheme.muted)
+                            .accessibilityIdentifier("brief-result-\(item.id)")
+                    }
                 }
             }
             HStack(spacing: 8) {
@@ -213,8 +243,8 @@ struct BriefItemCard: View {
                     }
                 }
                 Spacer(minLength: 0)
-                BriefCircleButton(item: item, kind: .done)
-                BriefCircleButton(item: item, kind: .dismiss)
+                if item.allows(.done) { BriefCircleButton(item: item, kind: .done) }
+                if item.allows(.dismiss) { BriefCircleButton(item: item, kind: .dismiss) }
             }
             .disabled(busy)
         }

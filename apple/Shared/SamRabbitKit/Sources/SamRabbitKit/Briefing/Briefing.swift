@@ -225,13 +225,18 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
     public var endsAt: Date?
     /// Overlaps another event.
     public var conflict: Bool
-    /// The inbox item an Agents row is about (`t3:<id>`, `claude:<id>`).
+    /// The inbox item an Agents row is about (`itemId`: `t3:<id>`, `claude:<id>`): Open opens it in Tasks.
     public var inboxItemId: String?
+    /// What the item allows (`can`: its verbs, `done`, `dismiss`, `open`); empty: everything it shows.
+    public var can: [String]
+    /// What its verb did, in the Mac's words ("Blocked 30 min at 10:05 AM.", "I'll remind you at 2:00 PM.").
+    public var resultLine: String?
 
     public init(id: String, section: BriefingSection, kind: String = "email", account: String? = nil, title: String,
                 why: String = "", suggestion: String? = nil, actions: [BriefingAction] = [], priority: Int = 2,
                 state: State = .open, url: URL? = nil, draftUrl: URL? = nil, startsAt: Date? = nil,
-                endsAt: Date? = nil, conflict: Bool = false, inboxItemId: String? = nil) {
+                endsAt: Date? = nil, conflict: Bool = false, inboxItemId: String? = nil, can: [String] = [],
+                resultLine: String? = nil) {
         self.id = id
         self.section = section
         self.kind = kind
@@ -248,6 +253,8 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
         self.endsAt = endsAt
         self.conflict = conflict
         self.inboxItemId = inboxItemId
+        self.can = can
+        self.resultLine = resultLine
     }
 
     /// `section` comes from the item or, inside `sections[]`, from its part (`defaultSection`).
@@ -270,15 +277,21 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
         why = Formatting.clip(c.text("why", "detail", "subtitle") ?? "", 140)
         suggestion = c.text("suggestion").map { Formatting.clip($0, 120) }
         actions = Array(c.list(BriefingAction.self, "actions").prefix(6))
-        priority = c.optionalInt("priority") ?? 2
+        // The bridge ranks Do first itself (no `priority`): its items are the urgent ones.
+        priority = c.optionalInt("priority") ?? (section == .doFirst ? 1 : 2)
         state = State(raw: c.text("state", "status"))
         url = (c.text("url", "link", "openUrl") ?? c.json("source")["url"].text)
             .flatMap(URL.init(string:)).flatMap(BriefingAction.webLink)
-        draftUrl = c.text("draftUrl", "draftLink").flatMap(URL.init(string:)).flatMap(BriefingAction.webLink)
+        // What a verb did (`result`): the draft's own Gmail link once Draft reply made it, and the Mac's line.
+        let result = c.json("result")
+        draftUrl = (c.text("draftUrl", "draftLink") ?? (state == .drafted ? result["url"].text : nil))
+            .flatMap(URL.init(string:)).flatMap(BriefingAction.webLink)
         startsAt = c.date("startsAt", "start", "at")
         endsAt = c.date("endsAt", "end")
         conflict = c.bool("conflict")
-        inboxItemId = c.text("inboxItemId") ?? c.json("source")["itemId"].text
+        inboxItemId = c.text("inboxItemId", "itemId") ?? c.json("source")["itemId"].text
+        can = c.list(String.self, "can")
+        resultLine = c.text("resultLine") ?? result["say"].text
     }
 
     /// What an item of `section` is when it doesn't say.
@@ -301,6 +314,12 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
     /// Where Open goes: its own link, else the Open verb's.
     public var openURL: URL? { url ?? actions.first { $0.kind == .open }?.url }
 
+    /// Whether it takes `action` (`can`; an item that doesn't list them takes Done, Dismiss and its own verbs).
+    public func allows(_ action: BriefingAction.Kind) -> Bool {
+        guard !can.isEmpty else { return true }
+        return can.contains(action.wire) || actions.contains { $0.kind == action }
+    }
+
     /// A mailbox tag ("Personal"), shown only for the personal one (business is the default).
     public var accountTag: String? {
         guard let account, !account.isEmpty else { return nil }
@@ -312,35 +331,47 @@ public struct BriefingItem: Codable, Sendable, Equatable, Identifiable {
 
 /// What a tap on a verb did (`POST …/act`): the item's new state, and the link it made (a Gmail draft, with the
 /// right account) or opened.
+/// The bridge answers `{ok, item, result: {url?, draftId?, threadId?, itemId?, eventId?, until?, say}, revision}`.
 public struct BriefingActResult: Codable, Sendable, Equatable {
     public var ok: Bool
     public var state: BriefingItem.State?
+    /// The Gmail draft it made (Draft reply), or where Open goes.
     public var url: URL?
+    /// The Mac's line ("Saved as a draft in Gmail. Open it to send.", "Blocked 30 min at 10:05 AM.").
     public var message: String?
     public var threadId: String?
+    /// The inbox item it is about or made (`t3:<threadId>` for a new task; an agent's item for Open).
+    public var itemId: String?
     public var eventId: String?
     public var until: Date?
+    /// The item as the Mac has it now.
+    public var item: BriefingItem?
 
     public init(ok: Bool = true, state: BriefingItem.State? = nil, url: URL? = nil, message: String? = nil,
-                threadId: String? = nil, eventId: String? = nil, until: Date? = nil) {
+                threadId: String? = nil, itemId: String? = nil, eventId: String? = nil, until: Date? = nil,
+                item: BriefingItem? = nil) {
         self.ok = ok
         self.state = state
         self.url = url
         self.message = message
         self.threadId = threadId
+        self.itemId = itemId
         self.eventId = eventId
         self.until = until
+        self.item = item
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: AnyKey.self)
         let result = c.json("result")
         ok = c.optionalBool("ok") ?? true
-        state = (c.text("state") ?? result["state"].text).map(BriefingItem.State.init(raw:))
+        item = c.value(BriefingItem.self, "item")
+        state = (c.text("state") ?? result["state"].text).map(BriefingItem.State.init(raw:)) ?? item?.state
         url = (c.text("url", "draftUrl", "link") ?? result["url"].text ?? result["draftUrl"].text)
             .flatMap(URL.init(string:)).flatMap(BriefingAction.webLink)
-        message = c.text("message", "say") ?? result["message"].text
-        threadId = c.text("threadId") ?? result["threadId"].text ?? result["itemId"].text
+        message = c.text("message", "say") ?? result["say"].text ?? result["message"].text
+        threadId = c.text("threadId") ?? result["threadId"].text
+        itemId = c.text("itemId") ?? result["itemId"].text
         eventId = c.text("eventId") ?? result["eventId"].text
         until = c.date("until") ?? result["until"].date
     }
@@ -360,7 +391,7 @@ public struct Briefing: Codable, Sendable, Equatable {
             case "stale": self = .stale
             case "failed", "error": self = .failed
             case "off", "disabled": self = .off
-            case "none", "missing", "empty": self = .none
+            case "none", "missing", "empty", "waiting": self = .none
             default: self = .ready
             }
         }
@@ -418,7 +449,7 @@ public struct Briefing: Codable, Sendable, Equatable {
         headline = Formatting.clip(c.text("headline", "title") ?? "", 120)
         spoken = c.text("spoken", "say")
         updatedAt = c.date("updatedAt", "builtAt", "generatedAt")
-        footer = c.text("footer", "skipped")
+        footer = c.text("footer", "skipped") ?? Self.footer(counts: c.json("counts"), accounts: c.json("accounts"))
         reason = c.text("reason")
         var collected: [BriefingItem] = []
         for part in c.list(BriefingPart.self, "sections") { collected += part.items }
@@ -430,6 +461,20 @@ public struct Briefing: Codable, Sendable, Equatable {
         var seen = Set<String>()
         items = Self.ordered(collected.filter { seen.insert($0.id).inserted })
         available = outerAvailable ?? (date != nil || !items.isEmpty)
+    }
+
+    /// The line under the brief that says what it read (`counts`, `accounts`): "Read 105 emails · 12 worth a look",
+    /// and a mailbox it couldn't read.
+    static func footer(counts: JSONValue, accounts: JSONValue) -> String? {
+        var parts: [String] = []
+        if let emails = counts["emails"].int, emails > 0 {
+            parts.append("Read " + Formatting.count(emails, "email", "emails"))
+            if let kept = counts["kept"].int { parts.append("\(kept) worth a look") }
+        }
+        for account in accounts.array ?? [] where account["ok"].bool == false {
+            parts.append("Couldn't read the \(account["label"].text ?? "other") mailbox")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// By part, then as the brief listed them; each part at its cap.
@@ -462,12 +507,14 @@ public struct Briefing: Codable, Sendable, Equatable {
             && (allDay || BriefingClock.isMorning(now, calendar: calendar)) && !shown.isEmpty
     }
 
-    /// The item with `id` in a new state (after a tap; the Mac's next answer confirms).
-    public func with(_ id: String, state: BriefingItem.State, draftUrl: URL? = nil) -> Briefing {
+    /// The item with `id` in a new state (after a tap; the Mac's next answer confirms), with the draft's link and the
+    /// Mac's line about it.
+    public func with(_ id: String, state: BriefingItem.State, draftUrl: URL? = nil, line: String? = nil) -> Briefing {
         var copy = self
         if let index = copy.items.firstIndex(where: { $0.id == id }) {
             copy.items[index].state = state
             if let draftUrl { copy.items[index].draftUrl = draftUrl }
+            if let line { copy.items[index].resultLine = line }
         }
         return copy
     }

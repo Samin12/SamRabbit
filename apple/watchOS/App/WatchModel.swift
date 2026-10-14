@@ -211,7 +211,8 @@ final class WatchModel {
             let result = try await self.actions.briefingAct(item.id, action: action.action, state: kind == .done
                 ? .done : kind == .dismiss ? .dismissed : nil)
             let state = result.state ?? (kind == .done ? .done : kind == .dismiss ? .dismissed : item.state)
-            self.briefing = self.briefing?.with(item.id, state: state, draftUrl: result.url)
+            self.briefing = self.briefing?.with(item.id, state: state, draftUrl: kind == .draftReply ? result.url : nil,
+                                                line: result.message)
             switch kind {
             case .draftReply: self.show(.success, "Draft saved", detail: "In Gmail. Open it on your iPhone to send.")
             case .makeTask: self.show(.success, "Task started", detail: result.message)

@@ -34,8 +34,9 @@ final class BriefingUITests: XCTestCase {
     }
 
     /// The brief leads Home: the headline, Do first with each item's verbs, Today with its conflict, the agent
-    /// waiting, FYI folded. Draft reply saves a draft (never sent) and says so; Make task starts a task; Done takes
-    /// the item off; Block prep blocks time; Dismiss on FYI; the refresh button builds it again.
+    /// waiting, FYI folded, what it read. Draft reply saves a draft (never sent) and says so; Make task starts a task;
+    /// Block 30 min blocks time on the clash and says when; Review opens the agent's task in Tasks; Done takes an item
+    /// off; Dismiss on FYI; the refresh button builds it again.
     func testTheMorningBriefLeadsHomeAndItsVerbsResolveItems() throws {
         try launch()
         let headline = app.staticTexts["brief-headline"]
@@ -50,7 +51,8 @@ final class BriefingUITests: XCTestCase {
         let state = app.staticTexts["brief-state-bi_dana"]
         XCTAssertTrue(state.waitForExistence(timeout: 10))
         XCTAssertEqual(state.label, "Draft saved in Gmail")
-        XCTAssertTrue(app.buttons["Open draft"].exists || app.links["Open draft"].exists, "the draft's link")
+        XCTAssertTrue(app.buttons["brief-open-draft-bi_dana"].exists, "the draft's link")
+        XCTAssertEqual(app.staticTexts["brief-result-bi_dana"].label, "Saved as a draft in Gmail. Open it to send.")
         XCTAssertEqual(lastTap(), ["itemId": "bi_dana", "action": "draft_reply"])
         snap("phone-brief-1-drafted")
 
@@ -62,37 +64,57 @@ final class BriefingUITests: XCTestCase {
         XCTAssertEqual(lastTap(), ["itemId": "bi_acme", "action": "make_task"])
         XCTAssertTrue(app.staticTexts["brief-state-bi_acme"].waitForExistence(timeout: 10))
 
-        // Done: off the brief.
-        let done = app.buttons["brief-done-bi_payout"]
-        scrollTo(done)
-        done.tap()
-        XCTAssertTrue(waitUntil(timeout: 10) { !self.app.staticTexts["Fix the failed Stripe payout"].exists })
-        XCTAssertEqual(lastTap(), ["itemId": "bi_payout", "action": "done"])
-
-        // Today: the conflict and Block prep.
-        let block = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'brief-block_time-'")).firstMatch
+        // Block 30 min on the calendar clash: blocked, and when.
+        let block = app.buttons["brief-block_time-bi_conflict"]
         scrollTo(block)
-        XCTAssertTrue(app.descendants(matching: .any)["brief-today"].exists)
-        snap("phone-brief-2-today")
         block.tap()
         XCTAssertTrue(app.staticTexts["Time blocked"].waitForExistence(timeout: 10))
-        XCTAssertEqual(lastTap()["action"], "block_time")
+        XCTAssertEqual(lastTap(), ["itemId": "bi_conflict", "action": "block_time"])
+        let blocked = app.staticTexts["brief-result-bi_conflict"]
+        XCTAssertTrue(blocked.waitForExistence(timeout: 10))
+        XCTAssertTrue(blocked.label.hasPrefix("Blocked 30 min at"), blocked.label)
+        snap("phone-brief-2-handled")
 
-        // FYI, folded: open it and dismiss one.
+        // Done: off the brief.
+        let done = app.buttons["brief-done-bi_dana"]
+        scrollTo(done)
+        done.tap()
+        XCTAssertTrue(waitUntil(timeout: 10) { !self.app.staticTexts["Reply to Dana about the SOW"].exists })
+        XCTAssertEqual(lastTap(), ["itemId": "bi_dana", "action": "done"])
+
+        // Today, with its conflict and Join.
+        let today = app.descendants(matching: .any)["brief-today"]
+        scrollTo(today)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Overlaps Dentist'")).firstMatch.exists,
+                      "the conflict, flagged")
+        snap("phone-brief-3-today")
+
+        // FYI, folded: open it and dismiss one; what it read.
         let fyi = app.buttons["brief-fyi"]
         scrollTo(fyi)
         fyi.tap()
         let dismiss = app.buttons["brief-dismiss-bi_fyi_renewal"]
         XCTAssertTrue(dismiss.waitForExistence(timeout: 5))
-        snap("phone-brief-3-fyi")
+        XCTAssertTrue(app.staticTexts["brief-footer"].exists)
+        XCTAssertEqual(app.staticTexts["brief-footer"].label, "Read 105 emails · 14 worth a look")
+        snap("phone-brief-4-fyi")
         dismiss.tap()
         XCTAssertTrue(waitUntil(timeout: 10) { !self.app.staticTexts["Domain renews in 9 days"].exists })
         XCTAssertEqual(lastTap(), ["itemId": "bi_fyi_renewal", "action": "dismiss"])
 
+        // The agent waiting: Review opens its task in Tasks (nothing is approved from the brief).
+        let review = app.buttons["brief-open-bi_agent_deploy"]
+        scrollTo(review)
+        review.tap()
+        XCTAssertTrue(app.staticTexts["Deploy release 2.4 to staging"].waitForExistence(timeout: 10), "the task in Tasks")
+        snap("phone-brief-5-agent-in-tasks")
+        app.navigationBars.buttons.element(boundBy: 0).tap() // back to Tasks (the thread hides the tab bar)
+        XCTAssertTrue(app.tabBars.buttons["Home"].waitForExistence(timeout: 5))
+        app.tabBars.buttons["Home"].tap()
+
         // Build it again.
-        app.swipeDown()
-        app.swipeDown()
         let refresh = app.buttons["brief-refresh"]
+        for _ in 0..<6 where !(refresh.exists && refresh.isHittable) { app.swipeDown() }
         XCTAssertTrue(refresh.waitForExistence(timeout: 5))
         refresh.tap()
         XCTAssertTrue(waitUntil(timeout: 10) { !((self.fakeGet("briefing")["refreshes"] as? [Any]) ?? []).isEmpty })

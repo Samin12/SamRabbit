@@ -18,6 +18,7 @@ struct HomeView: View {
                     MorningSection()
                     TalkButton()
                     QuickActionsGrid()
+                    VoiceNotesLine()
                     if let error = model.lastError, model.summary != nil { OfflineBanner(error: error) }
                     NeedsYouSection()
                     WorkingSection()
@@ -164,6 +165,75 @@ struct OfflineBanner: View {
             Spacer()
         }
         .glassCard(radius: 18, tint: SamTheme.amber, padding: 14)
+    }
+}
+
+/// Voice notes, in one line under the quick actions when there is something to say: notes still on this iPhone
+/// (the Mac out of reach; tap: send them now), a note the Mac couldn't do (tap: Tasks), or what the latest note
+/// became in the last 15 minutes (`summary.captures`; tap: Tasks, where saved notes wait).
+struct VoiceNotesLine: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let line {
+            Button {
+                if model.capture.waiting > 0 {
+                    model.capture.sceneActive() // the outbox tries again now
+                } else {
+                    model.tab = .tasks
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: line.symbol)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(line.tint)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(line.tint.opacity(0.15)))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(line.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(SamTheme.ink)
+                        Text(line.detail).font(.system(size: 12.5)).foregroundStyle(SamTheme.muted).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(SamTheme.faint)
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .glassCard(radius: 18, tint: line.tint, padding: 12)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("home-voice-notes")
+        }
+    }
+
+    private struct Line {
+        var symbol: String
+        var tint: Color
+        var title: String
+        var detail: String
+    }
+
+    private var line: Line? {
+        let waiting = model.capture.waiting
+        if waiting > 0 {
+            return Line(symbol: "tray.and.arrow.up.fill", tint: SamTheme.amber,
+                        title: Formatting.count(waiting, "voice note", "voice notes") + " waiting for your Mac",
+                        detail: "They go by themselves once it answers. Tap to try now.")
+        }
+        guard let part = model.summary?.captures else { return nil }
+        if part.failed > 0 {
+            return Line(symbol: "exclamationmark.triangle.fill", tint: SamTheme.red,
+                        title: part.failed == 1 ? "A voice note didn't go through" : "\(part.failed) voice notes didn't go through",
+                        detail: "Your Mac kept what you said. See it in Tasks.")
+        }
+        guard let latest = part.latest() else { return nil }
+        let outcome = CaptureOutcome(kind: latest.kind ?? .unknown)
+        let title = latest.state.settled ? (latest.kind == nil ? "Voice note" : outcome.headline) : "Voice note on its way"
+        let said = latest.say.map { CaptureNotice.repeats($0, title) ? nil : $0 } ?? nil
+        return Line(symbol: latest.state.settled ? outcome.symbol : "waveform.badge.mic",
+                    tint: latest.kind == .failed || latest.kind == .nothing ? SamTheme.amber : SamTheme.mint,
+                    title: title,
+                    detail: [said ?? latest.title, Formatting.ago(latest.at)].compactMap { $0 }.joined(separator: " · "))
     }
 }
 

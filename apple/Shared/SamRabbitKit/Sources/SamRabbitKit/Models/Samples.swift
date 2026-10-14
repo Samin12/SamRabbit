@@ -61,6 +61,9 @@ extension MobileSummary {
                           can: ["reply", "stop"]),
             ]),
             briefing: Briefing.sample(now: now).overview(),
-            captures: CapturesOverview(recent: 2, failed: 0))
+            captures: CapturesOverview(recent: [
+                .init(captureId: "0d196ba8-190f-4ee5-b248-0f2c76bf13a8", state: .done, kind: .journal, title: "Journal",
+                      say: "Added to your journal.", at: now.addingTimeInterval(-240)),
+            ]))
     }
 }

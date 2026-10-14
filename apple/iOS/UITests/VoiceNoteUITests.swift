@@ -61,6 +61,10 @@ final class VoiceNoteUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["capture-detail"].label.contains("moved the cleaning to Friday"))
         snap("phone-note-2-sent")
         XCTAssertTrue(waitUntil(timeout: 6) { !result.exists }, "it closes by itself")
+        // Home says what the latest note became (`summary.captures`).
+        let line = app.descendants(matching: .any)["home-voice-notes"]
+        XCTAssertTrue(waitUntil(timeout: 15) { line.exists && line.label.contains("Added to your journal") },
+                      "Home's voice-notes line")
 
         let upload = try XCTUnwrap((fakeGet("capture")["uploads"] as? [[String: Any]])?.last)
         XCTAssertEqual(upload["source"] as? String, "iphone")
@@ -92,8 +96,8 @@ final class VoiceNoteUITests: XCTestCase {
         app.tabBars.buttons["Tasks"].tap()
         let start = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'note-act-'")).firstMatch
         XCTAssertTrue(start.waitForExistence(timeout: 15), "the note under Needs you, with its suggestion")
-        XCTAssertTrue(app.staticTexts[Self.note].exists || app.staticTexts.containing(
-            NSPredicate(format: "label CONTAINS 'pricing page tonight'")).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'pricing page tonight'")).firstMatch
+            .waitForExistence(timeout: 5), "what he said")
         snap("phone-note-4-tasks")
         start.tap()
         XCTAssertTrue(app.staticTexts["Started a T3 task"].waitForExistence(timeout: 10), "the Mac started it")
@@ -102,6 +106,22 @@ final class VoiceNoteUITests: XCTestCase {
         })
         XCTAssertTrue(waitUntil(timeout: 10) { !start.exists }, "the note left Needs you")
         snap("phone-note-5-task-started")
+    }
+
+    /// Nothing heard in it: the Mac says so and nothing is saved; Try again records again.
+    func testNothingHeardSaysSoAndOffersAnotherTry() throws {
+        fake("capture", ["mode": "no_speech"])
+        try launch(voice: "hold")
+        homeTile("Voice note").tap()
+        let stop = app.buttons["capture-stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 8))
+        Thread.sleep(forTimeInterval: 1.2)
+        stop.tap()
+        XCTAssertTrue(waitFor(app.staticTexts["capture-result"], containing: "I didn't catch anything", timeout: 20))
+        XCTAssertEqual(app.staticTexts["capture-detail"].label, "Nothing was saved.")
+        XCTAssertTrue(app.buttons["capture-again"].exists, "Try again")
+        snap("phone-note-12-nothing-heard")
+        app.buttons["capture-close"].tap()
     }
 
     /// The Mac out of reach: "Saved", kept on the iPhone; it goes by itself once the Mac answers again (the outbox

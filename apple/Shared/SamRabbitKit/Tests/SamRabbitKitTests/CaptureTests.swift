@@ -53,47 +53,113 @@ struct CaptureTests {
         #expect(try status(#"{"captureId":"a","state":"needs_you"}"#).state == .done)
         #expect(try status(#"{"captureId":"a","state":"no_speech"}"#).state == .failed)
         #expect(try status(#"{"id":"a","state":"teleporting"}"#).state == .received)
-        let done = try status("""
-        {"captureId":"c1","state":"done","heard":"Put this in my journal: the walk was great",
-         "outcome":{"kind":"journal","title":"Today's journal","detail":"“the walk was great”"},
-         "updatedAt":"2026-10-14T13:21:09Z"}
-        """)
-        #expect(done.outcome?.kind == .journal)
-        #expect(done.notice.line == "Sent ✓ — Added to your journal · Today's journal · “the walk was great”")
-        let task = try status(#"{"captureId":"c2","state":"done","outcome":{"kind":"t3_task","title":"Fix login","detail":"Website","threadId":"t_9"}}"#)
-        #expect(task.outcome?.kind == .task)
-        #expect(task.outcome?.threadId == "t_9")
-        #expect(task.notice.title == "Started a T3 task")
-        #expect(task.notice.detail == "Fix login · Website")
-        let note = try status("""
-        {"captureId":"c3","state":"done","heard":"look at pricing tonight","outcome":{"kind":"note"},
-         "suggestion":{"action":"task","label":"Start it as a T3 task?"}}
-        """)
-        #expect(note.notice.title == "Saved as a note")
-        #expect(note.notice.detail == "Start it as a T3 task? It's in Tasks.")
-        #expect(note.suggestion?.buttonTitle == "Start task")
-        let word = try status(#"{"captureId":"c4","state":"done","outcome":{"kind":"note"},"suggestion":"journal"}"#)
-        #expect(word.suggestion == CaptureSuggestion(action: "journal", label: "Add it to your journal?"))
-        let failed = try status(#"{"captureId":"c5","state":"failed","error":{"code":"no_speech","message":"…"}}"#)
-        #expect(failed.error == "no_speech")
-        #expect(failed.notice.tone == .failed)
-        #expect(failed.notice.title == "I didn't catch anything")
-        let waiting = try status(#"{"captureId":"c6","state":"transcribed","heard":"hi"}"#)
-        #expect(waiting.notice == CaptureNotice(tone: .sent, title: "Sent", detail: "Your Mac is on it.", symbol: "checkmark"))
-        #expect(waiting.notice.line == "Sent ✓ · Your Mac is on it.")
-        // An action's answer may wrap the note.
+        // An action's answer may wrap the note (the inbox's `{ok, capture}`).
         #expect(try status(#"{"ok":true,"capture":{"captureId":"c7","state":"done"}}"#).captureId == "c7")
         #expect(CaptureNotice.queued(waiting: 3).detail == "3 notes will go when your Mac is reachable.")
     }
 
+    /// The real bridge's answers (`samrabbit_capture.CaptureService.view` and its outcomes), word for word, and what
+    /// each one shows: the bridge's own line under the headline unless it only repeats it.
+    @Test func whatEachOutcomeOfTheBridgeShows() throws {
+        func status(_ outcome: String, state: String = "done", heard: String = "Put this in my journal: the walk was great",
+                    extra: String = "") throws -> CaptureStatus {
+            try BridgeJSON.decode(CaptureStatus.self, from: Data("""
+            {"captureId":"0d196ba8-190f-4ee5-b248-0f2c76bf13a8","state":"\(state)","source":"iphone","kind":"audio",
+             "capturedAt":"2026-10-14T09:21:07-04:00","receivedAt":"2026-10-14T13:21:08Z","updatedAt":"2026-10-14T13:21:10Z",
+             "heard":"\(heard)","outcome":\(outcome),"say":null,"seen":false,"dismissed":false\(extra.isEmpty ? #","suggestion":null"# : extra)}
+            """.utf8))
+        }
+        let journal = try status(#"{"kind":"journal","title":"Journal","detail":"Added to your journal.","journalDate":"2026-10-14","time":"09:21"}"#)
+        #expect(journal.outcome?.kind == .journal)
+        #expect(journal.capturedAt == BridgeDates.date(from: "2026-10-14T13:21:07Z"))
+        #expect(journal.notice.title == "Added to your journal")
+        #expect(journal.notice.detail == "“Put this in my journal: the walk was great”", "the bridge's line repeats the headline")
+        #expect(journal.notice.line == "Sent ✓ — Added to your journal · “Put this in my journal: the walk was great”")
+
+        let task = try status(#"{"kind":"task","title":"Fix login","threadId":"t_9","projectName":"Website","detail":"Started “Fix login” in Website."}"#)
+        #expect(task.outcome?.kind == .task)
+        #expect(task.outcome?.threadId == "t_9")
+        #expect(task.notice.title == "Started a T3 task")
+        #expect(task.notice.detail == "Started “Fix login” in Website.")
+
+        let event = try status(#"{"kind":"event","title":"Reminder: Call Dana","eventId":"ev_1","startsAt":"2026-10-14T15:00:00-04:00","endsAt":"2026-10-14T15:15:00-04:00","detail":"Added “Reminder: Call Dana” for 3:00 PM."}"#)
+        #expect(event.notice.title == "On your calendar")
+        #expect(event.notice.detail == "Added “Reminder: Call Dana” for 3:00 PM.")
+
+        let note = try status(#"{"kind":"note","title":"Look at pricing tonight","detail":"Saved as a note.","noteId":"note:0d196ba8-190f-4ee5-b248-0f2c76bf13a8"}"#,
+                              heard: "Look at pricing tonight", extra: #","suggestion":{"action":"task","label":"Start it as a T3 task?"}"#)
+        #expect(note.notice.title == "Saved as a note")
+        #expect(note.notice.detail == "Start it as a T3 task? It's in Tasks.")
+        #expect(note.suggestion?.buttonTitle == "Start task")
+        let instead = try status(#"{"kind":"note","title":"Fix login","detail":"T3 Code wasn't reachable, so it's kept as a note.","noteId":"note:x"}"#,
+                                 extra: #","suggestion":{"action":"task","label":"Start it as a T3 task?"}"#)
+        #expect(instead.notice.detail == "T3 Code wasn't reachable, so it's kept as a note. Start it as a T3 task? It's in Tasks.")
+        let event2 = try status(#"{"kind":"note","title":"Call Dana","detail":"Saved as a note.","noteId":"note:x"}"#,
+                                extra: #","suggestion":{"action":"event","label":"Put it on your calendar for 3:00 PM?","startsAt":"2026-10-14T15:00:00-04:00"}"#)
+        #expect(event2.suggestion?.buttonTitle == "Add to calendar")
+        #expect(event2.notice.detail == "Put it on your calendar for 3:00 PM? It's in Tasks.")
+        let word = try status(#"{"kind":"note"}"#, extra: #","suggestion":"journal""#)
+        #expect(word.suggestion == CaptureSuggestion(action: "journal", label: "Add it to your journal?"))
+
+        // No speech: done, nothing saved ("nothing").
+        let nothing = try status(#"{"kind":"nothing","title":"Nothing heard","detail":"I didn't catch anything."}"#)
+        #expect(nothing.state == .done)
+        #expect(nothing.notice.tone == .failed)
+        #expect(nothing.notice.title == "I didn't catch anything")
+        #expect(nothing.notice.detail == "Nothing was saved.")
+        // Failed: the bridge's line says why.
+        let failed = try status(#"{"kind":"failed","title":"Voice note","detail":"Couldn't save it: the Mac could not turn the recording into words."}"#,
+                                state: "failed", extra: #","error":{"code":"transcribe_failed","message":"The Mac could not turn the recording into words."}"#)
+        #expect(failed.error == "transcribe_failed")
+        #expect(failed.notice.tone == .failed)
+        #expect(failed.notice.title == "Your Mac couldn't do it")
+        #expect(failed.notice.detail == "Couldn't save it: the Mac could not turn the recording into words.")
+        let oldNoSpeech = try BridgeJSON.decode(CaptureStatus.self, from: Data(#"{"captureId":"c5","state":"failed","error":{"code":"no_speech"}}"#.utf8))
+        #expect(oldNoSpeech.notice.title == "I didn't catch anything")
+
+        // On its way: the Mac's speech recognition isn't ready yet (it waits there, and says when it tries again).
+        let waiting = try BridgeJSON.decode(CaptureStatus.self, from: Data("""
+        {"captureId":"c6","state":"received","heard":null,"outcome":null,"suggestion":null,"say":"Sent.",
+         "error":{"code":"transcribe_unavailable","message":"Waiting for the Mac's speech recognition."},
+         "retryAt":"2026-10-14T13:21:40Z","seen":false,"dismissed":false}
+        """.utf8))
+        #expect(waiting.say == "Sent.")
+        #expect(waiting.error == "transcribe_unavailable")
+        #expect(waiting.retryAt == BridgeDates.date(from: "2026-10-14T13:21:40Z"))
+        #expect(waiting.notice == CaptureNotice(tone: .sent, title: "Sent", detail: "Your Mac is on it.", symbol: "checkmark"))
+        #expect(waiting.notice.line == "Sent ✓ · Your Mac is on it.")
+    }
+
     @Test func aListAndTheSummaryPart() throws {
         let list = try BridgeJSON.decode(CaptureList.self, from: Data("""
-        {"captures":[{"captureId":"a","state":"done"},{"nope":true},{"captureId":"b","state":"received"}]}
+        {"captures":[{"captureId":"a","state":"done"},{"nope":true},{"captureId":"b","state":"received"}],"pending":1,
+         "updatedAt":"2026-10-14T13:21:10Z"}
         """.utf8))
         #expect(list.captures.map(\.captureId) == ["a", "b"])
-        let summary = try BridgeJSON.decode(MobileSummary.self, from: Data(#"{"captures":{"recent":[1,2,3],"failed":1}}"#.utf8))
-        #expect(summary.captures == CapturesOverview(recent: 3, failed: 1))
+        // `summary.captures` as the real bridge sends it: the last three, failed, pending, notes.
+        let summary = try BridgeJSON.decode(MobileSummary.self, from: Data("""
+        {"captures":{"available":true,"recent":[
+           {"captureId":"a","state":"done","kind":"journal","title":"Journal","say":"Added to your journal.","at":"2026-10-14T09:21:07-04:00"},
+           {"captureId":"b","state":"received","kind":null,"title":null,"say":null,"at":"2026-10-14T09:10:00-04:00"},
+           {"captureId":"c","state":"failed","kind":"failed","title":"Voice note","say":"Couldn't save it.","at":"2026-10-14T08:00:00-04:00"},
+           {"captureId":"d","state":"done","kind":"note","title":"Old","say":"Saved as a note.","at":"2026-10-13T08:00:00-04:00"}],
+         "failed":1,"pending":1,"notes":2}}
+        """.utf8))
+        let part = try #require(summary.captures)
+        #expect(part.available)
+        #expect(part.recent.map(\.captureId) == ["a", "b", "c"], "the last three")
+        #expect(part.recent[0].kind == .journal)
+        #expect(part.recent[0].say == "Added to your journal.")
+        #expect(part.recent[1].kind == nil)
+        #expect(part.recent[2].kind == .failed)
+        #expect(part.failed == 1 && part.pending == 1 && part.notes == 2)
+        let said = try #require(BridgeDates.date(from: "2026-10-14T13:21:07Z"))
+        #expect(part.latest(now: said.addingTimeInterval(60))?.captureId == "a")
+        #expect(part.latest(now: said.addingTimeInterval(3600)) == nil, "only a note said in the last 15 minutes")
         #expect(try BridgeJSON.decode(MobileSummary.self, from: Data("{}".utf8)).captures == nil)
+        // The widgets' cache keeps it.
+        let again = try BridgeJSON.decode(MobileSummary.self, from: BridgeJSON.encoder().encode(summary))
+        #expect(again.captures == part)
     }
 
     // MARK: - The outbox

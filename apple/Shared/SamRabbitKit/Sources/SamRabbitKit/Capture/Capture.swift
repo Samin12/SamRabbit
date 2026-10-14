@@ -130,6 +130,10 @@ public struct CaptureOutcome: Codable, Sendable, Equatable {
         case event
         /// Saved as a note (with a suggestion, when one fits).
         case note
+        /// Nothing was heard in it (the bridge's `nothing`: done, nothing saved).
+        case nothing
+        /// The Mac couldn't do it (the bridge's `failed`, with `error`).
+        case failed
         case unknown
 
         public init(raw: String?) {
@@ -138,6 +142,8 @@ public struct CaptureOutcome: Codable, Sendable, Equatable {
             case "task", "t3", "t3_task", "thread": self = .task
             case "event", "calendar", "calendar_event", "calendar_block", "block", "reminder", "remind": self = .event
             case "note", "saved", "notes": self = .note
+            case "nothing", "no_speech", "empty": self = .nothing
+            case "failed", "error": self = .failed
             default: self = .unknown
             }
         }
@@ -181,6 +187,8 @@ public struct CaptureOutcome: Codable, Sendable, Equatable {
         case .task: "Started a T3 task"
         case .event: "On your calendar"
         case .note: "Saved as a note"
+        case .nothing: "I didn't catch anything"
+        case .failed: "Your Mac couldn't do it"
         case .unknown: "Done"
         }
     }
@@ -191,6 +199,8 @@ public struct CaptureOutcome: Codable, Sendable, Equatable {
         case .task: "sparkles"
         case .event: "calendar.badge.checkmark"
         case .note: "note.text"
+        case .nothing: "ear"
+        case .failed: "exclamationmark.triangle.fill"
         case .unknown: "checkmark"
         }
     }
@@ -241,7 +251,8 @@ public struct CaptureSuggestion: Codable, Sendable, Equatable {
         case .journal: "Add to journal"
         case .event: "Add to calendar"
         case .note: "Keep as note"
-        case .unknown: Formatting.clip(label.trimmingCharacters(in: CharacterSet(charactersIn: "?")), 24)
+        case .nothing, .failed, .unknown:
+            Formatting.clip(label.trimmingCharacters(in: CharacterSet(charactersIn: "?")), 24)
         }
     }
 
@@ -264,22 +275,28 @@ public struct CaptureStatus: Codable, Sendable, Equatable, Identifiable {
     public var heard: String?
     public var outcome: CaptureOutcome?
     public var suggestion: CaptureSuggestion?
-    /// Why it failed (`no_speech`, `transcribe_unavailable`, ...).
+    /// Why it failed, or why it waits (`transcribe_unavailable` while the Mac's speech recognition isn't ready).
     public var error: String?
+    /// The bridge's one line about it (`say`: the outcome's detail, "Sent." while it works on it).
+    public var say: String?
+    /// It waits on the Mac and is tried again then (its speech recognition or the journal was down).
+    public var retryAt: Date?
     public var capturedAt: Date?
     public var updatedAt: Date?
 
     public var id: String { captureId }
 
     public init(captureId: String, state: CaptureState, heard: String? = nil, outcome: CaptureOutcome? = nil,
-                suggestion: CaptureSuggestion? = nil, error: String? = nil, capturedAt: Date? = nil,
-                updatedAt: Date? = nil) {
+                suggestion: CaptureSuggestion? = nil, error: String? = nil, say: String? = nil, retryAt: Date? = nil,
+                capturedAt: Date? = nil, updatedAt: Date? = nil) {
         self.captureId = captureId
         self.state = state
         self.heard = heard
         self.outcome = outcome
         self.suggestion = suggestion
         self.error = error
+        self.say = say
+        self.retryAt = retryAt
         self.capturedAt = capturedAt
         self.updatedAt = updatedAt
     }
@@ -302,6 +319,8 @@ public struct CaptureStatus: Codable, Sendable, Equatable, Identifiable {
         suggestion = c.value(CaptureSuggestion.self, "suggestion")
         let failure = c.json("error")
         error = failure["code"].text ?? failure.text ?? c.text("code")
+        say = c.text("say")
+        retryAt = c.date("retryAt")
         capturedAt = c.date("capturedAt")
         updatedAt = c.date("updatedAt", "receivedAt")
     }
@@ -334,31 +353,44 @@ public struct CaptureNotice: Sendable, Equatable {
         self.symbol = symbol
     }
 
-    /// From the Mac's answer.
+    /// From the Mac's answer. The bridge's own line (`outcome.detail`: "Started “Fix login” in Website.") is the
+    /// detail unless it only repeats the headline ("Added to your journal."); then what was heard stands there.
     public init(_ status: CaptureStatus) {
+        let outcome = status.outcome
         switch status.state {
+        case .done where outcome?.kind == .nothing, .failed where status.error == "no_speech":
+            self.init(tone: .failed, title: "I didn't catch anything", detail: "Nothing was saved.", symbol: "ear")
         case .done:
-            let outcome = status.outcome ?? CaptureOutcome(kind: status.suggestion == nil ? .unknown : .note)
-            var detail = [outcome.title, outcome.detail].compactMap { $0 }.filter { !$0.isEmpty }
-                .joined(separator: " · ")
-            // A saved note: what it suggests, and where it waits.
+            let outcome = outcome ?? CaptureOutcome(kind: status.suggestion == nil ? .unknown : .note)
+            let title = outcome.kind == .unknown ? "Sent" : outcome.headline
+            var parts: [String] = []
+            if let said = outcome.detail ?? status.say, !Self.repeats(said, title) { parts.append(said) }
             if outcome.kind == .note {
-                detail = status.suggestion.map { "\($0.label) It's in Tasks." } ?? "It's in Tasks."
+                // A saved note: what it suggests, and where it waits.
+                if let suggestion = status.suggestion { parts.append(suggestion.label) }
+                parts.append("It's in Tasks.")
+            } else if parts.isEmpty, let heard = status.heard, !heard.isEmpty {
+                parts.append("“\(Formatting.clip(heard, 80))”")
             }
-            if detail.isEmpty, let heard = status.heard { detail = "“\(Formatting.clip(heard, 80))”" }
-            self.init(tone: .sent, title: outcome.kind == .unknown ? "Sent" : outcome.headline,
-                      detail: detail.isEmpty ? nil : Formatting.clip(detail, 120), symbol: outcome.symbol)
+            let detail = parts.joined(separator: " ")
+            self.init(tone: .sent, title: title, detail: detail.isEmpty ? nil : Formatting.clip(detail, 120),
+                      symbol: outcome.symbol)
         case .failed:
-            switch status.error {
-            case "no_speech":
-                self.init(tone: .failed, title: "I didn't catch anything", detail: "Nothing was saved.", symbol: "ear")
-            default:
-                self.init(tone: .failed, title: "Your Mac couldn't do it",
-                          detail: "It kept what you said. Check Tasks on your iPhone.", symbol: "exclamationmark.triangle.fill")
-            }
+            let said = outcome?.detail.flatMap { Self.repeats($0, "Your Mac couldn't do it") ? nil : $0 }
+            self.init(tone: .failed, title: "Your Mac couldn't do it",
+                      detail: said.map { Formatting.clip($0, 120) } ?? "It kept what you said. Check Tasks on your iPhone.",
+                      symbol: "exclamationmark.triangle.fill")
         case .received, .transcribed:
             self.init(tone: .sent, title: "Sent", detail: "Your Mac is on it.", symbol: "checkmark")
         }
+    }
+
+    /// The bridge's line says no more than the headline ("Added to your journal." under "Added to your journal").
+    public static func repeats(_ line: String, _ headline: String) -> Bool {
+        func plain(_ text: String) -> String {
+            text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        }
+        return plain(line) == plain(headline) || plain(line).isEmpty
     }
 
     /// The recording is kept here until the Mac can be reached.
@@ -380,23 +412,79 @@ public struct CaptureNotice: Sendable, Equatable {
     }
 }
 
-/// `summary.captures`: how many voice notes arrived lately and how many failed (`recent` may be a count or the
-/// list itself).
+/// `summary.captures`: the last three notes (what each became, in a word and the bridge's line), how many failed
+/// in the last week (not dismissed), how many are still on their way on the Mac and how many saved notes wait in
+/// the inbox. `nil` in the summary: a bridge without voice notes.
 public struct CapturesOverview: Codable, Sendable, Equatable {
-    public var recent: Int
-    public var failed: Int
+    /// One of the last notes (`recent[]`).
+    public struct Recent: Codable, Sendable, Equatable, Identifiable {
+        public var captureId: String
+        public var state: CaptureState
+        /// What it became, once done.
+        public var kind: CaptureOutcome.Kind?
+        public var title: String?
+        /// The bridge's line ("Added to your journal.", "Started “Fix login” in Website.").
+        public var say: String?
+        /// When it was said.
+        public var at: Date?
 
-    public init(recent: Int = 0, failed: Int = 0) {
+        public var id: String { captureId }
+
+        public init(captureId: String, state: CaptureState, kind: CaptureOutcome.Kind? = nil, title: String? = nil,
+                    say: String? = nil, at: Date? = nil) {
+            self.captureId = captureId
+            self.state = state
+            self.kind = kind
+            self.title = title
+            self.say = say
+            self.at = at
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: AnyKey.self)
+            guard let id = c.text("captureId", "id") else {
+                throw DecodingError.keyNotFound(AnyKey("captureId"), .init(codingPath: decoder.codingPath,
+                                                                           debugDescription: "a note without an id"))
+            }
+            captureId = id
+            state = CaptureState(raw: c.text("state"))
+            kind = c.text("kind").map(CaptureOutcome.Kind.init(raw:))
+            title = c.text("title")
+            say = c.text("say", "detail")
+            at = c.date("at", "capturedAt")
+        }
+    }
+
+    public var available: Bool
+    /// Newest first.
+    public var recent: [Recent]
+    public var failed: Int
+    /// Still being heard or filed on the Mac.
+    public var pending: Int
+    /// Saved notes waiting in the inbox (Tasks).
+    public var notes: Int
+
+    public init(available: Bool = true, recent: [Recent] = [], failed: Int = 0, pending: Int = 0, notes: Int = 0) {
+        self.available = available
         self.recent = recent
         self.failed = failed
+        self.pending = pending
+        self.notes = notes
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: AnyKey.self)
-        let recentValue = c.json("recent")
-        recent = recentValue.array?.count ?? recentValue.int ?? 0
-        let failedValue = c.json("failed")
-        failed = failedValue.array?.count ?? failedValue.int ?? 0
+        available = c.optionalBool("available") ?? true
+        recent = Array(c.list(Recent.self, "recent").prefix(3))
+        failed = c.optionalInt("failed") ?? c.json("failed").array?.count ?? 0
+        pending = c.optionalInt("pending") ?? 0
+        notes = c.optionalInt("notes") ?? 0
+    }
+
+    /// The newest note said in the last `seconds` (Home's line under the quick actions).
+    public func latest(within seconds: TimeInterval = 15 * 60, now: Date = .now) -> Recent? {
+        guard let first = recent.first, let at = first.at, now.timeIntervalSince(at) <= seconds else { return nil }
+        return first
     }
 }
 

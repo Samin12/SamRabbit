@@ -316,6 +316,11 @@ final class AppModel {
             UIApplicationOpener.open(url)
             return
         }
+        // An agent waiting (Agents): its item in Tasks, where it is approved or answered.
+        if action.kind == .open, let itemId = item.inboxItemId {
+            openInbox(itemId)
+            return
+        }
         guard !busyBriefItems.contains(item.id) else { return }
         busyBriefItems.insert(item.id)
         defer { busyBriefItems.remove(item.id) }
@@ -324,12 +329,13 @@ final class AppModel {
             let result = try await actions.briefingAct(item.id, action: action.action, state: fallback)
             let state = result.state ?? fallback ?? item.state
             withAnimation(.smooth) {
-                briefing = briefing?.with(item.id, state: state, draftUrl: action.kind == .draftReply ? result.url : nil)
+                briefing = briefing?.with(item.id, state: state, draftUrl: action.kind == .draftReply ? result.url : nil,
+                                          line: result.message)
             }
             switch action.kind {
             case .draftReply:
                 Haptics.success()
-                show(.success, "Draft saved in Gmail", detail: "Nothing was sent. Review it there, then send.")
+                show(.success, "Draft saved in Gmail", detail: "Nothing was sent: review it in Gmail, then send it.")
                 if let url = result.url { UIApplicationOpener.open(url) }
             case .makeTask:
                 Haptics.success()
@@ -341,7 +347,11 @@ final class AppModel {
                 Haptics.success()
                 show(.success, "I'll bring it back", detail: result.message)
             case .open:
-                if let url = result.url { UIApplicationOpener.open(url) }
+                if let url = result.url {
+                    UIApplicationOpener.open(url)
+                } else if let itemId = result.itemId {
+                    openInbox(itemId)
+                }
             case .done, .dismiss, .agent, .other:
                 Haptics.tap()
             }
@@ -715,6 +725,22 @@ final class AppModel {
         tasksPath.append(ThreadRoute(threadId: threadId))
     }
 
+    /// An inbox item by its id (`samrabbit://inbox/<id>`, a brief's agent): a T3 thread's own screen, a chat in Chats,
+    /// any other item's screen in Tasks.
+    func openInbox(_ id: String) {
+        tab = .tasks
+        tasksPath = NavigationPath()
+        if id.hasPrefix("t3:") {
+            tasksPath.append(ThreadRoute(threadId: String(id.dropFirst(3))))
+        } else if id.hasPrefix("chat:") {
+            tab = .chats
+            chatsPath = NavigationPath()
+            chatsPath.append(ConversationRoute(conversationId: String(id.dropFirst(5)), title: nil))
+        } else {
+            tasksPath.append(InboxRoute(itemId: id))
+        }
+    }
+
     /// The Tasks tab with this item open: a T3 thread's own screen, a Claude Code or Codex session's, a chat in Chats.
     func openItem(_ item: InboxItem) {
         if let threadId = item.threadId {
@@ -880,18 +906,11 @@ final class AppModel {
             tasksPath = NavigationPath()
             if let id { tasksPath.append(ThreadRoute(threadId: id)) }
         case .inbox(let id):
-            tab = .tasks
-            tasksPath = NavigationPath()
             if let id {
-                if id.hasPrefix("t3:") {
-                    tasksPath.append(ThreadRoute(threadId: String(id.dropFirst(3))))
-                } else if id.hasPrefix("chat:") {
-                    tab = .chats
-                    chatsPath = NavigationPath()
-                    chatsPath.append(ConversationRoute(conversationId: String(id.dropFirst(5)), title: nil))
-                } else {
-                    tasksPath.append(InboxRoute(itemId: id))
-                }
+                openInbox(id)
+            } else {
+                tab = .tasks
+                tasksPath = NavigationPath()
             }
         case .conversation(let id):
             tab = .chats

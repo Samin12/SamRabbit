@@ -92,7 +92,12 @@ struct CaptureBridgeTests {
         }
         #expect(try await client.captures().map(\.captureId) == [meta.captureId])
         let summary = try await client.summary()
-        #expect(summary.captures?.recent == 1)
+        let part = try #require(summary.captures)
+        #expect(part.recent.map(\.captureId) == [meta.captureId])
+        #expect(part.recent.first?.kind == .journal)
+        #expect(part.recent.first?.say == "Added to your journal.")
+        #expect(part.latest()?.captureId == meta.captureId)
+        #expect(part.failed == 0 && part.pending == 0 && part.notes == 0)
     }
 
     @Test func aNoteItCouldOnlySaveWaitsInTheInboxWithItsSuggestion() async throws {
@@ -121,8 +126,42 @@ struct CaptureBridgeTests {
         let acted = try #require(try await client.captureAct(meta.captureId, action: "task"))
         #expect(acted.outcome?.kind == .task)
         #expect(acted.outcome?.threadId != nil)
+        #expect(acted.notice.title == "Started a T3 task")
+        #expect(acted.notice.detail?.hasPrefix("Started “Look at the pricing page tonight”") == true)
         #expect(try await client.inbox().items.contains { $0.id == note.id } == false)
         #expect(try await fakeGet(bridge, "capture")["acts"].array?.last?["action"].string == "task")
+        #expect(try await client.summary().captures?.notes == 0)
+    }
+
+    /// The inbox's own route for a note (`POST /inbox/items/note:<id>/act`, with the suggestion or `{action}`),
+    /// answered `{ok, capture}` like the real bridge.
+    @Test func theInboxDoesANotesSuggestion() async throws {
+        let bridge = try FakeBridgeProcess()
+        let (client, _) = try await bridge.pairedClient()
+        try await bridge.control("capture", ["heard": "Ask Dana about the deck", "delay": 0.2])
+        let file = try VoiceClip.make(seconds: 1)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let meta = CaptureMeta(source: .iphone)
+        _ = try await client.capture(file: file, meta: meta, wait: 5)
+        #expect(try await client.summary().captures?.notes == 1)
+        let body = try await client.data(.post(BridgeClient.inboxPath("note:\(meta.captureId)", "act"), body: [:]))
+        let status = try BridgeJSON.decode(CaptureStatus.self, from: body)
+        #expect(status.outcome?.kind == .task, "its suggestion")
+        // A journal line can't be taken back from here; a note made into an event can.
+        do {
+            _ = try await client.captureAct(meta.captureId, action: "undo")
+            Issue.record("a task is stopped in Tasks")
+        } catch let error as BridgeError {
+            #expect(error.code == "cannot_undo")
+        }
+        let event = try #require(try await client.captureAct(meta.captureId, action: "note"))
+        #expect(event.outcome?.kind == .note)
+        do {
+            _ = try await client.captureAct(meta.captureId, action: "event")
+            Issue.record("an event needs a time")
+        } catch let error as BridgeError {
+            #expect(error.code == "invalid_time")
+        }
     }
 
     @Test func aDismissedNoteLeavesTheList() async throws {
@@ -221,45 +260,65 @@ struct CaptureBridgeTests {
         #expect(part.isToday())
         let brief = try await client.briefing()
         #expect(brief.revision == part.revision)
-        #expect(brief.items(in: .doFirst).map(\.id) == ["bi_dana", "bi_payout", "bi_acme"])
+        #expect(brief.items(in: .doFirst).map(\.id) == ["bi_dana", "bi_acme", "bi_conflict"])
+        #expect(brief.items(in: .doFirst).allSatisfy { $0.allows(.done) && $0.allows(.dismiss) })
         #expect(brief.items(in: .today).count >= 3)
         #expect(brief.items(in: .today).contains { $0.conflict })
         #expect(brief.items(in: .agents).first?.inboxItemId == "t3:t_deploy24")
         #expect(brief.items(in: .fyi).count == 2)
         #expect(brief.toDo == 4)
-        #expect(brief.headline.hasPrefix("4 things need you"))
+        #expect(brief.headline.hasPrefix("3 things need you"))
+        #expect(brief.footer == "Read 105 emails · 14 worth a look")
 
-        // Draft reply: a Gmail draft (never sent), with its link.
+        // Remind me, then Draft reply: a Gmail draft (never sent), with its link in the right account.
+        let reminded = try await client.briefingAct("bi_dana", action: "remind")
+        #expect(reminded.state == .snoozed)
+        #expect(reminded.message?.hasPrefix("I'll remind you at") == true)
         let drafted = try await client.briefingAct("bi_dana", action: "draft_reply")
         #expect(drafted.state == .drafted)
         #expect(drafted.url?.host == "mail.google.com")
-        #expect(drafted.url?.absoluteString.contains("authuser=") == true)
-        #expect(drafted.message?.contains("Nothing was sent") == true)
-        // Make task, Block, Remind, Done, Dismiss.
-        #expect(try await client.briefingAct("bi_acme", action: "make_task").threadId != nil)
-        #expect(try await client.briefingAct("bi_payout", action: "remind").state == .snoozed)
+        #expect(drafted.url?.absoluteString.contains("authuser=sam%40example.com") == true)
+        #expect(drafted.message == "Saved as a draft in Gmail. Open it to send.")
+        #expect(try await client.briefingAct("bi_dana", action: "draft_reply").url == drafted.url, "a second tap: the same draft")
+        // Make task, Block, Dismiss, Open on an agent (its inbox item).
+        let tasked = try await client.briefingAct("bi_acme", action: "make_task")
+        #expect(tasked.threadId != nil)
+        #expect(tasked.itemId == "t3:" + (tasked.threadId ?? ""))
         #expect(try await client.briefingAct("bi_fyi_payout", action: "dismiss").state == .dismissed)
-        let first = try #require(brief.items(in: .today).first)
-        #expect(try await client.briefingAct(first.id, action: "block_time").state == .blocked)
+        let blocked = try await client.briefingAct("bi_conflict", action: "block_time")
+        #expect(blocked.state == .blocked)
+        #expect(blocked.message?.hasPrefix("Blocked 30 min at") == true)
+        #expect(try await client.briefingAct("bi_agent_deploy", action: "open").itemId == "t3:t_deploy24")
         // A verb the item doesn't offer is refused.
         do {
-            _ = try await client.briefingAct("bi_payout", action: "make_task")
+            _ = try await client.briefingAct("bi_fyi_renewal", action: "make_task")
             Issue.record("refused")
         } catch let error as BridgeError {
             #expect(error.code == "unsupported_action")
         }
         let after = try await client.briefing()
         #expect(after.revision > brief.revision)
-        #expect(after.items.first { $0.id == "bi_dana" }?.state == .drafted)
-        #expect(after.items.first { $0.id == "bi_dana" }?.draftUrl == drafted.url)
+        let danaAfter = try #require(after.items.first { $0.id == "bi_dana" })
+        #expect(danaAfter.state == .drafted)
+        #expect(danaAfter.draftUrl == drafted.url)
+        #expect(danaAfter.resultLine == "Saved as a draft in Gmail. Open it to send.")
         #expect(after.toDo == 1, "only the deploy is left")
         let taps = try await fakeGet(bridge, "briefing")["acts"].array ?? []
-        #expect(taps.compactMap { $0["action"].string } == ["draft_reply", "make_task", "remind", "dismiss", "block_time"])
+        #expect(taps.compactMap { $0["action"].string } == ["remind", "draft_reply", "draft_reply", "make_task", "dismiss",
+                                                            "block_time", "open"])
 
-        // Refresh: a new revision, picked up by the long-poll.
+        // Refresh: a new revision, picked up by the long-poll; another right away is too soon (one every 5 min).
         try await client.refreshBriefing()
         let refreshed = try await client.briefing(after: after.revision, wait: 8)
         #expect(refreshed.revision > after.revision)
+        let built = try await client.briefing(wait: 8) // without `after`: until the build is over
+        #expect(built.status == .ready)
+        do {
+            try await client.refreshBriefing()
+            Issue.record("too soon")
+        } catch let error as BridgeError {
+            #expect(error.code == "refresh_too_soon")
+        }
     }
 
     @Test func noBriefYetOrAnOlderBridge() async throws {
@@ -268,10 +327,14 @@ struct CaptureBridgeTests {
         try await bridge.control("briefing", ["mode": "none"])
         let none = try await client.briefing()
         #expect(!none.available)
-        #expect(none.reason == "not_built_yet")
+        #expect(none.status == .none, "the real bridge's waiting")
         #expect(try await client.summary().briefing?.available == false)
-        try await bridge.control("briefing", ["mode": "stale"])
-        #expect(try await client.briefing().isToday() == false)
+        try await bridge.control("briefing", ["mode": "failed"])
+        let failed = try await client.briefing()
+        #expect(failed.status == .failed)
+        #expect(failed.reason == "gmail_not_connected")
+        try await bridge.control("briefing", ["mode": "off"])
+        #expect(try await client.briefing().status == .off)
         try await bridge.control("briefing", ["mode": "missing"])
         do {
             _ = try await client.briefing()

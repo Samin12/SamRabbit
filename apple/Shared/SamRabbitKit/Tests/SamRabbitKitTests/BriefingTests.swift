@@ -2,33 +2,58 @@ import Foundation
 import Testing
 @testable import SamRabbitKit
 
-/// The morning brief as the bridge sends it (CONTRACTS-WAVE8 §A3): the parts in `sections[]`, the verbs, the states,
-/// a lenient reader for the other shapes the contract leaves room for, and when Home shows it.
+/// The morning brief as the bridge sends it (CONTRACTS-WAVE8 §A3; `samrabbit_briefing.BriefingService.view`, key for
+/// key): the parts in `sections[]`, the verbs, the states and what a verb did, plus a lenient reader for the other
+/// shapes the contract leaves room for, and when Home shows it.
 private let briefingJSON = """
-{"available": true, "status": "ready", "date": "2026-10-14", "revision": 1791987275552,
- "updatedAt": "2026-10-14T11:01:00Z", "headline": "3 things need you · 4 meetings, first at 10:00",
- "spoken": "Good morning.", "footer": "Skipped 182 promos and newsletters",
+{"revision": 12, "date": "2026-10-14", "building": false, "available": true, "status": "ready",
+ "generatedAt": "2026-10-14T10:41:07Z", "headline": "3 things need you · 4 meetings, first at 10:00 · 1 agent waiting",
+ "spoken": "First: Reply to Dana about the SOW.", "needsYou": 3, "composed": "claude",
  "sections": [
-  {"kind": "doFirst", "title": "Do first", "items": [
-    {"id": "bi_dana", "kind": "email", "account": "business", "title": "Reply to Dana about the SOW",
-     "why": "She needs it signed by Friday; asked twice", "suggestion": "Draft a reply confirming Thu 2 pm",
-     "actions": [{"type": "draft_reply", "label": "Draft reply"}, {"type": "remind", "label": "Remind 2 pm"},
-                 {"type": "done"}],
-     "url": "https://mail.google.com/mail/u/?authuser=sam%40example.com#inbox/18f2", "state": "open", "priority": 1},
-    {"id": "bi_payout", "title": "Fix the failed Stripe payout", "why": "Bank details rejected",
-     "actions": ["open", "remind"], "url": "javascript:alert(1)"},
-    {"id": "bi_acme", "account": "personal", "title": "Look into Acme's checkout errors",
-     "actions": [{"action": "make_task"}, {"type": "draft_reply"}], "state": "tasked"},
+  {"id": "doFirst", "title": "Do first", "items": [
+    {"id": "bi_3f2a9c4d1e0b7a21", "section": "doFirst", "kind": "email", "title": "Reply to Dana about the SOW",
+     "why": "She needs it signed by Friday; asked twice",
+     "actions": [{"type": "draft_reply", "label": "Draft reply"}, {"type": "remind", "label": "Remind me"}],
+     "can": ["draft_reply", "remind", "done", "dismiss", "open"], "state": "open", "updatedAt": "2026-10-14T10:41:07Z",
+     "account": "business", "url": "https://mail.google.com/mail/?authuser=sam%40example.com#all/18f2a9c4d1e0b7a2",
+     "suggestion": "Draft a reply confirming Thu 2 pm", "draft": "Hi Dana, Thursday at 2 works."},
+    {"id": "bi_77c01b9e4d3a10aa", "section": "doFirst", "kind": "email", "title": "Look into Acme's checkout errors",
+     "why": "Two customers saw 500s since last night",
+     "actions": [{"type": "make_task", "label": "Make task"}, {"type": "draft_reply", "label": "Draft reply"}],
+     "can": ["make_task", "draft_reply", "done", "dismiss", "open"], "state": "tasked", "account": "personal",
+     "url": "javascript:alert(1)",
+     "result": {"threadId": "t_9", "itemId": "t3:t_9", "title": "Look into Acme", "say": "Started it as a T3 task."}},
+    {"id": "bi_c0ffee00c0ffee00", "section": "doFirst", "kind": "conflict", "title": "Move the dentist or skip standup",
+     "why": "Both at 10:00 AM", "actions": [{"type": "block_time", "label": "Block 30 min"}, {"type": "open", "label": "Join"}],
+     "can": ["block_time", "open", "done", "dismiss"], "state": "open", "startsAt": "2026-10-14T14:00:00Z",
+     "endsAt": "2026-10-14T14:15:00Z", "url": "https://meet.google.com/abc-defg-hij", "conflict": true},
     {"id": "bi_extra", "title": "A fourth: over the cap"}]},
-  {"kind": "today", "items": [
-    {"id": "bi_standup", "title": "Standup", "startsAt": "2026-10-14T14:00:00Z", "endsAt": "2026-10-14T14:15:00Z",
-     "conflict": true, "actions": [{"type": "block_time", "label": "Block prep"}]}]},
-  {"kind": "agents", "items": [
-    {"id": "bi_deploy", "title": "Approve the staging deploy", "inboxItemId": "t3:t_deploy24", "state": "done"}]},
-  {"kind": "fyi", "items": [{"id": "bi_payout_in", "title": "Stripe payout arrived"}]},
-  {"kind": "fyi", "items": [{"title": "no id: dropped"}]}
- ]}
+  {"id": "today", "title": "Today", "items": [
+    {"id": "bi_e100000000000001", "section": "today", "kind": "conflict", "title": "Join Standup",
+     "why": "Overlaps Dentist · 10:00 AM–10:15 AM", "actions": [{"type": "open", "label": "Join"}],
+     "can": ["open", "done", "dismiss"], "state": "open", "startsAt": "2026-10-14T14:00:00Z",
+     "endsAt": "2026-10-14T14:15:00Z", "url": "https://meet.google.com/abc-defg-hij", "conflict": true},
+    {"id": "bi_e100000000000002", "section": "today", "kind": "event", "title": "Join Design review",
+     "why": "2:00 PM–3:00 PM", "actions": [{"type": "done", "label": "Got it"}], "can": ["done", "dismiss"],
+     "state": "open", "startsAt": "2026-10-14T18:00:00Z", "endsAt": "2026-10-14T19:00:00Z"}]},
+  {"id": "agents", "title": "Agents", "items": [
+    {"id": "bi_a100000000000001", "section": "agents", "kind": "agent", "title": "Approve “Deploy staging”",
+     "why": "Wants to run a command · Assistant", "actions": [{"type": "open", "label": "Review"}],
+     "can": ["open", "done", "dismiss"], "state": "done", "itemId": "t3:t_deploy24", "source": "t3"}]},
+  {"id": "fyi", "title": "FYI", "items": [
+    {"id": "bi_f100000000000001", "section": "fyi", "kind": "fyi", "title": "Stripe payout arrived",
+     "why": "$3,420 landed in checking", "actions": [{"type": "open", "label": "Open"}],
+     "can": ["open", "done", "dismiss"], "state": "open", "account": "business",
+     "url": "https://mail.google.com/mail/?authuser=sam%40example.com#all/18f2d7aa01c2e3f4"},
+    {"title": "no id: dropped"}]}],
+ "accounts": [{"label": "business", "ok": true, "fetched": 64, "kept": 9},
+              {"label": "personal", "ok": false, "reason": "gmail_not_connected"}],
+ "counts": {"emails": 64, "kept": 9, "events": 4, "agents": 1}}
 """
+
+private let dana = "bi_3f2a9c4d1e0b7a21"
+private let acme = "bi_77c01b9e4d3a10aa"
+private let clash = "bi_c0ffee00c0ffee00"
 
 @Suite("Morning brief")
 struct BriefingTests {
@@ -46,34 +71,43 @@ struct BriefingTests {
         let brief = try decode()
         #expect(brief.available)
         #expect(brief.status == .ready)
-        #expect(brief.revision == 1_791_987_275_552)
-        #expect(brief.headline == "3 things need you · 4 meetings, first at 10:00")
-        #expect(brief.items.map(\.id) == ["bi_dana", "bi_payout", "bi_acme", "bi_standup", "bi_deploy", "bi_payout_in"],
+        #expect(brief.revision == 12)
+        #expect(brief.updatedAt == BridgeDates.date(from: "2026-10-14T10:41:07Z"), "generatedAt")
+        #expect(brief.headline == "3 things need you · 4 meetings, first at 10:00 · 1 agent waiting")
+        #expect(brief.items.map(\.id) == [dana, acme, clash, "bi_e100000000000001", "bi_e100000000000002",
+                                          "bi_a100000000000001", "bi_f100000000000001"],
                 "in the parts' order, Do first at its cap of three")
-        let dana = brief.items[0]
-        #expect(dana.section == .doFirst)
-        #expect(dana.verbs.map(\.kind) == [.draftReply, .remind], "Done is offered beside the verbs, not as one")
-        #expect(dana.verbs.map(\.label) == ["Draft reply", "Remind 2 pm"])
-        #expect(dana.verbs[0].action == "draft_reply", "sent back as the bridge wrote it")
-        #expect(dana.openURL?.host == "mail.google.com")
-        #expect(dana.accountTag == nil, "business is the default")
-        let payout = brief.items[1]
-        #expect(payout.verbs.map(\.kind) == [.open, .remind])
-        #expect(payout.verbs.map(\.label) == ["Open", "Remind me"])
-        #expect(payout.url == nil, "only http(s) links are opened")
-        let acme = brief.items[2]
-        #expect(acme.state == .tasked)
-        #expect(acme.state.label == "Task started")
-        #expect(acme.accountTag == "Personal")
-        #expect(acme.verbs.first?.action == "make_task")
+        let first = brief.items[0]
+        #expect(first.section == .doFirst)
+        #expect(first.priority == 1, "Do first is the urgent part")
+        #expect(first.verbs.map(\.kind) == [.draftReply, .remind], "Done is offered beside the verbs, not as one")
+        #expect(first.verbs.map(\.label) == ["Draft reply", "Remind me"])
+        #expect(first.verbs[0].action == "draft_reply", "sent back as the bridge wrote it")
+        #expect(first.openURL?.host == "mail.google.com")
+        #expect(first.accountTag == nil, "business is the default")
+        #expect(first.allows(.done) && first.allows(.dismiss) && !first.allows(.makeTask))
+        let task = brief.items[1]
+        #expect(task.state == .tasked)
+        #expect(task.state.label == "Task started")
+        #expect(task.resultLine == "Started it as a T3 task.")
+        #expect(task.accountTag == "Personal")
+        #expect(task.url == nil, "only http(s) links are opened")
+        let conflict = brief.items[2]
+        #expect(conflict.kind == "conflict")
+        #expect(conflict.conflict)
+        #expect(conflict.verbs.map(\.label) == ["Block 30 min", "Join"])
+        #expect(conflict.openURL?.host == "meet.google.com")
         let standup = brief.items[3]
         #expect(standup.section == .today)
-        #expect(standup.conflict)
         #expect(standup.startsAt == BridgeDates.date(from: "2026-10-14T14:00:00Z"))
-        #expect(brief.items[4].inboxItemId == "t3:t_deploy24")
+        #expect(standup.verbs.map(\.label) == ["Join"])
+        #expect(brief.items[4].verbs.isEmpty, "Got it is its Done")
+        let agent = brief.items[5]
+        #expect(agent.inboxItemId == "t3:t_deploy24", "the bridge's itemId")
+        #expect(agent.verbs.map(\.label) == ["Review"])
         #expect(brief.items(in: .agents).isEmpty, "Done: gone from the brief")
-        #expect(brief.toDo == 2, "Dana and the payout (Acme has its task, the deploy is done, FYI asks nothing)")
-        #expect(brief.footer == "Skipped 182 promos and newsletters")
+        #expect(brief.toDo == 2, "Dana and the clash (Acme has its task, the deploy is done, FYI asks nothing)")
+        #expect(brief.footer == "Read 64 emails · 9 worth a look · Couldn't read the personal mailbox")
     }
 
     @Test func otherShapesTheContractLeavesRoomFor() throws {
@@ -92,11 +126,16 @@ struct BriefingTests {
         #expect(keyed.items.map(\.id) == ["a", "e", "g"])
         #expect(keyed.items.map(\.section) == [.doFirst, .today, .agents])
         #expect(keyed.items[1].kind == "event")
-        let none = try decode(#"{"available": false, "status": "none", "reason": "not_built_yet", "sections": []}"#)
+        // Not built yet today (the real bridge: `waiting`), building, turned off.
+        let none = try decode(#"{"revision": 3, "date": "2026-10-14", "building": false, "available": false, "status": "waiting"}"#)
         #expect(!none.available)
         #expect(none.status == .none)
-        #expect(none.reason == "not_built_yet")
         #expect(!none.showsOnHome())
+        let building = try decode(#"{"revision": 4, "date": "2026-10-14", "building": true, "available": false, "status": "building"}"#)
+        #expect(building.status == .building)
+        let off = try decode(#"{"revision": 1, "date": "2026-10-14", "available": false, "status": "off", "reason": "briefing_turned_off"}"#)
+        #expect(off.status == .off)
+        #expect(off.reason == "briefing_turned_off")
     }
 
     @Test func homeShowsTodaysBriefUntilNoon() throws {
@@ -118,39 +157,68 @@ struct BriefingTests {
 
     @Test func aTapChangesTheItemAtOnce() throws {
         let brief = try decode()
-        let link = try #require(URL(string: "https://mail.google.com/mail/u/?authuser=sam%40example.com#drafts?compose=r1"))
-        let drafted = brief.with("bi_dana", state: .drafted, draftUrl: link)
+        let link = try #require(URL(string: "https://mail.google.com/mail/?authuser=sam%40example.com#drafts?compose=r1"))
+        let drafted = brief.with(dana, state: .drafted, draftUrl: link, line: "Saved as a draft in Gmail. Open it to send.")
         #expect(drafted.items[0].state == .drafted)
         #expect(drafted.items[0].draftUrl == link)
+        #expect(drafted.items[0].resultLine == "Saved as a draft in Gmail. Open it to send.")
         #expect(drafted.toDo == 1)
         #expect(brief.with("nope", state: .done) == brief)
         #expect(try decode().isNewer(than: brief) == false)
         var later = brief
         later.revision += 1
         #expect(later.isNewer(than: brief))
+        // The Mac's next brief carries the draft's own link in the item's `result`.
+        let again = try decode(briefingJSON.replacingOccurrences(of: #""state": "open", "updatedAt": "2026-10-14T10:41:07Z","#,
+            with: #""state": "drafted", "result": {"draftId": "r1", "url": "https://mail.google.com/mail/?authuser=sam%40example.com#drafts?compose=r1", "account": "business", "say": "Saved as a draft in Gmail. Open it to send."},"#))
+        #expect(again.items[0].state == .drafted)
+        #expect(again.items[0].draftUrl == link)
+        #expect(again.items[0].resultLine == "Saved as a draft in Gmail. Open it to send.")
     }
 
+    /// What a tap answers, as the real bridge does: `{ok, item, result, revision}`.
     @Test func whatATapAnswers() throws {
         let draft = try BridgeJSON.decode(BriefingActResult.self, from: Data("""
-        {"ok": true, "state": "drafted", "url": "https://mail.google.com/mail/u/?authuser=sam%40example.com#drafts",
-         "draftId": "r1", "message": "Saved as a draft in Gmail. Nothing was sent."}
+        {"ok": true, "item": {"id": "\(dana)", "section": "doFirst", "kind": "email", "title": "Reply to Dana",
+          "why": "", "actions": [{"type": "draft_reply", "label": "Draft reply"}], "can": ["draft_reply", "done"],
+          "state": "drafted", "result": {"draftId": "r1", "url": "https://mail.google.com/mail/?authuser=sam%40example.com#drafts?compose=r1"}},
+         "result": {"draftId": "r1", "url": "https://mail.google.com/mail/?authuser=sam%40example.com#drafts?compose=r1",
+                    "account": "business", "say": "Saved as a draft in Gmail. Open it to send."},
+         "revision": 13}
         """.utf8))
-        #expect(draft.state == .drafted)
+        #expect(draft.state == .drafted, "the item's new state")
         #expect(draft.url?.host == "mail.google.com")
-        #expect(draft.message == "Saved as a draft in Gmail. Nothing was sent.")
-        let nested = try BridgeJSON.decode(BriefingActResult.self, from: Data("""
-        {"ok": true, "state": "snoozed", "result": {"until": "2026-10-14T18:00:00Z", "eventId": "ev_1"}}
+        #expect(draft.url?.absoluteString.contains("authuser=sam%40example.com") == true, "the right account")
+        #expect(draft.message == "Saved as a draft in Gmail. Open it to send.")
+        #expect(draft.item?.draftUrl == draft.url)
+        let remind = try BridgeJSON.decode(BriefingActResult.self, from: Data("""
+        {"ok": true, "item": {"id": "x", "title": "Reply", "state": "reminded"},
+         "result": {"eventId": "ev_1", "until": "2026-10-14T18:00:00Z", "say": "I'll remind you at 2:00 PM."}, "revision": 14}
         """.utf8))
-        #expect(nested.until == BridgeDates.date(from: "2026-10-14T18:00:00Z"))
-        #expect(nested.eventId == "ev_1")
-        let bad = try BridgeJSON.decode(BriefingActResult.self, from: Data(#"{"url": "file:///etc/passwd"}"#.utf8))
+        #expect(remind.state == .snoozed)
+        #expect(remind.until == BridgeDates.date(from: "2026-10-14T18:00:00Z"))
+        #expect(remind.eventId == "ev_1")
+        #expect(remind.message == "I'll remind you at 2:00 PM.")
+        let task = try BridgeJSON.decode(BriefingActResult.self, from: Data("""
+        {"ok": true, "item": {"id": "y", "title": "Look", "state": "tasked"},
+         "result": {"threadId": "t_9", "itemId": "t3:t_9", "title": "Look", "say": "Started it as a T3 task."}, "revision": 15}
+        """.utf8))
+        #expect(task.threadId == "t_9")
+        #expect(task.itemId == "t3:t_9")
+        let open = try BridgeJSON.decode(BriefingActResult.self, from: Data("""
+        {"ok": true, "item": {"id": "z", "title": "Approve", "state": "open"}, "result": {"url": null, "itemId": "t3:t_deploy24"}, "revision": 15}
+        """.utf8))
+        #expect(open.itemId == "t3:t_deploy24")
+        #expect(open.url == nil)
+        #expect(open.state == .open)
+        let bad = try BridgeJSON.decode(BriefingActResult.self, from: Data(#"{"result": {"url": "file:///etc/passwd"}}"#.utf8))
         #expect(bad.url == nil)
     }
 
     @Test func theSummaryCarriesItForTheWidgets() throws {
         let summary = try BridgeJSON.decode(MobileSummary.self, from: Data("""
-        {"briefing": {"available": true, "date": "2026-10-14", "status": "ready", "revision": 5,
-                      "headline": "3 things need you", "needsYou": 3, "updatedAt": "2026-10-14T11:01:00Z"}}
+        {"briefing": {"available": true, "date": "2026-10-14", "status": "ready", "revision": 12,
+                      "headline": "3 things need you", "needsYou": 3}}
         """.utf8))
         let part = try #require(summary.briefing)
         #expect(part.needsYou == 3)
@@ -160,17 +228,22 @@ struct BriefingTests {
         let morning = try #require(BridgeDates.date(from: "2026-10-14T08:30:00-04:00"))
         #expect(part.current(now: morning, calendar: calendar))
         #expect(!part.current(now: morning.addingTimeInterval(86_400), calendar: calendar))
+        let waiting = try BridgeJSON.decode(MobileSummary.self, from: Data("""
+        {"briefing": {"available": false, "date": "2026-10-14", "status": "waiting", "revision": 3, "headline": null, "needsYou": 0}}
+        """.utf8))
+        #expect(waiting.briefing?.current(now: morning, calendar: calendar) == false)
         // The iPhone adds the first open items.
         let brief = try decode()
         let merged = summary.with(briefing: .success(brief), kept: nil)
-        #expect(merged.briefing?.items.map(\.id) == ["bi_dana", "bi_payout", "bi_acme", "bi_payout_in"],
+        #expect(merged.briefing?.items.map(\.id) == [dana, acme, clash, "bi_f100000000000001"],
                 "open items outside Today (Acme's task is still shown, dimmed)")
         #expect(merged.briefing?.needsYou == 2)
+        #expect(merged.briefing?.updatedAt == brief.updatedAt)
         // A failed call keeps the items it had while the bridge reports the same brief.
-        let kept = BriefingOverview(available: true, date: "2026-10-14", revision: 5, items: [brief.items[0]])
-        #expect(summary.with(briefing: .failure(.unreachable("x")), kept: kept).briefing?.items.map(\.id) == ["bi_dana"])
+        let kept = BriefingOverview(available: true, date: "2026-10-14", revision: 12, items: [brief.items[0]])
+        #expect(summary.with(briefing: .failure(.unreachable("x")), kept: kept).briefing?.items.map(\.id) == [dana])
         var moved = kept
-        moved.revision = 4
+        moved.revision = 11
         #expect(summary.with(briefing: .failure(.unreachable("x")), kept: moved).briefing?.items.isEmpty == true)
         #expect(summary.with(briefing: .success(Briefing(available: false)), kept: nil) == summary)
     }
