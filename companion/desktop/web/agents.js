@@ -4,6 +4,7 @@
 // injected (tests/agents.test.mjs runs it against a fake).
 
 import { InboxPoller } from './api.js';
+import { noteAction } from './inbox.js';
 import {
   InboxStore, UNDO_MS, actionInfo, agentLabel, buildAnswers, canDismiss, dismissProblem, failureNote, normalizeDetail,
   optimisticItem, resolveChoice,
@@ -230,6 +231,13 @@ export class AgentInbox {
 
   markSeen(item) {
     return this.perform(item, 'seen');
+  }
+
+  /** A voice note's button (inbox.js noteAction): the bridge does its suggestion, or tries a failed note again. */
+  actOnNote(item) {
+    const act = noteAction(item);
+    if (!act) return Promise.resolve(null);
+    return this.perform(item, 'act', act.action ? { action: act.action } : {});
   }
 
   open(item) {

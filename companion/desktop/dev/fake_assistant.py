@@ -11,8 +11,8 @@ behind the desktop token and the loopback check the server already does.
   ``say.done``, ``action``, ``card``, ``done``; ``A``: PCM16LE mono 16 kHz, 160 ms a frame, a voice-like tone sent
   at twice real time). Without it, the buffered JSON answer (``audio: {mime: "audio/wav", b64}``). One turn per
   conversation at a time (409 ``assistant_busy``).
-* ``POST /v1/desktop/assistant/cancel {conversationId}`` -> ``{ok, cancelled}`` (the stream ends with
-  ``done {interrupted: true}``); ``POST /v1/desktop/assistant/end {conversationId}`` -> ``{ok, ended}``.
+* ``POST /v1/desktop/assistant/cancel {conversationId, turnId?}`` -> ``{ok, cancelled}`` (the stream ends with
+  ``done {interrupted: true}``; a ``turnId`` that isn't the turn being answered stops nothing, as on the bridge); ``POST /v1/desktop/assistant/end {conversationId}`` -> ``{ok, ended}``.
 * ``GET /v1/desktop/assistant/announcements?conversationId=&since=`` -> ``{items: [{id, say, audio: null, kind,
   threadId, title}], cursor}`` (each once per conversation, only those queued after it began).
 
@@ -234,10 +234,14 @@ class FakeAssistant:
         with self.lock:
             found = self.conversations.get(conversation_id)
             if route == "cancel":
-                cancelled = bool(found and found["active"])
+                # Like the bridge: ``turnId`` (optional) names the turn meant; a cancel for another one stops nothing.
+                turn_id = payload.get("turnId")
+                if turn_id is not None and (not isinstance(turn_id, str) or not _TURN_ID.match(turn_id)):
+                    raise Refusal(400, "invalid_turn", "turnId must be the turn's id.")
+                cancelled = bool(found and found["active"] and (turn_id is None or found["active"] == turn_id))
                 if cancelled:
                     found["cancel"].set()
-                self.log["cancels"].append({"conversationId": conversation_id, "cancelled": cancelled})
+                self.log["cancels"].append({"conversationId": conversation_id, "turnId": turn_id, "cancelled": cancelled})
                 return {"ok": True, "cancelled": cancelled}
             if found:
                 found["ended"] = True

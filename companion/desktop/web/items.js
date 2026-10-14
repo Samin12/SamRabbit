@@ -40,6 +40,9 @@ export function sourceGlyph(item, size = 30) {
     case 'samrabbit':
       tile.append(h('img', { class: 'glyph-orb', src: 'orb.svg', alt: '' }));
       break;
+    case 'note':
+      tile.append(icon('mic', { size: Math.round(size * 0.46) }));
+      break;
     default:
       tile.append(icon('sparkles', { size: Math.round(size * 0.48) }));
   }

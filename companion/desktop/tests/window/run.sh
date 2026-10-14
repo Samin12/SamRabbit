@@ -16,5 +16,5 @@ TARGET=arm64-apple-macos14.0
 [ "$(uname -m)" = x86_64 ] && TARGET=x86_64-apple-macos14.0
 
 xcrun swiftc -swift-version 5 -target "$TARGET" -module-name WindowTests \
-  "$DESKTOP/Sources/MainWindowMessages.swift" "$HERE"/*.swift -o "$OUT/window-tests"
+  "$DESKTOP/Sources/MainWindowMessages.swift" "$DESKTOP/Sources/VoiceNoteModels.swift" "$HERE"/*.swift -o "$OUT/window-tests"
 "$OUT/window-tests"

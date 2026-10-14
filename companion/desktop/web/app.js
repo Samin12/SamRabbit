@@ -24,6 +24,7 @@ import { createTalk } from './talk.js';
 import { createTasks } from './tasks.js';
 import { closeOverlay, closePopover, overlayOpen, reportDragExclusions, toast } from './ui.js';
 import { normalizeEvents } from './agenda.js';
+import { normalizeBriefing } from './briefing.js';
 
 const VIEWS = [
   { id: 'home', label: 'Home', icon: 'home', key: '1' },
@@ -46,6 +47,14 @@ const agenda = new Resource(async () => {
   const body = await desktop.agenda(7);
   return { ...body, events: normalizeEvents(body && body.events) };
 }, { every: 5 * 60_000, presence });
+// The morning brief (CONTRACTS-WAVE8 §D2): Home's panel until noon. Read with the window on screen, every 5 minutes,
+// and as soon as the summary says there is a newer one.
+const briefing = new Resource(async () => normalizeBriefing(await desktop.briefing({ wait: 0 })), { every: 5 * 60_000, presence });
+summary.on(() => {
+  const next = summary.value && summary.value.briefing;
+  const have = briefing.value;
+  if (next && Number.isFinite(next.revision) && (!have || have.revision !== next.revision || have.date !== next.date)) briefing.refresh();
+});
 
 const ctx = {
   api: desktop,
@@ -53,6 +62,7 @@ const ctx = {
   chats,
   summary,
   agenda,
+  briefing,
   presence,
   show,
   current: () => current,
@@ -251,6 +261,7 @@ window.SamRabbitApp = {
     agents.poller?.poke();
     summary.refresh();
     agenda.refresh();
+    briefing.refresh();
   },
   summary() {
     return {
@@ -284,6 +295,8 @@ summary.refresh();
 summary.start();
 agenda.refresh();
 agenda.start();
+briefing.refresh();
+briefing.start();
 show(initialView());
 renderNav();
 postNative({ type: 'ready' });

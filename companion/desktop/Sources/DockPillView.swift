@@ -117,6 +117,12 @@ struct DockCommands {
     var interact: () -> Void = {}
     var openItem: (DockItem) -> Void = { _ in }
     var minimize: () -> Void = {}
+    /// The voice note (CONTRACTS-WAVE8 §D1): start one from the pill, send it now, throw it away.
+    var toggleNote: () -> Void = {}
+    var sendNote: () -> Void = {}
+    var cancelNote: () -> Void = {}
+    /// The note's bar offers what the bridge suggested ("Start as task").
+    var takeNoteSuggestion: () -> Void = {}
 }
 
 /// The pill's controls report their frames, so a press anywhere else on the pill can drag it.
@@ -163,13 +169,15 @@ extension View {
 // MARK: the pill
 
 /// The collapsed dock (~44 pt tall on a laptop): the orb, "2 need you" (accent capsule, hidden at 0), "4 working"
-/// (muted), and the mic, with a dot when the "Hey Rabbit" listener is armed. While the pointer is on it a "–" appears
+/// (muted), the mic, with a dot when the "Hey Rabbit" listener is armed, and the voice note button (⌃⌥N). While the pointer is on it a "–" appears
 /// at its far end (DockUIState.minimizeSlot): it folds the dock to the orb.
 struct DockPill: View {
     @ObservedObject var store: DockStore
     @ObservedObject var ui: DockUIState
     let voice: DockVoiceSnapshot
     let commands: DockCommands
+    /// The voice note's shortcut ("⌃⌥N"; "" while another app has it).
+    var noteShortcut = "⌃⌥N"
     @State private var moving = false
 
     var body: some View {
@@ -186,7 +194,14 @@ struct DockPill: View {
                                 help: voice.shortcut.isEmpty ? "Talk to SamRabbit"
                                     : "Talk to SamRabbit (\(voice.shortcut))") { commands.toggleVoice() }
                     .dockControl()
-                    .padding(.trailing, 6 * s)
+                    .padding(.trailing, -3 * s)
+                DockRoundButton(symbol: "waveform.badge.plus", size: 32 * s,
+                                help: noteShortcut.isEmpty ? "Voice note: say it and it’s sent"
+                                    : "Voice note (\(noteShortcut): hold to talk, or tap to start and tap again to send)") {
+                    commands.toggleNote()
+                }
+                .dockControl()
+                .padding(.trailing, 6 * s)
             }
             if ui.minimizeSlot == .trailing { minimizeButton(s, leading: false) }
         }
@@ -463,12 +478,14 @@ struct DockVoiceBar: View {
 
 // MARK: roots (what each window hosts)
 
-/// The pill window's content: the pill, the orb when minimized, or the voice bar during a conversation (and the orb
-/// again after it). It sizes itself; the window follows.
+/// The pill window's content: the pill, the orb when minimized, the voice bar during a conversation, or the voice
+/// note's bar while a note records and says how it went (and the orb again after either). It sizes itself; the window
+/// follows.
 struct DockPillRoot: View {
     @ObservedObject var store: DockStore
     @ObservedObject var ui: DockUIState
     @ObservedObject var voice: DockVoiceFeed
+    @ObservedObject var note: DockNoteFeed
     let commands: DockCommands
     let render: DockRender
     var onMeasure: (DockPillMeasure) -> Void
@@ -479,10 +496,12 @@ struct DockPillRoot: View {
         Group {
             if snapshot.active {
                 DockVoiceBar(voice: snapshot, scale: ui.pillScale, commands: commands)
+            } else if note.snapshot.active {
+                DockNoteBar(note: note.snapshot, scale: ui.pillScale, commands: commands)
             } else if ui.minimized {
                 DockOrb(store: store, ui: ui, voice: snapshot)
             } else {
-                DockPill(store: store, ui: ui, voice: snapshot, commands: commands)
+                DockPill(store: store, ui: ui, voice: snapshot, commands: commands, noteShortcut: note.snapshot.shortcut)
             }
         }
         .fixedSize()

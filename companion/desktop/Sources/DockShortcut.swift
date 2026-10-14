@@ -1,7 +1,8 @@
 import Foundation
 
-// The dock's four global shortcuts as data (CONTRACTS-WAVE7 §B2): ⌃⌥Space talk, ⌃⌥K the list on compose, ⌃⌥D show /
-// hide, ⌃⌥M minimize / expand. Each can be recorded anew in Settings. Pure (no AppKit, no Carbon): key codes are the
+// The dock's global shortcuts as data (CONTRACTS-WAVE7 §B2): ⌃⌥Space talk, ⌃⌥K the list on compose, ⌃⌥D show /
+// hide, ⌃⌥M minimize / expand, and ⌃⌥N a voice note (WAVE8 §D1: held, it records while held; tapped, it starts and the
+// next tap sends). Each can be recorded anew in Settings. Pure (no AppKit, no Carbon): key codes are the
 // Mac's virtual key codes (the key's place on the keyboard, which is what Carbon's RegisterEventHotKey takes),
 // modifiers Carbon's bits, and NSEvent's modifier bits are spelled out where a recorded key comes in, so tests/swift
 // pins the names, the parsing and the rules. DockShortcutCenter registers them.
@@ -100,9 +101,9 @@ struct DockShortcut: Hashable {
     }
 }
 
-/// The four things a shortcut does.
+/// The things a shortcut does.
 enum DockShortcutAction: String, CaseIterable, Identifiable {
-    case talk, compose, showHide, minimize
+    case talk, compose, showHide, minimize, voiceNote
 
     var id: String { rawValue }
 
@@ -112,6 +113,7 @@ enum DockShortcutAction: String, CaseIterable, Identifiable {
         case .compose: return "New task"
         case .showHide: return "Show / hide the dock"
         case .minimize: return "Minimize / expand"
+        case .voiceNote: return "Voice note"
         }
     }
 
@@ -121,6 +123,7 @@ enum DockShortcutAction: String, CaseIterable, Identifiable {
         case .compose: return "Opens the dock’s list with the cursor in “Ask an agent…”."
         case .showHide: return "Hides the dock until pressed again; brings it to the screen you are on."
         case .minimize: return "Folds the dock into the orb, and back into the pill."
+        case .voiceNote: return "Hold to record while held; or tap to start and tap again to send."
         }
     }
 
@@ -131,6 +134,7 @@ enum DockShortcutAction: String, CaseIterable, Identifiable {
         case .compose: return DockShortcut(keyCode: 40, modifiers: controlOption)   // K
         case .showHide: return DockShortcut(keyCode: 2, modifiers: controlOption)   // D
         case .minimize: return DockShortcut(keyCode: 46, modifiers: controlOption)  // M
+        case .voiceNote: return DockShortcut(keyCode: 45, modifiers: controlOption) // N
         }
     }
 }
@@ -144,7 +148,7 @@ struct DockSystemShortcut: Equatable {
     let enabled: Bool
 }
 
-/// The rules over the four shortcuts: which combinations can be one, and how they are kept.
+/// The rules over the shortcuts: which combinations can be one, and how they are kept.
 enum DockShortcuts {
     static let defaults: [DockShortcutAction: DockShortcut] =
         Dictionary(uniqueKeysWithValues: DockShortcutAction.allCases.map { ($0, $0.defaultShortcut) })
@@ -171,7 +175,7 @@ enum DockShortcuts {
     /// Why `shortcut` can't be `action`'s (nil = it can): a global shortcut is registered exclusively, so it takes its
     /// keys from every app while SamRabbit runs. It must not be a key Samin types with (⌥ makes characters, ⌃ alone is
     /// how terminals and editors take keys: ⌃C, ⌃D, ⌃R, ⌃A), an app's own ⌘ shortcut, F1–F12 alone (apps' keys, and
-    /// the Mac keyboard's brightness and media keys) or a macOS one; and the four must differ. So a letter, digit or
+    /// the Mac keyboard's brightness and media keys) or a macOS one; and they must all differ. So a letter, digit or
     /// other key needs two of ⌃ ⌥ ⌘ (⇧ may come on top); F13–F20 may stand alone.
     static func problem(_ shortcut: DockShortcut, for action: DockShortcutAction,
                         among bindings: [DockShortcutAction: DockShortcut]) -> String? {

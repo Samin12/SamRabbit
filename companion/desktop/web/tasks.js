@@ -14,6 +14,7 @@ import {
   approvalCard, dismissWithUndo, itemMeta, itemRow, noteLine, questionCard, shortAgo, sourceGlyph,
 } from './items.js';
 import { createOrb } from './orb.js';
+import { isVoiceNote, noteAction } from './inbox.js';
 import { autosize, keycap, redrawWhenFree, reportDragExclusions, segmented, spinner } from './ui.js';
 
 const FILTER_KEY = 'samrabbit.tasks.filter';
@@ -214,12 +215,15 @@ export function createTasks(ctx, el) {
   }
 
   function busyLabel(kind) {
-    return { approve: 'Sending…', answer: 'Sending…', reply: 'Replying…', stop: 'Stopping…', open: 'Opening…', seen: 'Marking…' }[kind] || '…';
+    return { approve: 'Sending…', answer: 'Sending…', reply: 'Replying…', stop: 'Stopping…', open: 'Opening…', seen: 'Marking…', act: 'On it…' }[kind] || '…';
   }
 
   function actionBar(item) {
     const busy = agents.busy.get(item.id);
+    // A voice note: what the bridge suggested ("Start as task"), or "Try again" when it failed.
+    const note = noteAction(item);
     return h('div', { class: 'detail-actions' },
+      note ? capsule(note.label, note.action ? 'send' : 'refresh', () => agents.actOnNote(item), { tone: 'accent', disabled: Boolean(busy) }) : null,
       supports(item, 'open') ? capsule(openLabel(item), isChat(item) ? 'bubble' : 'external', () => openItem(item), { disabled: Boolean(busy) }) : null,
       supports(item, 'stop') && item.status === 'working'
         ? capsule('Stop', 'stop', () => agents.stopItem(item), { disabled: Boolean(busy) }) : null,
@@ -251,7 +255,7 @@ export function createTasks(ctx, el) {
 
   function whoLabel(item, role) {
     if (role === 'user') return 'You';
-    if (isChat(item)) return 'SamRabbit';
+    if (isChat(item) || isVoiceNote(item)) return 'SamRabbit';
     return agentLabel(item) || sourceLabel(item.source);
   }
 

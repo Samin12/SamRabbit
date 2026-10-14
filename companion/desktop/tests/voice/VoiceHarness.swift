@@ -1,4 +1,5 @@
 import Combine
+import SamRabbitKit
 import Foundation
 
 /// The Mac voice end to end without a microphone or a speaker (tests/voice/headless.sh): `MacVoice` in fixture mode
@@ -12,6 +13,14 @@ import Foundation
 ///     voice-harness mute      mute ends with the conversation; muted, "Hey Rabbit" waits; a muted one ends by itself
 ///     voice-harness devices   this Mac's audio inputs and the wake listener's choice (read only)
 ///     voice-harness listen N  only the wake listener, for N seconds (for its CPU use)
+///     voice-harness note      a voice note from the dock's button: it stops on the pause, goes to the bridge, says how
+///                             it went; "Hey Rabbit" waits meanwhile and no conversation starts
+///     voice-harness note-hold ⌃⌥N held while it is said, released: sent on the release
+///     voice-harness note-offline  the bridge refuses it for now (503): kept in the outbox, then sent when it is back
+///     voice-harness note-suggest  the bridge keeps it as a note and suggests a task: the bar's button arms on the first
+///                             click and does it on the second
+///     voice-harness note-retry    two notes waiting in the outbox go once the bridge is back, while "the bridge is
+///                             back" is said again in the middle of the pass: neither is called off or counted as failed
 ///
 /// The wake phrase setting comes from the arguments (`-VoiceWakeEnabled YES|NO`, the argument domain), so nothing is
 /// written to any defaults.
@@ -137,12 +146,179 @@ struct VoiceHarness {
             let wall = Date().timeIntervalSince(started)
             print(String(format: "HARNESS_CPU %.2f%% (%.2f s of CPU in %.1f s)", cpu / wall * 100, cpu, wall))
             ok = check(voice.wakeArmed && voice.state == .idle, "still listening, nothing started")
+        case "note", "note-hold", "note-offline", "note-suggest":
+            ok = await note(scenario, voice: voice)
+        case "note-retry":
+            ok = await noteRetry()
         default:
             Log.write("harness: unknown scenario \(scenario)")
         }
         print("HARNESS_STATES " + states.joined(separator: ","))
         print(ok ? "HARNESS_OK \(scenario)" : "HARNESS_FAILED \(scenario)")
         exit(ok ? 0 : 1)
+    }
+
+    /// The voice note scenarios (VoiceNotes with the fixture microphone and the fake's /v1/desktop/capture; the outbox
+    /// in the temp folder headless.sh names in SAMRABBIT_CAPTURE_OUTBOX).
+    @MainActor
+    static func note(_ scenario: String, voice: MacVoice) async -> Bool {
+        guard ProcessInfo.processInfo.environment["SAMRABBIT_CAPTURE_OUTBOX"] != nil else {
+            return check(false, "SAMRABBIT_CAPTURE_OUTBOX names a temp outbox")
+        }
+        let notes = VoiceNotes()
+        var phases: [String] = []
+        notes.$snapshot.map { "\($0.phase)" }.removeDuplicates().sink { phase in
+            phases.append(phase)
+            Log.write("harness: note \(phase)")
+        }.store(in: &bag)
+        voice.activate(shortcut: false)
+        var ok = check(await waitUntil(within: 20) { voice.wakeArmed }, "listening for the wake phrase before")
+        if scenario == "note-offline" { await post("/dev/capture", ["mode": "busy"]) }
+        if scenario == "note-suggest" {
+            // The bridge's words for a kept note (samrabbit_capture `_as_note`).
+            await postJSON("/dev/capture", ["script": [["heard": "Call the bank about the replacement card.", "kind": "note",
+                                                        "title": "Call the bank about the replacement card.",
+                                                        "detail": "Saved as a note.",
+                                                        "suggestion": ["action": "task", "label": "Start it as a T3 task?"]]]])
+        }
+        if scenario == "note-hold" {
+            notes.press()
+            ok = check(await waitUntil(within: 2) { notes.isRecording }, "⌃⌥N down: recording at once") && ok
+            // Held while the file is said (0.6 s of room, then about 3 s of words), then let go.
+            try? await Task.sleep(for: .seconds(6))
+            ok = check(notes.isRecording, "still recording while held (a pause doesn't send a held note)") && ok
+            notes.release()
+            ok = check(!notes.isRecording, "the release sends it") && ok
+        } else {
+            notes.toggle(source: "button")
+            ok = check(await waitUntil(within: 2) { notes.isRecording }, "recording at once") && ok
+            ok = check(!voice.wakeArmed, "“Hey Rabbit” waits while a note records") && ok
+            voice.start(reason: "button")
+            ok = check(voice.state == .idle, "no conversation starts while a note records") && ok
+            // It stops by itself: the file, then 3 s of quiet.
+            ok = check(await waitUntil(within: 15) { !notes.isRecording }, "a tapped note ends on the pause") && ok
+        }
+        if scenario == "note-offline" {
+            ok = check(await waitUntil(within: 10) { notes.snapshot.phase == .queued }, "the bridge refused it for now: kept") && ok
+            ok = check(notes.outbox.items().count == 1 && notes.snapshot.waiting == 1, "one note in the outbox") && ok
+            ok = check(notes.snapshot.line == "Saved on this Mac", "the bar says so (\(notes.snapshot.detail))") && ok
+            await post("/dev/capture", ["mode": "ok"])
+            notes.retryNow()
+            ok = check(await waitUntil(within: 15) { notes.outbox.items().isEmpty }, "sent once the bridge took it again") && ok
+            ok = check(notes.snapshot.waiting == 0, "nothing waits") && ok
+        } else if scenario == "note-suggest" {
+            ok = check(await waitUntil(within: 25) { notes.snapshot.offer == "Start as task" },
+                       "kept as a note, the bar offers the suggestion (\(notes.snapshot.line) / \(notes.snapshot.detail))") && ok
+            // A click meant for the dock's note button that lands here only arms it; a double click is one click.
+            notes.takeSuggestion()
+            notes.takeSuggestion()
+            ok = check(notes.snapshot.offerArmed && notes.snapshot.offer == "Yes, start the task",
+                       "the first click (and a double click) only arms it (\(notes.snapshot.offer))") && ok
+            try? await Task.sleep(for: .milliseconds(700))
+            let before = (await get("/dev/capture"))?["acts"] as? [[String: Any]] ?? []
+            ok = check(before.isEmpty, "nothing went to the bridge on the first click") && ok
+            notes.takeSuggestion()
+            ok = check(await waitUntil(within: 10) { notes.snapshot.line == "Started a T3 task" },
+                       "the second click did it (\(notes.snapshot.line) / \(notes.snapshot.detail))") && ok
+            ok = check(notes.snapshot.offer.isEmpty && !notes.snapshot.offerArmed, "and offers nothing more") && ok
+            let acts = (await get("/dev/capture"))?["acts"] as? [[String: Any]] ?? []
+            ok = check(acts.count == 1 && acts.first?["action"] as? String == "task", "one act, a task, went to the bridge") && ok
+        } else {
+            ok = check(await waitUntil(within: 25) { notes.snapshot.line == "Added to your journal" },
+                       "the bar says what the bridge did (\(notes.snapshot.line) / \(notes.snapshot.detail))") && ok
+            ok = check(notes.outbox.items().isEmpty, "the outbox let it go once the bridge had it") && ok
+            ok = check(phases.contains("sending") && phases.contains("sent"), "recording, sending, sent: \(phases)") && ok
+        }
+        ok = check(await waitUntil(within: 10) { voice.wakeArmed }, "the wake listener is back after the note") && ok
+        // What the fake received: one note, from the Mac, a WAV of about the right length.
+        guard let arrived = await get("/dev/capture"), let captures = arrived["captures"] as? [[String: Any]] else {
+            return check(false, "the fake says what arrived")
+        }
+        ok = check(captures.count == 1, "one capture arrived (\(captures.count))") && ok
+        if let first = captures.first {
+            let seconds = first["seconds"] as? Double ?? 0
+            ok = check(first["source"] as? String == "mac" && first["contentType"] as? String == "audio/wav", "a WAV from the Mac") && ok
+            ok = check(seconds >= 3 && seconds <= 9, String(format: "about the length said (%.1f s)", seconds)) && ok
+            ok = check((first["capturedAt"] as? String)?.count == 25, "captured-at with its offset") && ok
+        }
+        print("HARNESS_NOTE_PHASES " + phases.joined(separator: ","))
+        return ok
+    }
+
+    /// Two notes wait in the outbox (the bridge was away); the pass that sends them is under way, following the first
+    /// one's outcome, when "the bridge is back" comes again (AppModel's poll calls `retryNow()`). The pass must go on:
+    /// both notes reach the bridge within seconds, neither is counted as a failed try, and each one's outcome is said
+    /// (a notification: an outbox retry), none left "still being worked on". The audio is the fixture's WAV.
+    @MainActor
+    static func noteRetry() async -> Bool {
+        guard let folder = ProcessInfo.processInfo.environment["SAMRABBIT_CAPTURE_OUTBOX"],
+              let path = ProcessInfo.processInfo.environment["SAMRABBIT_VOICE_FIXTURE"]?.split(separator: ",").first,
+              let samples = FixtureMicrophone.load(String(path)) else {
+            return check(false, "SAMRABBIT_CAPTURE_OUTBOX names a temp outbox and the fixture has a WAV")
+        }
+        // A slow bridge: each upload's answer takes 1 s, each outcome 3 s more, so the pass is still under way when the
+        // poll fires.
+        await postJSON("/dev/capture", ["delay": 3, "hold": 1])
+        let outbox = VoiceNoteOutbox(directory: URL(fileURLWithPath: folder, isDirectory: true))
+        let now = Date()
+        var ids: [String] = []
+        for index in 0..<2 {
+            let id = VoiceNoteUpload.newId()
+            ids.append(id)
+            let item = VoiceNoteOutbox.Item(captureId: id, capturedAt: now.addingTimeInterval(Double(index) - 120),
+                                            createdAt: now.addingTimeInterval(Double(index) - 120), seconds: Double(samples.count) / 16_000,
+                                            attempts: 1, lastError: "The bridge isn’t running", nextAt: now.addingTimeInterval(-1))
+            do {
+                try outbox.add(item, wav: WAV.encode(samples: samples))
+            } catch {
+                return check(false, "the outbox took the two notes")
+            }
+        }
+        let notes = VoiceNotes()
+        var outcomes: [String] = []
+        notes.onOutcome = { note in
+            outcomes.append(note.line)
+            Log.write("harness: note outcome \(note.line)")
+        }
+        notes.activate()
+        // "The bridge is back" again, twice, while the first note's outcome is being followed.
+        try? await Task.sleep(for: .milliseconds(900))
+        notes.retryNow()
+        try? await Task.sleep(for: .milliseconds(600))
+        notes.retryNow()
+        var ok = check(await waitUntil(within: 6) { notes.outbox.items().isEmpty }, "both notes reached the bridge in one pass")
+        let polls = (await get("/dev/capture"))?["polls"] as? Int ?? 0
+        let arrived = await get("/dev/capture")
+        let captures = arrived?["captures"] as? [[String: Any]] ?? []
+        ok = check(captures.count == 2 && Set(captures.compactMap { $0["captureId"] as? String }) == Set(ids),
+                   "the fake has both, once each (\(captures.count))") && ok
+        ok = check((arrived?["repeats"] as? Int ?? -1) == 0, "no upload went twice") && ok
+        ok = check(await waitUntil(within: 12) { outcomes.count == 2 }, "both outcomes were said: \(outcomes)") && ok
+        ok = check(outcomes.sorted() == ["Added to your journal", "Started a T3 task"], "what the bridge did with each") && ok
+        ok = check(notes.snapshot.waiting == 0, "nothing waits") && ok
+        // Each outcome's long poll waits on the bridge (8 s at most): a handful of reads, never a loop.
+        let after = (await get("/dev/capture"))?["polls"] as? Int ?? 0
+        ok = check(after - polls <= 8 && after >= 2, "the outcomes were asked for a few times (\(after)), not in a loop") && ok
+        print("HARNESS_NOTE_OUTCOMES " + outcomes.joined(separator: ","))
+        return ok
+    }
+
+    /// A dev control with any JSON body.
+    static func postJSON(_ path: String, _ body: [String: Any]) async {
+        var request = URLRequest(url: Config.origin.appendingPathComponent(String(path.dropFirst())))
+        request.httpMethod = "POST"
+        request.setValue(Config.token(), forHTTPHeaderField: "X-SamRabbit-Desktop")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
+    /// A dev read on the fake server (desktop token).
+    static func get(_ path: String) async -> [String: Any]? {
+        var request = URLRequest(url: Config.origin.appendingPathComponent(String(path.dropFirst())))
+        request.setValue(Config.token(), forHTTPHeaderField: "X-SamRabbit-Desktop")
+        guard let (data, _) = try? await URLSession.shared.data(for: request) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     static func name(_ state: MacVoice.State) -> String {

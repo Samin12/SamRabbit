@@ -2,8 +2,9 @@ import AppKit
 import Carbon
 import SwiftUI
 
-/// The dock's four global shortcuts, registered (CONTRACTS-WAVE7 §B2): ⌃⌥Space talk, ⌃⌥K the list on compose, ⌃⌥D
-/// show / hide, ⌃⌥M minimize / expand, or what Settings recorded instead (UserDefaults `AgentDockShortcuts`, only the
+/// The dock's global shortcuts, registered (CONTRACTS-WAVE7 §B2): ⌃⌥Space talk, ⌃⌥K the list on compose, ⌃⌥D
+/// show / hide, ⌃⌥M minimize / expand, ⌃⌥N a voice note (WAVE8 §D1, its press and its release), or what Settings
+/// recorded instead (UserDefaults `AgentDockShortcuts`, only the
 /// changed ones, as "⌃⌥D"). Carbon `RegisterEventHotKey`, so no Accessibility permission: the dock's three through
 /// DockHotKey, the talk one through `MacVoice.setShortcut` (the voice owns its hot key). Each is registered
 /// exclusively, so Carbon refuses one another app holds that way (and refuses it to such an app while SamRabbit holds
@@ -29,11 +30,13 @@ final class DockShortcutCenter: ObservableObject {
     @Published private(set) var bindings: [DockShortcutAction: DockShortcut]
     /// The actions whose shortcut the system refused (at launch, or when it was registered again): why.
     @Published private(set) var unavailable: [DockShortcutAction: String] = [:]
-    /// Settings is recording a shortcut: none of the four is registered meanwhile, so its keys reach the recorder.
+    /// Settings is recording a shortcut: none of them is registered meanwhile, so its keys reach the recorder.
     @Published private(set) var paused = false
 
     private static let defaultsKey = "AgentDockShortcuts"
     private var handlers: [DockShortcutAction: () -> Void] = [:]
+    /// The keys that want their release too (⌃⌥N).
+    private var releases: [DockShortcutAction: () -> Void] = [:]
     private var keys: [DockShortcutAction: DockHotKey] = [:]
     private var started = false
     private let live: Bool
@@ -50,11 +53,12 @@ final class DockShortcutCenter: ObservableObject {
         live = false
     }
 
-    /// At launch: what each of the dock's three does (talk is MacVoice's own toggle), and all four registered.
-    func start(_ handlers: [DockShortcutAction: () -> Void]) {
+    /// At launch: what each of the others does (talk is MacVoice's own toggle), and all of them registered.
+    func start(_ handlers: [DockShortcutAction: () -> Void], releases: [DockShortcutAction: () -> Void] = [:]) {
         guard live, !started else { return }
         started = true
         self.handlers = handlers
+        self.releases = releases
         for action in DockShortcutAction.allCases { register(action) }
     }
 
@@ -98,7 +102,7 @@ final class DockShortcutCenter: ObservableObject {
 
     func reset(_ action: DockShortcutAction) -> Outcome { set(action, to: action.defaultShortcut) }
 
-    /// Recording: lets go of all four until `resume()`.
+    /// Recording: lets go of all of them until `resume()`.
     func pause() {
         guard live, !paused else { return }
         paused = true
@@ -129,16 +133,17 @@ final class DockShortcutCenter: ObservableObject {
                                             unavailable: voiceProblem) {
                 problem = problem ?? Self.takenMessage
             }
-        case .compose, .showHide, .minimize:
+        case .compose, .showHide, .minimize, .voiceNote:
             guard problem == nil else { break }
             let handler = handlers[action] ?? {}
             let key = DockHotKey(keyCode: Int(shortcut.keyCode), modifiers: Int(shortcut.modifiers), name: shortcut.display,
-                                 exclusive: true, action: handler)
+                                 exclusive: true, action: handler, release: releases[action])
             keys[action] = key
             if key == nil {
                 problem = DockHotKey.lastStatus == OSStatus(eventHotKeyExistsErr) ? Self.takenMessage : "Not available — macOS didn’t accept it"
             }
         }
+        if action == .voiceNote { VoiceNotes.shared.setShortcut(problem == nil ? shortcut.display : "") }
         if unavailable[action] != problem { unavailable[action] = problem }
         return problem == nil
     }
@@ -158,7 +163,7 @@ final class DockShortcutCenter: ObservableObject {
         switch action {
         case .talk:
             MacVoice.shared.releaseShortcut()
-        case .compose, .showHide, .minimize:
+        case .compose, .showHide, .minimize, .voiceNote:
             keys[action]?.unregister()
             keys[action] = nil
         }

@@ -9,4 +9,7 @@ exit(Harness.run([
     ("Expansion", ExpansionTests.all),
     ("Keyboard", KeyboardTests.all),
     ("Shortcuts", ShortcutTests.all),
+    ("VoiceNotes", VoiceNoteTests.all),
+    ("Briefing", BriefingTests.all),
+    ("NoteInbox", NoteInboxTests.all),
 ], filter: filter))

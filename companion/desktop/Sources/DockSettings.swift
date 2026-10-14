@@ -2,9 +2,10 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// "Agent Dock Settings…" (the dock's menu, the menu bar extra): the four shortcuts, each recorded anew with a click
-/// (the next key combination is the shortcut; Esc cancels), with why one can't be used or isn't available; and the
-/// dock itself on or off, and folded to the orb. While a shortcut is being recorded none of the four is registered
+/// "Agent Dock Settings…" (the dock's menu, the menu bar extra): the shortcuts (talk, new task, show / hide, minimize,
+/// voice note), each recorded anew with a click (the next key combination is the shortcut; Esc cancels), with why one
+/// can't be used or isn't available; and the
+/// dock itself on or off, and folded to the orb. While a shortcut is being recorded none of them is registered
 /// (DockShortcutCenter.pause), so the keys reach the recorder and ⌃⌥Space can't start a conversation meanwhile;
 /// leaving the window (or closing it) ends the recording and gives them back.
 ///

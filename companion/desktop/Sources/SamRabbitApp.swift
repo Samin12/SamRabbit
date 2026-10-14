@@ -133,7 +133,11 @@ final class AppModel: ObservableObject {
         lastListAttempt = Date()
         switch await SyncAPI.conversations(limit: 8) {
         case .success(let list):
-            if bridge != .connected { Log.write("bridge sync API reachable (\(list.count) recent conversations)") }
+            if bridge != .connected {
+                Log.write("bridge sync API reachable (\(list.count) recent conversations)")
+                // Voice notes kept while it was away go now.
+                VoiceNotes.shared.retryNow()
+            }
             bridge = .connected
             conversations = list
             if let newest = list.map(\.lastAt).max() { lastSeen = max(lastSeen ?? .distantPast, min(newest, Date())) }
@@ -246,6 +250,7 @@ struct MenuContent: View {
         Text(model.lastSeenLine)
         Divider()
         VoiceMenuItems()
+        VoiceNoteMenuItems()
         Divider()
         if !model.conversations.isEmpty {
             Text("Recent conversations")
@@ -289,9 +294,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   + (Config.isDefaultBase ? "" : " (override)") + (atLogin ? " at-login" : ""))
         MainActor.assumeIsolated {
             AppModel.shared.start(showWindow: !atLogin)
-            // The talk shortcut is one of the four Settings can record anew: the dock's shortcut center registered it
-            // (through MacVoice.setShortcut) when the dock started.
+            // The talk shortcut is one of those Settings can record anew: the dock's shortcut center registered it
+            // (through MacVoice.setShortcut) when the dock started, and ⌃⌥N for voice notes with it.
             MacVoice.shared.activate(shortcut: false)
+            // Voice notes the bridge hasn't taken yet go again; one sent later says how it went in a notification
+            // (a note recorded now says so on the dock's bar; a notification only when the bar no longer shows it and
+            // it went wrong, or the answer came late).
+            VoiceNotes.shared.onOutcome = { note in
+                AppModel.shared.notifier.voiceNote(title: note.line, body: note.detail)
+            }
+            VoiceNotes.shared.activate()
         }
     }
 
@@ -304,7 +316,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// The Dock icon's menu: a voice note and a conversation, without opening the window.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        nonisolated(unsafe) let menu = NSMenu()
+        MainActor.assumeIsolated {
+            let notes = VoiceNotes.shared
+            menu.addItem(DockMenuItem(notes.isRecording ? "Send Voice Note" : "Voice Note",
+                                      shortcut: DockShortcutCenter.shared.working(.voiceNote)) { notes.toggle(source: "dock-icon") })
+            let voice = MacVoice.shared
+            menu.addItem(DockMenuItem(voice.state == .idle || voice.isShowingError ? "Talk to SamRabbit" : "End Conversation",
+                                      shortcut: DockShortcutCenter.shared.working(.talk)) { voice.toggle(reason: "button") })
+        }
+        return menu
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        // A voice note still recording (tapped, up to 5 minutes) is kept in the outbox and sent at the next launch.
+        MainActor.assumeIsolated { VoiceNotes.shared.keepForLater() }
         Log.write("quit")
     }
 }
@@ -335,6 +363,7 @@ struct SamRabbitApp: App {
                 Button("Pair iPhone…") { model.openPairing() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Button("Connect ChatGPT…") { model.openChatGPT() }
+                VoiceNoteAppMenuItem()
                 DockAppMenuItems()
             }
             CommandGroup(before: .toolbar) {
@@ -357,5 +386,16 @@ struct SamRabbitApp: App {
                     .keyboardShortcut("k")
             }
         }
+    }
+}
+
+/// The app menu's "Voice Note" with its shortcut (⌃⌥N, or what Settings recorded).
+struct VoiceNoteAppMenuItem: View {
+    @ObservedObject var notes = VoiceNotes.shared
+    @ObservedObject var shortcuts = DockShortcutCenter.shared
+
+    var body: some View {
+        Button(notes.isRecording ? "Send Voice Note" : "Voice Note") { notes.toggle(source: "menu") }
+            .keyboardShortcut(shortcuts.keyboardShortcut(.voiceNote))
     }
 }

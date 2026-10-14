@@ -122,6 +122,11 @@ final class DockController: NSObject {
     /// What each window draws of the voice: the pill follows the mic level during a conversation, the list never.
     private lazy var pillVoice = DockVoiceFeed(voice, keepsLevel: true)
     private lazy var listVoice = DockVoiceFeed(voice, keepsLevel: false)
+    /// Voice notes (CONTRACTS-WAVE8 §D1): ⌃⌥N, the pill's note button, the menu; their bar takes the pill's place.
+    private let notes = VoiceNotes.shared
+    private lazy var noteFeed = DockNoteFeed(notes)
+    private var noteSubscription: AnyCancellable?
+    private var noteActive = false
     private let render = DockRender(glass: DockRender.liveGlass())
     private(set) var pill: DockPanelWindow?
     private(set) var list: DockPanelWindow?
@@ -286,6 +291,8 @@ final class DockController: NSObject {
         started = true
         store.onAnnounce = { [weak self] items in self?.announce(items) }
         store.onOpenConversation = { id in AppModel.shared.openMainWindow(conversation: id) }
+        // A morning brief's agent item opens in the list itself.
+        store.morning.onOpenInboxItem = { [weak self] id in self?.perform(.expand(id)) }
         AppModel.shared.notifier.onOpenInboxItem = { [weak self] id in self?.reveal(id) }
         presence.hidden = UserDefaults.standard.bool(forKey: Key.putAway)
         presence.minimized = UserDefaults.standard.bool(forKey: Key.minimized)
@@ -321,6 +328,9 @@ final class DockController: NSObject {
         voiceSubscription = voice.$state.sink { [weak self] state in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.voiceChanged(active: state != .idle) } }
         }
+        noteSubscription = notes.$snapshot.map(\.active).removeDuplicates().sink { [weak self] active in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.noteChanged(active: active) } }
+        }
         // While a field has the keys, a list that opened on hover doesn't close under the pointer.
         editingSubscription = ui.$editing.removeDuplicates().sink { [weak self] editing in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.send(.editing(editing != nil)) } }
@@ -347,6 +357,9 @@ final class DockController: NSObject {
             .compose: { [weak self] in self?.summon(focusCompose: true) },
             .showHide: { [weak self] in self?.toggleShown() },
             .minimize: { [weak self] in self?.toggleMinimized() },
+            .voiceNote: { [weak self] in self?.notes.press() },
+        ], releases: [
+            .voiceNote: { [weak self] in self?.notes.release() },
         ])
         Log.write("dock: \(enabled ? "on" : "off")\(presence.hidden ? ", put away (⌃⌥D)" : "")\(presence.minimized ? ", minimized" : "")"
                   + " (glass \(render.glass.rawValue))")
@@ -372,6 +385,7 @@ final class DockController: NSObject {
         input.mainWindowKey = main?.isKeyWindow ?? false
         input.mainWindowMinimized = main?.isMiniaturized ?? false
         input.voiceActive = voiceActive
+        input.noteActive = noteActive
         input.summoned = summoned
         return input
     }
@@ -463,13 +477,17 @@ final class DockController: NSObject {
         collapse: { [weak self] in self?.send(.escape) },
         interact: { [weak self] in self?.send(.interact) },
         openItem: { [weak self] item in self?.store.open(item) },
-        minimize: { [weak self] in self?.setMinimized(true) })
+        minimize: { [weak self] in self?.setMinimized(true) },
+        toggleNote: { [weak self] in self?.toggleNote() },
+        sendNote: { [weak self] in self?.notes.send() },
+        cancelNote: { [weak self] in self?.notes.cancel() },
+        takeNoteSuggestion: { [weak self] in self?.notes.takeSuggestion() })
 
     private func pillWindow() -> DockPanelWindow {
         if let pill { return pill }
         let window = DockPanelWindow(role: .pill)
         window.controller = self
-        let root = DockPillRoot(store: store, ui: ui, voice: pillVoice, commands: commands, render: render,
+        let root = DockPillRoot(store: store, ui: ui, voice: pillVoice, note: noteFeed, commands: commands, render: render,
                                 onMeasure: { [weak self] measure in self?.pillMeasured(measure) },
                                 onHitRects: { [weak self] rects in self?.pillControls = rects })
         let hosting = DockHostingView(rootView: root)
@@ -603,7 +621,7 @@ final class DockController: NSObject {
     }
 
     private func followPointer() {
-        guard visible, place == nil, press == nil, !expansion.isOpen, !voiceActive,
+        guard visible, place == nil, press == nil, !expansion.isOpen, !voiceActive, !noteActive,
               let here = DockPlacement.screen(containing: NSEvent.mouseLocation, in: screens()),
               here.id != screen?.id, here.frame.contains(NSEvent.mouseLocation) else {
             otherScreenTicks = 0
@@ -642,7 +660,7 @@ final class DockController: NSObject {
     /// The "–" while the pointer is on the pill (not the orb, not the voice bar, not while dragging), at the end away
     /// from the edge the pill is kept against; the side is chosen as it appears, so it doesn't hop under the pointer.
     private func updateMinimizeSlot() {
-        let wanted = visible && overPill && !ui.minimized && !voiceActive && !(press?.moved ?? false)
+        let wanted = visible && overPill && !ui.minimized && !voiceActive && !noteActive && !(press?.moved ?? false)
         let slot: HorizontalEdge?
         if !wanted {
             slot = nil
@@ -722,6 +740,7 @@ final class DockController: NSObject {
     private func openList() {
         let list = listWindow()
         store.loadTargets()
+        store.morning.listOpened()
         if enabled, case .offline = store.connection { store.retryNow() }
         if let row = ui.expandedRow { store.watched = row }
         if listSize != .zero { revealList() } else { list.orderOut(nil) }  // shown once it has measured itself
@@ -802,7 +821,7 @@ final class DockController: NSObject {
         updateZoomKeys()
         if ui.pillHover != onPill { ui.pillHover = onPill }
         updateMinimizeSlot()
-        if !voiceActive { send(.pointer(overPill: onPill, overPanel: onList)) }
+        if !voiceActive && !noteActive { send(.pointer(overPill: onPill, overPanel: onList)) }
     }
 
     /// ⌘+ / ⌘− / ⌘0 size the dock while the pointer is on it, whichever app has the keys: Carbon hot keys (no
@@ -881,10 +900,10 @@ final class DockController: NSObject {
             }
             // A click on the voice bar gives it the keys, so Esc ends the conversation (without bringing SamRabbit
             // forward). The bar never takes them by itself: Esc stays with the app Samin is in (a terminal's Esc
-            // interrupts Claude Code).
-            if voiceActive && !window.isKeyWindow { window.makeKey() }
+            // interrupts Claude Code). The same for a voice note's bar (Esc throws the note away, ↩ sends it).
+            if (voiceActive || notes.isRecording) && !window.isKeyWindow { window.makeKey() }
             // The two ends of the pill resize it (drag up to grow); anywhere else (and anywhere on the orb) moves it.
-            let grip = !voiceActive && !ui.minimized && (point.x < 12 || point.x > window.frame.width - 12)
+            let grip = !voiceActive && !noteActive && !ui.minimized && (point.x < 12 || point.x > window.frame.width - 12)
             let rest = restFrame == .zero ? window.frame : restFrame
             press = Press(start: NSEvent.mouseLocation, frame: rest, grip: grip, leftGrip: point.x < 12, zoom: zoom)
             return true
@@ -938,6 +957,8 @@ final class DockController: NSObject {
             } else if event.clickCount >= 2 {
                 send(.escape)
                 AppModel.shared.openMainWindow()
+            } else if noteActive {
+                // The note's bar: its buttons do the work; a click elsewhere on it does nothing.
             } else if ui.minimized && !voiceActive {
                 // A click on the orb opens it into the pill (pointing at it opens the list, as on the pill).
                 setMinimized(false)
@@ -956,7 +977,7 @@ final class DockController: NSObject {
             return true
         case .mouseMoved:
             let point = local(event, in: window)
-            if !voiceActive && !ui.minimized && !onControl(point) && (point.x < 12 || point.x > window.frame.width - 12) {
+            if !voiceActive && !noteActive && !ui.minimized && !onControl(point) && (point.x < 12 || point.x > window.frame.width - 12) {
                 NSCursor.resizeUpDown.set()
             } else {
                 NSCursor.arrow.set()
@@ -965,6 +986,10 @@ final class DockController: NSObject {
         case .keyDown:
             if event.keyCode == 53 && voiceActive {
                 voice.end()
+                return true
+            }
+            if notes.isRecording && (event.keyCode == 53 || event.keyCode == 36 || event.keyCode == 76) {
+                if event.keyCode == 53 { notes.cancel() } else { notes.send() }
                 return true
             }
             return false
@@ -1058,6 +1083,32 @@ final class DockController: NSObject {
             send(.voiceStarted)
         } else if let pill, pill.isKeyWindow {
             // Give the keys back to the app Samin was in.
+            pill.orderOut(nil)
+            if visible { pill.orderFrontRegardless() }
+        }
+        updateMinimizeSlot()
+        refresh()
+    }
+
+    // MARK: voice notes
+
+    /// The pill's note button and the dock's menu: start a note, or send the one recording. Started from the dock, its
+    /// bar takes the keys (Esc throws it away, ↩ sends it) without bringing SamRabbit forward.
+    func toggleNote() {
+        notes.toggle(source: "dock")
+        if notes.isRecording {
+            send(.voiceStarted)
+            pill?.makeKey()
+        }
+    }
+
+    private func noteChanged(active: Bool) {
+        guard active != noteActive else { return }
+        noteActive = active
+        if active {
+            // Like a conversation: the list closes, the bar shows through every hide.
+            send(.voiceStarted)
+        } else if let pill, pill.isKeyWindow, !voiceActive {
             pill.orderOut(nil)
             if visible { pill.orderFrontRegardless() }
         }
@@ -1240,6 +1291,9 @@ final class DockController: NSObject {
         menu.addItem(.separator())
         menu.addItem(DockMenuItem(voice.state == .idle || voice.isShowingError ? "Talk to SamRabbit" : "End Conversation",
                                   shortcut: shortcuts.working(.talk)) { [weak self] in self?.toggleVoice() })
+        menu.addItem(DockMenuItem(notes.isRecording ? "Send Voice Note" : "Voice Note", shortcut: shortcuts.working(.voiceNote)) { [weak self] in
+            self?.toggleNote()
+        })
         menu.addItem(DockMenuItem("New Task", shortcut: shortcuts.working(.compose)) { [weak self] in
             self?.summon(focusCompose: true)
         })

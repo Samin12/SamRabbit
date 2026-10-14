@@ -212,6 +212,86 @@
 .quick-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; color: var(--orb-pale); background: rgba(26, 115, 242, 0.2); box-shadow: inset 0 0 0 1px rgba(110, 168, 255, 0.25); }
 .quick:first-child .quick-icon { color: #fff; background: var(--accent-fill); box-shadow: 0 3px 10px rgba(26, 115, 242, 0.4); }
 
+/* The voice note quick action (CONTRACTS-WAVE8 §D1): red while a note records (a press sends it). */
+.quick.note-quick.recording { background: rgba(255, 92, 88, 0.16); box-shadow: inset 0 0 0 1px rgba(255, 120, 115, 0.35); }
+.quick.note-quick.recording .quick-icon { color: #fff; background: #ff5c58; box-shadow: 0 0 0 4px rgba(255, 92, 88, 0.18); animation: pulse 1.6s ease-out infinite; }
+.quick.note-quick.recording span:last-child { font-variant-numeric: tabular-nums; }
+.quick:disabled { opacity: 0.6; }
+/* A voice note in Tasks: what the bridge suggested ("Start as task"), or Try again for one that failed. */
+.capsule.accent { color: #fff; background: var(--accent-fill); box-shadow: 0 4px 14px rgba(26, 115, 242, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.22); }
+.capsule.accent:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent-fill); }
+
+/* The morning brief (CONTRACTS-WAVE8 §D2): at the top of Home until noon. Sun-warm accents; the verbs are the buttons. */
+.card.morning {
+  padding: 14px 14px 14px;
+  background:
+    radial-gradient(520px 200px at 0% 0%, rgba(255, 196, 92, 0.11), transparent 70%),
+    var(--card);
+}
+.morning-head { padding-bottom: 4px; }
+.morning-sun { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; color: #ffd28a; background: rgba(255, 196, 92, 0.14); box-shadow: inset 0 0 0 1px rgba(255, 196, 92, 0.22); }
+.morning-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.card.morning .count.on { background: linear-gradient(180deg, #ffc45c, #f0a43a); color: #2a1a00; }
+.morning-headline { margin: 2px 6px 12px; font: 600 15px/1.35 var(--font-display); color: var(--ink); letter-spacing: -0.005em; }
+.morning-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.morning-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.morning-col.side { gap: 14px; padding-left: 14px; border-left: 1px solid var(--line); }
+.morning-foot { display: flex; align-items: center; gap: 6px; padding: 4px 6px 0; font-size: 11.5px; color: var(--faint); }
+.brief-label { padding: 0 6px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
+.brief-rows { display: flex; flex-direction: column; gap: 8px; }
+.brief-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.brief-row {
+  display: flex; gap: 11px; padding: 11px 12px 11px 11px; border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px rgba(255, 196, 92, 0.13);
+}
+.brief-row.conflict { box-shadow: inset 0 0 0 1px rgba(255, 99, 99, 0.24); }
+.brief-row.handled { background: rgba(255, 255, 255, 0.02); box-shadow: inset 0 0 0 1px rgba(190, 210, 255, 0.07); }
+.brief-row.handled .brief-title { color: var(--muted); }
+.brief-glyph { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: #ffd28a; background: rgba(255, 196, 92, 0.13); }
+.brief-glyph.small { width: 24px; height: 24px; border-radius: 7px; }
+.brief-row.conflict .brief-glyph, .brief-line.kind-conflict .brief-glyph { color: #ff9a96; background: rgba(255, 99, 99, 0.15); }
+.brief-line.kind-agent .brief-glyph { color: var(--orb-pale); background: rgba(26, 115, 242, 0.18); }
+.brief-line.kind-fyi .brief-glyph { color: var(--muted); background: rgba(255, 255, 255, 0.06); }
+.brief-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.brief-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.brief-title { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 650; color: var(--ink); line-height: 1.3; }
+.brief-tag { flex: none; padding: 1px 6px; border-radius: 6px; font-size: 10.5px; font-weight: 600; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-2); }
+.brief-why { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.brief-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.brief-spacer { flex: 1; }
+.chip-btn.brief-verb { height: 28px; padding: 0 12px; }
+.chip-btn.brief-verb .spinner { width: 12px; height: 12px; }
+.chip-btn.small { height: 26px; padding: 0 10px; font-size: 12px; }
+.brief-icon {
+  flex: none; display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 50%; cursor: default;
+  background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-2);
+}
+.brief-icon:hover:not(:disabled) { color: var(--ink); background: rgba(255, 255, 255, 0.08); }
+.brief-icon:disabled { opacity: 0.4; }
+.brief-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--green); }
+.brief-events { display: flex; flex-direction: column; }
+.brief-event { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; column-gap: 8px; align-items: baseline; padding: 6px 6px; border-radius: 9px; }
+.brief-event + .brief-event { box-shadow: inset 0 1px 0 var(--line); border-radius: 0; }
+.brief-event-time { font-size: 12.5px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.brief-event.now .brief-event-time { color: var(--orb-pale); }
+.brief-event-title { font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brief-event-why { grid-column: 2 / 4; font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A meeting with its link: "Join" at the row's end (and the clash before it, when there is one). */
+.brief-event.joinable { grid-template-columns: 72px minmax(0, 1fr) auto auto; }
+.brief-event.joinable .brief-event-why { grid-column: 2 / -1; }
+.brief-event .brief-join { align-self: center; gap: 4px; }
+.brief-clash { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #ff9a96; padding: 1px 6px; border-radius: 6px; background: rgba(255, 99, 99, 0.14); }
+.brief-line { display: flex; align-items: center; gap: 9px; padding: 6px 6px; border-radius: 10px; }
+.brief-line:hover { background: rgba(255, 255, 255, 0.035); }
+.brief-line { align-items: flex-start; }
+.brief-line .brief-glyph, .brief-line .chip-btn, .brief-line .brief-icon { margin-top: 1px; }
+.brief-line .brief-title { font-size: 13px; font-weight: 600; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.brief-line .brief-why { font-size: 12px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.brief-line .brief-icon { width: 24px; height: 24px; }
+/* "Make task" asks first: the task's exact words. */
+.task-words { margin: 10px 0 8px; padding: 9px 11px; border-radius: 10px; font-size: 13px; line-height: 1.45; color: var(--ink); background: rgba(0, 0, 0, 0.28); box-shadow: inset 0 0 0 1px rgba(190, 210, 255, 0.1); user-select: text; -webkit-user-select: text; }
+.popover-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
 .home-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 .home-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .card { border-radius: var(--card-r); background: var(--card); box-shadow: var(--card-shadow); padding: 12px 12px 12px; min-width: 0; }
@@ -703,6 +783,8 @@
   .tasks-head .tool-btn { width: 30px; padding: 0; justify-content: center; }
   .tasks-head .tool-btn span { display: none; }
   .home-grid { grid-template-columns: minmax(0, 1fr); }
+  .morning-grid { grid-template-columns: minmax(0, 1fr); }
+  .morning-col.side { padding-left: 0; border-left: 0; padding-top: 12px; border-top: 1px solid var(--line); }
   .fake-chrome .nav-head::before { left: 12px; transform: scale(0.8); transform-origin: left center; }
 }
 @media (max-width: 860px) {

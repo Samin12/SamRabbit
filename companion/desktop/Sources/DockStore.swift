@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -54,6 +55,10 @@ final class DockStore: ObservableObject {
     var onAnnounce: (([DockItem]) -> Void)?
     /// `open` answered `how: "desktop"`: show that conversation in the main window.
     var onOpenConversation: ((String) -> Void)?
+    /// The morning brief (CONTRACTS-WAVE8 §D2): the list's Morning section before noon. Its changes redraw the list.
+    let morning: DockBriefingStore
+    private var morningChanges: AnyCancellable?
+
     /// The row that is expanded: its messages are kept fresh as the inbox changes.
     var watched: String? {
         didSet { if let watched, watched != oldValue { loadDetail(watched) } }
@@ -87,12 +92,15 @@ final class DockStore: ObservableObject {
 
     init() {
         live = true
+        morning = DockBriefingStore()
+        forwardMorning()
     }
 
     /// A store that never touches the network: the snapshot renderer's fixtures.
     init(fixture inbox: DockInbox, details: [String: DockItemDetail], targets: DockTargets?, now: Date,
-         connection: Connection = .online) {
+         connection: Connection = .online, brief: DockBrief? = nil) {
         live = false
+        morning = DockBriefingStore(fixture: brief)
         self.inbox = inbox
         self.details = details
         self.targets = targets
@@ -100,6 +108,11 @@ final class DockStore: ObservableObject {
         self.connection = connection
         if let targets { choice = targets.resolve(DockTargets.Choice()) }
         rebuild()
+        forwardMorning()
+    }
+
+    private func forwardMorning() {
+        morningChanges = morning.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     /// The snapshot renderer: rows dismissed (or failing to be) as they would be live.
@@ -148,6 +161,7 @@ final class DockStore: ObservableObject {
     func start() {
         guard live, pollTask == nil else { return }
         pollTask = Task { [weak self] in await self?.pollLoop() }
+        morning.start()
         clock?.invalidate()
         clock = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tickClock() }
@@ -157,6 +171,7 @@ final class DockStore: ObservableObject {
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        morning.stop()
         clock?.invalidate()
         clock = nil
     }
@@ -378,6 +393,17 @@ final class DockStore: ObservableObject {
 
     func markSeen(_ item: DockItem) {
         perform(item, "seen", optimistic: item.markedSeen) { await DockAPI.seen(item.id) }
+    }
+
+    /// A voice note's button (DockItem.noteAct): the bridge does its suggestion, or tries a failed note again. The row
+    /// leaves "Needs you" at once; the bridge takes it out of the inbox once it has done it.
+    func actOnNote(_ item: DockItem) {
+        guard let act = item.noteAct else { return }
+        var optimistic = item
+        optimistic.unread = false
+        optimistic.status = act.action == nil ? .working : .idle
+        optimistic.statusLabel = act.action == nil ? "Trying again…" : "\(act.title)…"
+        perform(item, "act", optimistic: optimistic) { await DockAPI.act(item.id, action: act.action) }
     }
 
     func open(_ item: DockItem) {

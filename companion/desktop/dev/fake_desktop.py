@@ -65,8 +65,11 @@ def at(day: datetime, clock: str) -> datetime:
 
 
 class FakeDesktop:
-    def __init__(self, conversations: Optional[Callable[[], List[Dict[str, Any]]]] = None) -> None:
+    def __init__(self, conversations: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+                 extras: Optional[Callable[[], Dict[str, Any]]] = None) -> None:
         self.conversations = conversations or (lambda: [])
+        # More of the summary from the server's other fakes (the morning brief, voice notes).
+        self.extras = extras or (lambda: {})
         self.lock = threading.Lock()
         self.reset()
 
@@ -94,7 +97,8 @@ class FakeDesktop:
 
     @staticmethod
     def handles(path: str) -> bool:
-        return (path.startswith("/v1/desktop/") and not path.startswith(("/v1/desktop/inbox", "/v1/desktop/assistant/"))) \
+        return (path.startswith("/v1/desktop/") and not path.startswith(("/v1/desktop/inbox", "/v1/desktop/assistant/",
+                                                                           "/v1/desktop/capture", "/v1/desktop/briefing"))) \
             or path == "/v1/assistant/chatgpt/status" or path == "/dev/desktop" or path.startswith("/dev/desktop/")
 
     # ------------------------------------------------------------------ fixtures
@@ -267,6 +271,7 @@ class FakeDesktop:
                           "model": "gpt-realtime-2.1" if connected else "claude-haiku-5-5",
                           "chatgpt": {"connected": connected}},
             "devices": devices,
+            **self.extras(),
         }
 
     def agenda(self, query: Dict[str, List[str]]) -> Dict[str, Any]:

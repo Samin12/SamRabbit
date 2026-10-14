@@ -69,6 +69,13 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// A voice note that waited for the bridge has gone, and what the bridge did with it (a note recorded just now says
+    /// so on the dock's bar instead).
+    func voiceNote(title: String, body: String) {
+        post(id: "note-\(UUID().uuidString)", title: title.isEmpty ? "Voice note sent" : title, subtitle: "Voice note",
+             body: body.isEmpty ? "It went to your Mac’s bridge." : clip(body, 160), conversationId: "", kind: "voice_note")
+    }
+
     /// An Agent Dock item started needing Samin (DockAttention decides: once per need, never repeated).
     func inboxItem(id: String, title: String, subtitle: String, body: String) {
         post(id: "inbox-\(id)", title: title, subtitle: clip(subtitle, 80), body: clip(body, 160), conversationId: "",

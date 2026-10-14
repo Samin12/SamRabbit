@@ -7,7 +7,9 @@ import WebKit
 /// page's Talk button with the mouse (a real down and up, as a finger does: not a script's click): the request goes
 /// through the WKScriptMessageHandler bridge to MacVoice (fixture microphone, the reply rendered silently into memory),
 /// whose state comes back into the page's live transcript, which is drawn too; then the voice panel's End button is
-/// pressed while the reply streams. `window-smoke.json` lists what the bridge received and pushed. It refuses the real
+/// pressed while the reply streams; then Home's Voice note button is pressed (the fixture microphone says the next file,
+/// which goes to the fake's capture route, and the page's button follows the note). `window-smoke.json` lists what the
+/// bridge received and pushed. It refuses the real
 /// bridge (port 3780 or a server that doesn't answer `/dev/inbox/fake`) and a real microphone.
 @MainActor
 enum MainWindowSnapshots {
@@ -93,14 +95,37 @@ enum MainWindowSnapshots {
             if !ended { problems.append("the conversation didn't end from the page (state \(voice.state))") }
             await pause(1.0)
             await shoot("window-talk-ended")
+            // A voice note from Home's button (CONTRACTS-WAVE8 §D1): the bridge → VoiceNotes (the fixture microphone
+            // says the next file) → the fake's /v1/desktop/capture → what it did, back on the page's button.
+            let notes = VoiceNotes.shared
+            await evaluate("SamRabbitApp.show('home')")
+            // The ended conversation's panel lingers while the pointer is on it, and the press above left WebKit's
+            // pointer there (no exit ever comes): close it with its ×, as Samin would, and draw the note without it.
+            await press(".voice-panel .voice-btn[aria-label=\"Close\"]")
+            await pause(0.6)
+            if await evaluate("Boolean(document.querySelector('.voice-panel:not(.closing)'))") as? Bool == true {
+                problems.append("the ended conversation's panel didn't close")
+            }
+            await press(".quick.note-quick")
+            if !(await waitFor(5) { notes.isRecording }) { problems.append("the note didn't start from the page") }
+            await pause(2.5)
+            await shoot("window-note-recording")
+            let noteLabel = await evaluate("document.querySelector('.quick.note-quick').innerText") as? String ?? ""
+            if !noteLabel.hasPrefix("Send note") { problems.append("the page's note button said “\(noteLabel)” while recording") }
+            if !(await waitFor(30) { notes.snapshot.phase == .sent && notes.snapshot.line == "Added to your journal" }) {
+                problems.append("the note never came back as sent (\(notes.snapshot.phase): \(notes.snapshot.line))")
+            }
+            await pause(0.8)
+            await shoot("window-note-sent")
             let received = controller.bridge.received
-            for expected in ["ready", "voice.start", "voice.end"] where !received.contains(expected) {
+            for expected in ["ready", "voice.start", "voice.end", "note.toggle"] where !received.contains(expected) {
                 problems.append("the bridge never received \(expected)")
             }
             if !transcript.contains("calendar") { problems.append("the page's transcript doesn't show what was heard") }
             let report: [String: Any] = [
                 "received": received, "voicePushes": controller.bridge.voicePushes, "shots": shots,
-                "transcript": transcript, "talkButtonWhileSpeaking": talkLabel, "problems": problems,
+                "transcript": transcript, "talkButtonWhileSpeaking": talkLabel, "noteButtonWhileRecording": noteLabel,
+                "note": notes.snapshot.json, "problems": problems,
             ]
             if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
                 try? data.write(to: directory.appendingPathComponent("window-smoke.json"))

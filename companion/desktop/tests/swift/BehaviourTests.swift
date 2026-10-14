@@ -6,6 +6,7 @@ enum VisibilityTests {
         ("stepsAsideInTheMainWindow", stepsAsideInTheMainWindow),
         ("hidesForAWhileAndComesBack", hidesForAWhileAndComesBack),
         ("offIsForGoodButVoiceAndSummonShow", offIsForGoodButVoiceAndSummonShow),
+        ("aVoiceNoteShowsThroughEveryHide", aVoiceNoteShowsThroughEveryHide),
         ("hideChoices", hideChoices),
     ]
 
@@ -44,6 +45,17 @@ enum VisibilityTests {
         expectEqual(DockVisibility.reason(input), .summoned, "⌃⌥K shows it even over the main window")
         input = DockVisibilityInput(hiddenUntil: Date().addingTimeInterval(600), summoned: true)
         expect(DockVisibility.shows(input))
+    }
+
+    static func aVoiceNoteShowsThroughEveryHide() throws {
+        // Its bar is the live microphone: off, put away, hidden for a while, or stepping aside for the main window.
+        var input = DockVisibilityInput(enabled: false, hiddenUntil: Date().addingTimeInterval(600), appActive: true,
+                                        mainWindowVisible: true, mainWindowKey: true, userHidden: true)
+        expect(!DockVisibility.shows(input))
+        input.noteActive = true
+        expectEqual(DockVisibility.reason(input), .note)
+        input.voiceActive = true
+        expectEqual(DockVisibility.reason(input), .voice, "a conversation's bar comes first (they never run together)")
     }
 
     static func hideChoices() throws {

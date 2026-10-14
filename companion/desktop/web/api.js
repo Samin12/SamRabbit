@@ -166,6 +166,18 @@ export const desktop = {
   chatgpt() {
     return getJSON('/v1/assistant/chatgpt/status');
   },
+  /** The morning brief (CONTRACTS-WAVE8 §A3): `after` + `wait` long-poll for a newer revision. */
+  briefing({ after, wait, signal } = {}) {
+    return getJSON(`/v1/desktop/briefing${query({ after, wait })}`, { signal });
+  },
+  /** Builds it again (at most once in 5 minutes on the bridge). */
+  briefingRefresh() {
+    return requestJSON('POST', '/v1/desktop/briefing/refresh', {});
+  },
+  /** {action: draft_reply|make_task|block_time|remind|done|dismiss|open, at?}: a draft is only ever a draft. */
+  briefingAct(id, body) {
+    return requestJSON('POST', `/v1/desktop/briefing/items/${encodeURIComponent(String(id ?? ''))}/act`, body);
+  },
 };
 
 const INBOX_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
