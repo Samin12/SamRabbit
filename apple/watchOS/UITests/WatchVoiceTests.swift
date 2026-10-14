@@ -39,17 +39,18 @@ final class WatchVoiceTests: XCTestCase {
         return app
     }
 
-    /// `POST 127.0.0.1:3799/__fake/<name>` (the fake bridge's loopback helpers), waiting for the answer.
+    /// `POST <fake bridge>/__fake/<name>` (the fake bridge's loopback helpers; `TEST_RUNNER_SAMRABBIT_FAKE_BRIDGE`,
+    /// default 127.0.0.1:3799), waiting for the answer.
     @discardableResult
     nonisolated private func fake(_ name: String, _ body: [String: Any] = [:]) -> [String: Any] {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:3799/__fake/\(name)")!)
+        var request = URLRequest(url: URL(string: "http://\(WatchConversationTests.bridge)/__fake/\(name)")!)
         request.httpMethod = "POST"
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return exchange(request)
     }
 
     nonisolated private func fakeGet(_ name: String) -> [String: Any] {
-        exchange(URLRequest(url: URL(string: "http://127.0.0.1:3799/__fake/\(name)")!))
+        exchange(URLRequest(url: URL(string: "http://\(WatchConversationTests.bridge)/__fake/\(name)")!))
     }
 
     nonisolated private func exchange(_ request: URLRequest) -> [String: Any] {

@@ -7,14 +7,18 @@ struct HomeView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 26) {
                 OrbHeader()
                 if !model.isPaired {
                     PairPromptCard()
                 } else {
+                    // The morning brief first, until noon (what needs you, the verb is the button).
+                    MorningSection()
                     TalkButton()
                     QuickActionsGrid()
+                    VoiceNotesLine()
                     if let error = model.lastError, model.summary != nil { OfflineBanner(error: error) }
                     NeedsYouSection()
                     WorkingSection()
@@ -28,6 +32,16 @@ struct HomeView: View {
         }
         .scrollIndicators(.hidden)
         .refreshable { await model.refresh(quiet: false) }
+        .onChange(of: model.briefFocus, initial: true) { _, focus in
+            // `samrabbit://brief[/<id>]` (the brief's widgets): the brief, or that item.
+            guard let focus else { return }
+            Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                withAnimation(.smooth) { proxy.scrollTo(focus, anchor: .top) }
+                model.briefFocus = nil
+            }
+        }
+        }
         .samScreen()
         .toolbar(.hidden, for: .navigationBar)
     }
@@ -48,18 +62,20 @@ struct OrbHeader: View {
                 ConnectionPill()
             }
             .padding(.top, 6)
-            // Tap the orb to talk, like the big button under it.
+            // Tap the orb to talk, like the big button under it. Smaller in the morning, so the brief under it
+            // starts on the first screen.
+            let morning = model.showsBriefing
             Button {
                 model.startTalk()
             } label: {
                 OrbView(mood: model.orbMood)
-                    .frame(width: 136, height: 136)
+                    .frame(width: morning ? 92 : 136, height: morning ? 92 : 136)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .disabled(!model.isPaired)
-            .padding(.top, 26)
-            .padding(.bottom, 36)
+            .padding(.top, morning ? 14 : 26)
+            .padding(.bottom, morning ? 22 : 36)
             .accessibilityLabel(headline)
             .accessibilityHint(model.isPaired ? "Talk to SamRabbit" : "")
             Text(headline)
@@ -152,6 +168,77 @@ struct OfflineBanner: View {
     }
 }
 
+/// Voice notes, in one line under the quick actions when there is something to say: notes still on this iPhone
+/// (the Mac out of reach; tap: send them now), a note the Mac couldn't do (tap: Tasks), or what the latest note
+/// became in the last 15 minutes (`summary.captures`; tap: Tasks, where saved notes wait).
+struct VoiceNotesLine: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let line {
+            Button {
+                if model.capture.waiting > 0 {
+                    model.capture.tryNow() // every waiting note goes now, its pause or not
+                } else {
+                    model.tab = .tasks
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: line.symbol)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(line.tint)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(line.tint.opacity(0.15)))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(line.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(SamTheme.ink)
+                        Text(line.detail).font(.system(size: 12.5)).foregroundStyle(SamTheme.muted).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(SamTheme.faint)
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .glassCard(radius: 18, tint: line.tint, padding: 12)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("home-voice-notes")
+        }
+    }
+
+    private struct Line {
+        var symbol: String
+        var tint: Color
+        var title: String
+        var detail: String
+    }
+
+    private var line: Line? {
+        let waiting = model.capture.waiting
+        if waiting > 0 {
+            return Line(symbol: "tray.and.arrow.up.fill", tint: SamTheme.amber,
+                        title: Formatting.count(waiting, "voice note", "voice notes") + " waiting for your Mac",
+                        detail: "They go by themselves once it answers. Tap to try now.")
+        }
+        guard let part = model.summary?.captures else { return nil }
+        // The failed notes Tasks shows (and can dismiss); the summary's week-long count only until the inbox is read.
+        let failed = model.inbox?.failedNotes ?? part.failed
+        if failed > 0 {
+            return Line(symbol: "exclamationmark.triangle.fill", tint: SamTheme.red,
+                        title: failed == 1 ? "A voice note didn't go through" : "\(failed) voice notes didn't go through",
+                        detail: "Your Mac kept what you said. See it in Tasks.")
+        }
+        guard let latest = part.latest() else { return nil }
+        let outcome = CaptureOutcome(kind: latest.kind ?? .unknown)
+        let title = latest.state.settled ? (latest.kind == nil ? "Voice note" : outcome.headline) : "Voice note on its way"
+        let said = latest.say.map { CaptureNotice.repeats($0, title) ? nil : $0 } ?? nil
+        return Line(symbol: latest.state.settled ? outcome.symbol : "waveform.badge.mic",
+                    tint: latest.kind == .failed || latest.kind == .nothing ? SamTheme.amber : SamTheme.mint,
+                    title: title,
+                    detail: [said ?? latest.title, Formatting.ago(latest.at)].compactMap { $0 }.joined(separator: " · "))
+    }
+}
+
 struct PairPromptCard: View {
     @Environment(AppModel.self) private var model
 
@@ -212,7 +299,6 @@ struct TalkButton: View {
 
 struct QuickActionsGrid: View {
     @Environment(AppModel.self) private var model
-    @State private var blocking = false
 
     var body: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
@@ -220,13 +306,10 @@ struct QuickActionsGrid: View {
             LazyVGrid(columns: columns, spacing: 12) {
                 QuickActionTile(title: "Ask", symbol: "sparkles", tint: SamTheme.orb2) { model.sheet = .ask(prefill: "") }
                 QuickActionTile(title: "Note", symbol: "square.and.pencil", tint: SamTheme.mint) { model.sheet = .note(prefill: "") }
-                QuickActionTile(title: blocking ? "Blocking…" : "Block 30m", symbol: "calendar.badge.clock", tint: SamTheme.violet) {
-                    guard !blocking else { return }
-                    blocking = true
-                    Task {
-                        await model.block(minutes: 30)
-                        blocking = false
-                    }
+                // A one-shot voice note: records at once, the Mac files it (Block lives on in Siri and the Up Next
+                // widget).
+                QuickActionTile(title: "Voice note", symbol: "waveform.badge.mic", tint: SamTheme.red) {
+                    model.startVoiceNote(record: true)
                 }
                 QuickActionTile(title: "Screenshot", symbol: "camera.viewfinder", tint: SamTheme.cyan) {
                     model.pendingScreenshot = true

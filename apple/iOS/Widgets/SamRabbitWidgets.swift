@@ -18,6 +18,11 @@ struct SamRabbitWidgetsBundle: WidgetBundle {
         TalkControl()
         TalkLockWidget()
         TalkLiveActivity()
+        VoiceNoteControl()
+        VoiceNoteLockWidget()
+        CaptureLiveActivity()
+        BriefingWidget()
+        BriefingLockWidget()
     }
 }
 
@@ -59,10 +64,16 @@ struct SummaryProvider: TimelineProvider {
         let account = BridgeAccount.shared
         guard account.pairing != nil, let client = account.client() else { return cached() }
         do {
-            // The inbox beside the summary, so the counts and rows cover every agent on the Mac.
+            // The inbox beside the summary, so the counts and rows cover every agent on the Mac; and today's brief,
+            // for its widget (only when the summary says there is one).
             async let inbox = BridgeError.capture { try await client.inbox(timeout: 8) }
             let fresh = try await client.summary(timeout: 8)
-            let summary = fresh.with(inbox: await inbox, kept: SummaryCache.shared.load()?.summary.inbox)
+            let kept = SummaryCache.shared.load()?.summary
+            var summary = fresh.with(inbox: await inbox, kept: kept?.inbox)
+            if fresh.briefing?.current() == true {
+                let brief = await BridgeError.capture { try await client.briefing(timeout: 8) }
+                summary = summary.with(briefing: brief, kept: kept?.briefing)
+            }
             SummaryCache.shared.save(summary)
             return WidgetSnapshot(date: .now, summary: summary, fetchedAt: .now, paired: true)
         } catch {
@@ -116,7 +127,7 @@ struct DashboardWidget: Widget {
                 .widgetURL(URL(string: "samrabbit://tab/home"))
         }
         .configurationDisplayName("Dashboard")
-        .description("R1, your next event, tasks and the latest conversation, with Ask and Block.")
+        .description("R1, your next event, tasks and the latest conversation, with Talk and Voice note.")
         .supportedFamilies([.systemLarge])
     }
 }
@@ -163,21 +174,23 @@ struct LockFace: View {
 
 // MARK: - Control Center, Lock Screen and Action Button
 
-/// "Ask SamRabbit": opens the app at Ask with dictation listening. iOS offers every control for the
-/// Action Button too (Settings > Action Button > Controls > SamRabbit). Pressing and holding the
-/// button shows "Hold to Ask SamRabbit".
+/// The control Samin set his iPhone's Action Button to in Wave 4 ("Ask SamRabbit"). It keeps its kind, so every
+/// place it was put (the Action Button, Control Center, the Lock Screen) keeps working, but it now opens the live
+/// call: SamRabbit straight into a conversation (`TalkToSamRabbitIntent`; pressed again while talking: send now or
+/// interrupt). `TalkControl` is the same under its own name; Ask with dictation is still the "Ask by Voice"
+/// shortcut.
 struct AskControl: ControlWidget {
     static let kind = "com.samrabbit.control.ask"
 
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: Self.kind) {
-            ControlWidgetButton(action: OpenAskIntent()) {
-                Label("Ask SamRabbit", systemImage: "sparkles")
-                    .controlWidgetActionHint("Ask SamRabbit")
+            ControlWidgetButton(action: TalkToSamRabbitIntent()) {
+                Label("Talk (SamRabbit)", systemImage: "waveform")
+                    .controlWidgetActionHint("Talk to SamRabbit")
             }
         }
-        .displayName("Ask SamRabbit")
-        .description("Opens SamRabbit with the microphone on, ready for a new task.")
+        .displayName("Talk (SamRabbit)")
+        .description("Opens SamRabbit in a live voice conversation.")
     }
 }
 

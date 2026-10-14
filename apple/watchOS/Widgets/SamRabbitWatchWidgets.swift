@@ -8,6 +8,9 @@ struct SamRabbitWatchWidgetsBundle: WidgetBundle {
         NeedsYouComplication()
         NextUpComplication()
         WatchAskControl()
+        WatchVoiceNoteControl()
+        VoiceNoteComplication()
+        BriefComplication()
     }
 }
 
@@ -29,6 +32,24 @@ struct WatchAskControl: ControlWidget {
         }
         .displayName("Ask SamRabbit")
         .description("Opens SamRabbit on your watch, ready to talk.")
+    }
+}
+
+/// "Voice Note" on the watch: opens the watch app straight into the recorder, recording; it sends itself when he
+/// pauses (or Stop, or a double tap), and says nothing back. On Apple Watch Ultra: Settings > Action Button >
+/// Action > Control, then Control > SamRabbit > Voice Note. Pressed again while it records: stop and send.
+struct WatchVoiceNoteControl: ControlWidget {
+    static let kind = "com.samrabbit.watch.control.note"
+
+    var body: some ControlWidgetConfiguration {
+        StaticControlConfiguration(kind: Self.kind) {
+            ControlWidgetButton(action: OpenSamRabbitWatchIntent(.note)) {
+                Label("Voice Note", systemImage: "waveform.badge.mic")
+                    .controlWidgetActionHint("Record a voice note")
+            }
+        }
+        .displayName("Voice Note")
+        .description("Records a quick voice note on your watch; your Mac files it.")
     }
 }
 
@@ -113,6 +134,57 @@ struct NextUpComplication: Widget {
         .configurationDisplayName("Next Up")
         .description("Your next event and how many tasks are working.")
         .supportedFamilies([.accessoryRectangular])
+    }
+}
+
+/// A tap that records a voice note (the recorder opens recording).
+struct VoiceNoteComplication: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "com.samrabbit.watch.note", provider: ComplicationProvider()) { _ in
+            VoiceNoteFace()
+                .containerBackground(for: .widget) { Color.clear }
+                .widgetURL(URL(string: PendingRoute.capture))
+        }
+        .configurationDisplayName("Voice Note")
+        .description("Tap to record a voice note; your Mac files it.")
+        .supportedFamilies([.accessoryCircular, .accessoryCorner])
+    }
+}
+
+/// Today's morning brief: how much of it waits for you, and its headline. Opens the Brief page.
+struct BriefComplication: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "com.samrabbit.watch.brief", provider: ComplicationProvider()) { entry in
+            BriefFace(snapshot: entry.snapshot)
+                .containerBackground(for: .widget) { Color.clear }
+                .widgetURL(URL(string: "samrabbit://tab/brief"))
+        }
+        .configurationDisplayName("Morning Brief")
+        .description("How much of today's brief waits for you, and its headline.")
+        .supportedFamilies([.accessoryRectangular, .accessoryInline])
+    }
+}
+
+struct VoiceNoteFace: View {
+    @Environment(\.widgetFamily) private var family
+
+    var body: some View {
+        switch family {
+        case .accessoryCorner: VoiceNoteCornerComplication()
+        default: VoiceNoteCircularComplication()
+        }
+    }
+}
+
+struct BriefFace: View {
+    @Environment(\.widgetFamily) private var family
+    let snapshot: ComplicationSnapshot
+
+    var body: some View {
+        switch family {
+        case .accessoryInline: BriefInlineComplication(snapshot: snapshot)
+        default: BriefRectangularComplication(snapshot: snapshot)
+        }
     }
 }
 

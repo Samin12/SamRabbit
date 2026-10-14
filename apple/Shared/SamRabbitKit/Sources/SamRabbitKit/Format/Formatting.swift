@@ -40,6 +40,34 @@ public enum Formatting {
         return date.formatted(.dateTime.hour().minute())
     }
 
+    /// A text's 24-hour clock times in the device's own style, as `time` shows every other time: the Mac writes the
+    /// brief's headline with `%H:%M` ("first at 16:00"), which becomes "first at 4:00 PM" (and stays "16:00" where
+    /// the clock is 24-hour). Only two-digit hours, what `%H` writes; a time already marked AM/PM or inside a longer
+    /// number stays as it is, so running it again changes nothing.
+    public static func clockTimes(in text: String, locale: Locale = .current) -> String {
+        guard text.contains(":"),
+              let regex = try? NSRegularExpression(pattern: #"(?<![\d:.])([01]\d|2[0-3]):([0-5]\d)(?![\d:])(?!\s?[AaPp]\.?\s?[Mm]\b)"#)
+        else { return text }
+        let source = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: source.length))
+        guard !matches.isEmpty else { return text }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        let style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: .gmt).hour().minute()
+        var result = ""
+        var last = 0
+        for match in matches {
+            guard let hour = Int(source.substring(with: match.range(at: 1))),
+                  let minute = Int(source.substring(with: match.range(at: 2))),
+                  let moment = calendar.date(from: DateComponents(year: 2001, month: 1, day: 1, hour: hour, minute: minute))
+            else { continue }
+            result += source.substring(with: NSRange(location: last, length: match.range.location - last))
+            result += moment.formatted(style)
+            last = match.range.location + match.range.length
+        }
+        return result + source.substring(from: last)
+    }
+
     /// "2:00 – 2:30 PM", "Tomorrow 9:00 AM".
     public static func range(_ start: Date?, _ end: Date?, allDay: Bool = false, now: Date = .now) -> String {
         if allDay { return "All day" }

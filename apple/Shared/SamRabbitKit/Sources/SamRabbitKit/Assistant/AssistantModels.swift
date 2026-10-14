@@ -7,7 +7,7 @@ import Foundation
 //
 //   POST /v1/mobile/assistant/turn       (Accept: application/x-samrabbit-stream -> frames, else buffered JSON)
 //   POST /v1/mobile/assistant/session    {conversationId?} -> {conversationId, brain, ready}   (warm-up)
-//   POST /v1/mobile/assistant/cancel     {conversationId}  (stops the reply: the stream ends with done{interrupted})
+//   POST /v1/mobile/assistant/cancel     {conversationId, turnId}  (stops that reply: the stream ends with done{interrupted})
 //   POST /v1/mobile/assistant/end        {conversationId}
 //   GET  /v1/mobile/assistant/announcements?conversationId=&since= -> {items:[...], cursor}
 //

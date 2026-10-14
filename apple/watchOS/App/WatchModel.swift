@@ -7,12 +7,14 @@ import WatchKit
 /// The watch's pages, top to bottom (Digital Crown or swipe). `status` is the conversation with SamRabbit, the
 /// main screen.
 enum WatchPage: String, CaseIterable, Hashable {
-    case status, needs, working, upnext, quick
+    /// `brief`: today's morning brief, shown only while there is one.
+    case status, brief, needs, working, upnext, quick
 
     /// `samrabbit://tab/<name>` (also accepts the iPhone's names).
     init?(link: String) {
         switch link.lowercased() {
         case "status", "home", "ask", "talk", "assistant": self = .status
+        case "brief", "briefing", "morning": self = .brief
         case "needs", "needsyou", "tasks": self = .needs
         case "working": self = .working
         case "upnext", "next", "calendar": self = .upnext
@@ -55,8 +57,12 @@ final class WatchModel {
     /// Thread ids (and "block" / "note" / "ask") with a request in flight.
     var busy: Set<String> = []
     var banner: WatchBanner?
-    /// The voice capture on screen (the only way the watch takes text).
+    /// The voice capture on screen (the only way the watch takes text, and the voice note).
     var voice: VoiceRequest?
+    /// Today's morning brief (`/v1/mobile/briefing`), when the Mac has one: the Brief page.
+    var briefing: Briefing?
+    /// Voice notes on their way to the Mac (the outbox and its routes).
+    let captures: WatchCaptures
     /// The conversation with SamRabbit (the main screen).
     let conversation: ConversationEngine
 
@@ -80,6 +86,7 @@ final class WatchModel {
         account = BridgeAccount(relay: link)
         actions = SamRabbitActions(account: account)
         conversation = ConversationEngine(account: account)
+        captures = WatchCaptures(account: account, link: link)
         paired = account.isPaired
         if let cached = SummaryCache.shared.load() {
             summary = cached.summary
@@ -178,13 +185,51 @@ final class WatchModel {
         case .failure(let error):
             if error != .cancelled { tasksError = error }
         }
+        // The brief: read again only when the summary says it changed.
+        if let part = summary?.briefing, part.current() {
+            if briefing?.revision != part.revision || briefing?.date != part.date,
+               let fresh = try? await client.briefing(timeout: 8) {
+                briefing = fresh
+            }
+        } else if summary != nil {
+            briefing = nil
+        }
         route = link.lastRoute
+    }
+
+    /// The Brief page is there: today's brief, with something left in it.
+    var showsBrief: Bool {
+        guard let briefing, briefing.available, briefing.isToday() else { return false }
+        return !briefing.shown.isEmpty
+    }
+
+    /// Done / Dismiss / Remind / Draft reply / Make task on a brief item (a draft is saved in Gmail, never sent: open
+    /// it on the iPhone to send it). Make task goes only from its confirm page, with the words shown there (`text`:
+    /// `BriefingItem.taskPrompt`), never the Mac's own unseen ones.
+    func briefAct(_ item: BriefingItem, _ kind: BriefingAction.Kind, text: String? = nil) async {
+        let action = item.actions.first { $0.kind == kind } ?? BriefingAction(kind)
+        let options: [String: JSONValue] = text.map { ["text": .string($0)] } ?? [:]
+        await run(item.id) {
+            let result = try await self.actions.briefingAct(item.id, action: action.action, options: options,
+                                                            state: kind == .done ? .done : kind == .dismiss ? .dismissed : nil)
+            let state = result.state ?? (kind == .done ? .done : kind == .dismiss ? .dismissed : item.state)
+            self.briefing = self.briefing?.with(item.id, state: state, draftUrl: kind == .draftReply ? result.url : nil,
+                                                line: result.message)
+            switch kind {
+            case .draftReply: self.show(.success, "Draft saved", detail: "In Gmail. Open it on your iPhone to send.")
+            case .makeTask: self.show(.success, "Task started", detail: result.message)
+            case .blockTime: self.show(.success, "Time blocked", detail: result.message)
+            case .remind: self.show(.success, "Reminder set", detail: result.message)
+            default: break
+            }
+        }
     }
 
     /// Refreshes every 30 seconds while the app is in front, after following a route an intent left.
     func start() {
         active = true
         consumePendingRoute()
+        captures.flush(now: true) // notes that waited for the Mac go now, their pause or not
         loop?.cancel()
         loop = Task { [weak self] in
             while !Task.isCancelled {
@@ -287,6 +332,17 @@ final class WatchModel {
         voice = VoiceRequest(purpose: purpose, after: after)
     }
 
+    /// A voice note (the Voice Note control on the Ultra's Action Button, the complication, Siri "SamRabbit note"):
+    /// the recorder, recording at once; it sends itself when he pauses. The control again while it records: stop and
+    /// send (the second press).
+    func voiceNote() {
+        if let request = voice, request.purpose == .capture {
+            NotificationCenter.default.post(name: .samRabbitStopVoiceNote, object: nil)
+            return
+        }
+        listen(.capture)
+    }
+
     /// The Watch Ultra's Action Button (the "Ask SamRabbit" control) and Siri ("Ask SamRabbit"): the conversation,
     /// on the main page. Pressed again while talking it acts like a tap on the orb (send now, or interrupt).
     func askByVoice() async {
@@ -308,6 +364,7 @@ final class WatchModel {
         case .reply(let thread): await reply(thread, text, sent: sent)
         case .answer(let thread, let pending): await answer(thread, text, pending: pending, sent: sent)
         case .note: await note(text, sent: sent)
+        case .capture: false // a voice note sends its recording itself (`VoiceCapture.deliver`)
         }
     }
 
@@ -472,6 +529,13 @@ final class WatchModel {
             talk()
             return
         }
+        if target == "capture" || target == "voicenote" {
+            // The Voice Note control (its intent) and the Voice note complication: record at once. The watch has no
+            // way in for links from elsewhere (no browser, no messages app hands it ours), so its own complication's
+            // link may start the microphone; the intent's route is the app's own either way.
+            voiceNote()
+            return
+        }
         let first = url.path.split(separator: "/").first.map(String.init) ?? ""
         switch target {
         case "tab": if let page = WatchPage(link: first) { self.page = page }
@@ -480,6 +544,11 @@ final class WatchModel {
         default: if let page = WatchPage(link: target) { self.page = page }
         }
     }
+}
+
+extension Notification.Name {
+    /// The Voice Note control again while a note records: stop and send it.
+    static let samRabbitStopVoiceNote = Notification.Name("samrabbit.stopVoiceNote")
 }
 
 extension BridgeError {

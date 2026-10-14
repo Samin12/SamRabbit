@@ -54,11 +54,16 @@ public struct MobileSummary: Codable, Sendable, Equatable {
     /// Every agent on the Mac (T3, Claude Code, Codex): the inbox's counts and first items, added by the iPhone from
     /// `/v1/mobile/inbox` (`with(inbox:)`); `nil`: T3's counts only (the watch, an older bridge).
     public var inbox: InboxOverview?
+    /// Today's morning brief: whether there is one, its headline and count (the bridge), and its first open items
+    /// (added by the iPhone, `with(briefing:)`); `nil`: a bridge without the brief.
+    public var briefing: BriefingOverview?
+    /// Voice notes that arrived lately and failed (`nil`: a bridge without them).
+    public var captures: CapturesOverview?
 
     public init(generatedAt: Date? = nil, mac: MacStatus = .init(), r1: R1Status = .init(), t3: TaskOverview = .init(),
                 calendar: CalendarOverview = .init(), latestConversation: ConversationPreview? = nil,
                 journal: JournalStatus = .init(), transcribe: TranscribeStatus? = nil, assistant: AssistantStatus? = nil,
-                inbox: InboxOverview? = nil) {
+                inbox: InboxOverview? = nil, briefing: BriefingOverview? = nil, captures: CapturesOverview? = nil) {
         self.generatedAt = generatedAt
         self.mac = mac
         self.r1 = r1
@@ -69,6 +74,8 @@ public struct MobileSummary: Codable, Sendable, Equatable {
         self.transcribe = transcribe
         self.assistant = assistant
         self.inbox = inbox
+        self.briefing = briefing
+        self.captures = captures
     }
 
     public init(from decoder: Decoder) throws {
@@ -84,6 +91,8 @@ public struct MobileSummary: Codable, Sendable, Equatable {
         transcribe = c.value(TranscribeStatus.self, "transcribe")
         assistant = c.value(AssistantStatus.self, "assistant")
         inbox = c.value(InboxOverview.self, "inbox")
+        briefing = c.value(BriefingOverview.self, "briefing")
+        captures = c.value(CapturesOverview.self, "captures")
     }
 
     /// The next event that has not ended yet.

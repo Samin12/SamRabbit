@@ -51,8 +51,8 @@ extension SamRabbitWatchApp {
     }
 }
 
-/// The five pages (Digital Crown / swipe): the conversation first, then Needs you, Working, Up next and Quick;
-/// or the "pair on your iPhone" screen.
+/// The pages (Digital Crown / swipe): the conversation first, then the morning brief (while there is one), Needs
+/// you, Working, Up next and Quick; or the "pair on your iPhone" screen.
 struct WatchRootView: View {
     @Environment(WatchModel.self) private var model
 
@@ -63,6 +63,8 @@ struct WatchRootView: View {
                 NavigationStack {
                     TabView(selection: $model.page) {
                         AssistantPage().tag(WatchPage.status)
+                        // The morning brief, while there is one today.
+                        if model.showsBrief { BriefPage().tag(WatchPage.brief) }
                         NeedsYouPage().tag(WatchPage.needs)
                         WorkingPage().tag(WatchPage.working)
                         UpNextPage().tag(WatchPage.upnext)

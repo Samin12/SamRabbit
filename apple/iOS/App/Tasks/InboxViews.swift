@@ -25,7 +25,7 @@ struct InboxCard: View {
                     .foregroundStyle(SamTheme.muted)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                StatusChip(item.status)
+                if item.source == .note { NoteChip(item: item) } else { StatusChip(item.status) }
             }
             Button {
                 model.openItem(item)
@@ -58,7 +58,10 @@ struct InboxCard: View {
     }
 
     @ViewBuilder private var actions: some View {
-        if let thread = item.taskThread, item.status == .needsApproval || item.status == .needsInput {
+        if item.source == .note {
+            // A voice note the Mac saved: its suggestion, Keep as note, Dismiss.
+            NoteActions(item: item)
+        } else if let thread = item.taskThread, item.status == .needsApproval || item.status == .needsInput {
             // T3: Approve / Deny and the answers inline, exactly as before.
             PendingActionBar(thread: thread, compact: true)
         } else if let hold = item.heldOnMac {
@@ -261,7 +264,7 @@ struct SourceFilterBar: View {
     let items: [InboxItem]
 
     var body: some View {
-        let present = [InboxSource.t3, .claude, .codex].filter { source in items.contains { $0.source == source } }
+        let present = [InboxSource.t3, .claude, .codex, .note].filter { source in items.contains { $0.source == source } }
         ScrollView(.horizontal, showsIndicators: false) {
             GlassEffectContainer(spacing: 6) {
                 HStack(spacing: 6) {
@@ -306,13 +309,17 @@ struct SourceFilterBar: View {
 
 /// The words the rows and cards use.
 enum InboxText {
-    /// "Website · 5 min ago" (the glyph names the source, and for a T3 thread the model family in its corner).
+    /// "Website · 5 min ago" (the glyph names the source, and for a T3 thread the model family in its corner); a
+    /// voice note: "Voice note · 5 min ago".
     static func meta(_ item: InboxItem) -> String {
-        [item.project, Formatting.ago(item.updatedAt)].compactMap { $0 }.joined(separator: " · ")
+        [item.source == .note ? item.source.label : item.project, Formatting.ago(item.updatedAt)].compactMap { $0 }
+            .joined(separator: " · ")
     }
 
-    /// What a card shows in its box: the request it waits on, else its last words.
+    /// What a card shows in its box: the request it waits on, else its last words (a voice note: what it suggests,
+    /// its words being the title).
     static func body(_ item: InboxItem) -> String? {
+        if item.source == .note { return NoteText.body(item) }
         if let detail = InboxPending.detail(item.pending) { return detail }
         if let pending = item.taskThread?.pending?.text, !pending.isEmpty { return pending }
         return item.summary.isEmpty ? nil : item.summary

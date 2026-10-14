@@ -11,7 +11,7 @@ struct WidgetGalleryView: View {
         let snapshot = WidgetGallery.snapshot(model.summary, fetchedAt: model.summaryDate, paired: model.isPaired)
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
-                Text("Long-press the Home Screen, tap Edit > Add Widget and search for SamRabbit. Lock Screen widgets and the Ask SamRabbit control are in the same places.")
+                Text("Long-press the Home Screen, tap Edit > Add Widget and search for SamRabbit. Lock Screen widgets and the Talk and Voice Note controls are in the same places.")
                     .font(.system(size: 14))
                     .foregroundStyle(SamTheme.muted)
                 ForEach(WidgetGallery.items) { item in
@@ -57,11 +57,21 @@ enum WidgetGallery {
         Item(id: "large-dashboard", title: "Large · Dashboard", size: large) { snapshot in
             AnyView(WidgetChrome(standalone: true, size: large) { DashboardLargeFace(snapshot: snapshot) })
         },
+        Item(id: "medium-brief", title: "Medium · Morning brief", size: medium) { snapshot in
+            AnyView(WidgetChrome(standalone: true, size: medium) { BriefingMediumFace(snapshot: snapshot) })
+        },
+        Item(id: "large-brief", title: "Large · Morning brief", size: large) { snapshot in
+            AnyView(WidgetChrome(standalone: true, size: large) { BriefingLargeFace(snapshot: snapshot) })
+        },
         Item(id: "lock-screen", title: "Lock Screen", size: CGSize(width: 364, height: 210)) { snapshot in
             AnyView(LockScreenPreview(snapshot: snapshot))
         },
         Item(id: "talk", title: "Talk · Lock Screen and Live Activity", size: CGSize(width: 364, height: 330)) { _ in
             AnyView(TalkPreview())
+        },
+        Item(id: "voice-note", title: "Voice note · Lock Screen and Live Activity",
+             size: CGSize(width: 364, height: 470)) { snapshot in
+            AnyView(VoiceNotePreview(snapshot: snapshot))
         },
     ]
 
@@ -124,6 +134,54 @@ struct TalkPreview: View {
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(hex: 0x0B1324).opacity(0.88)))
                 .padding(.horizontal, 10)
             TalkIslandExpandedFace(state: TalkActivityState(phase: .listening, line: "“What's next on my calendar?”"))
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+                .background(RoundedRectangle(cornerRadius: 40, style: .continuous).fill(.black))
+                .padding(.horizontal, 10)
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 20)
+        .frame(width: 364)
+        .background {
+            LinearGradient(colors: [Color(hex: 0x1C2F5C), Color(hex: 0x35246B), Color(hex: 0x0D1730)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .environment(\.colorScheme, .dark)
+    }
+}
+
+/// The Voice note Lock Screen buttons and the brief's rectangle, then the voice note's Live Activity while it records
+/// and once it went, and the Dynamic Island expanded, with made-up values.
+struct VoiceNotePreview: View {
+    let snapshot: WidgetSnapshot
+    private let started = Date.now.addingTimeInterval(-12)
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 14) {
+                // Outside a widget `AccessoryWidgetBackground` draws nothing: the Lock Screen's backing, drawn here.
+                VoiceNoteCircularFace()
+                    .frame(width: 66, height: 66)
+                    .background(Circle().fill(.white.opacity(0.12)))
+                BriefingRectangularFace(snapshot: snapshot)
+                    .frame(width: 168, height: 66)
+                    .padding(.horizontal, 6)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.08)))
+            }
+            VoiceNoteRectangularFace()
+                .frame(width: 168, height: 66)
+                .padding(.horizontal, 6)
+                .background(RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.08)))
+            CaptureActivityLockFace(state: CaptureActivityState(phase: .recording), startedAt: started)
+                .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(hex: 0x120A12).opacity(0.88)))
+                .padding(.horizontal, 10)
+            CaptureActivityLockFace(state: CaptureActivityState(phase: .sent, line: "Added to your journal",
+                                                                stoppedAt: started.addingTimeInterval(9)),
+                                    startedAt: started)
+                .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(hex: 0x120A12).opacity(0.88)))
+                .padding(.horizontal, 10)
+            CaptureIslandExpandedFace(state: CaptureActivityState(phase: .recording), startedAt: started)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 14)
                 .background(RoundedRectangle(cornerRadius: 40, style: .continuous).fill(.black))

@@ -4,6 +4,7 @@ import SwiftUI
 
 @main
 struct SamRabbitApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -17,12 +18,16 @@ struct SamRabbitApp: App {
             RootView()
                 .environment(model)
                 .onOpenURL { model.handle(url: $0) }
-                .task { RenderHarness.runIfRequested() }
+                .task {
+                    RenderHarness.runIfRequested()
+                    await Self.runIntentIfRequested()
+                }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
                 model.talk.sceneActive()
+                model.capture.sceneActive()
                 model.consumePendingRoute()
                 model.startRefreshing()
             case .background:
@@ -38,6 +43,34 @@ struct SamRabbitApp: App {
     }
 }
 
+extension SamRabbitApp {
+    /// Debug builds: `-SamRabbitIntent note|talk` runs that intent at launch, as the Action Button would (the
+    /// simulator's button can't be set from a test); `-SamRabbitIntentAgain <seconds>[,<seconds>…]` runs it once more
+    /// after each pause (the second press: a voice note stops and sends; a third while it sends: the next note).
+    @MainActor
+    static func runIntentIfRequested() async {
+        #if DEBUG
+        let defaults = UserDefaults.standard
+        guard let name = defaults.string(forKey: "SamRabbitIntent") else { return }
+        func run() async {
+            switch name {
+            case "note": _ = try? await VoiceNoteIntent().perform()
+            case "talk": _ = try? await TalkToSamRabbitIntent().perform()
+            default: break
+            }
+        }
+        try? await Task.sleep(for: .seconds(1)) // the pairing and the first refresh first
+        await run()
+        let pauses = (defaults.string(forKey: "SamRabbitIntentAgain") ?? "").split(separator: ",")
+            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 > 0 }
+        for pause in pauses {
+            try? await Task.sleep(for: .seconds(pause))
+            await run()
+        }
+        #endif
+    }
+}
+
 /// The five tabs and everything presented over them.
 struct RootView: View {
     @Environment(AppModel.self) private var model
@@ -45,6 +78,7 @@ struct RootView: View {
     var body: some View {
         @Bindable var model = model
         @Bindable var talk = model.talk
+        @Bindable var capture = model.capture
         TabView(selection: $model.tab) {
             Tab("Home", systemImage: "circle.hexagongrid.fill", value: AppTab.home) {
                 NavigationStack(path: $model.homePath) { HomeView().destinations() }
@@ -76,9 +110,28 @@ struct RootView: View {
                 .environment(model)
                 .overlay(alignment: .top) { ToastOverlay().environment(model) }
         }
+        .background {
+            // The voice-note recorder: its own cover (Talk's is on the tab view), so either can come up.
+            Color.clear.fullScreenCover(isPresented: $capture.presented) {
+                CaptureView().environment(model)
+            }
+        }
         .overlay(alignment: .top) { ToastOverlay() }
         // Above the tab bar (and the Talk accessory while a conversation runs).
         .overlay(alignment: .bottom) { UndoSnackbar().padding(.bottom, talk.active && !talk.presented ? 124 : 70) }
+    }
+}
+
+/// What a SwiftUI app can't do on its own: hand iOS's background-upload events to the voice notes' uploader.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == CaptureUploader.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        nonisolated(unsafe) let done = completionHandler
+        CaptureUploader.shared.handleEvents { done() }
     }
 }
 
@@ -107,6 +160,7 @@ struct SheetView: View {
         case .pair(let link): PairConfirmSheet(link: link)
         case .manualPair: NavigationStack { ManualPairView() }
         case .confirm(let action): LinkConfirmSheet(action: action)
+        case .briefTask(let item, let verb): BriefTaskSheet(item: item, verb: verb)
         }
     }
 }

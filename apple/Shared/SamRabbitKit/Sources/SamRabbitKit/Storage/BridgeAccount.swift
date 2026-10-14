@@ -218,6 +218,31 @@ public final class BridgeAccount: Sendable {
     }
 }
 
+extension BridgeAccount {
+    /// Uploads a voice note the Apple Watch sent through this iPhone (in chunks, `VoiceRelay` with
+    /// `VoiceRelay.capturePurpose`) to `POST /v1/mobile/capture`, with the watch's own token and the note's own id,
+    /// time and source (the bridge keeps one note per id, so a later direct try from the watch changes nothing).
+    /// Status 0: the Mac could not be reached either.
+    public func performRelayedCapture(_ upload: VoiceRelay.Upload, timeout: TimeInterval = 30) async -> WatchRelay.Response {
+        guard isPaired else { return .refusal(409, "not_paired", "Pair the iPhone first.") }
+        guard let client = watchClient() else {
+            return .refusal(401, "unauthorized", "Reconnect your watch through the iPhone.")
+        }
+        guard let meta = upload.capture, CaptureMeta.isValid(meta.captureId) else {
+            return .refusal(400, "invalid_capture_id", "That voice note has no id.")
+        }
+        guard upload.data.count <= CaptureFormat.maxBytes else {
+            return .refusal(413, "body_too_large", "That note is too long.")
+        }
+        do {
+            let (status, body) = try await client.rawCapture(audio: upload.data, meta: meta, timeout: timeout)
+            return WatchRelay.Response(status: status, body: body)
+        } catch {
+            return WatchRelay.Response(status: 0, body: Data())
+        }
+    }
+}
+
 /// Pairs with a bridge: tries each address of the link in order (LAN, then Tailscale) and keeps
 /// the one that answered first in the saved pairing.
 public enum Pairer {

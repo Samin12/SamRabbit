@@ -522,7 +522,7 @@ public final class BridgeClient: Sendable {
 
     /// One upload over the addresses: a recording is safe to send again, so timeouts move on to the next
     /// address too.
-    private func upload(_ request: BridgeRequest, _ source: UploadBody) async throws -> (Data, HTTPURLResponse) {
+    func upload(_ request: BridgeRequest, _ source: UploadBody) async throws -> (Data, HTTPURLResponse) {
         try await withHosts(request, idempotent: true) { urlRequest in
             let (data, response) = switch source {
             case .file(let url): try await self.session.upload(for: urlRequest, fromFile: url)
@@ -597,7 +597,7 @@ public final class BridgeClient: Sendable {
 
     /// A relayed answer; status 0 means the relay could not reach the bridge either (and is not
     /// tried another way: the request may have got through).
-    private static func relayed(_ answer: (status: Int, body: Data)) throws -> (status: Int, body: Data) {
+    static func relayed(_ answer: (status: Int, body: Data)) throws -> (status: Int, body: Data) {
         guard answer.status != 0 else { throw BridgeError.unreachable("relay") }
         return answer
     }

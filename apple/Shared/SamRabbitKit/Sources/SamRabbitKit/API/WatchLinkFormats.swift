@@ -56,9 +56,12 @@ public enum WatchRelay {
     static let prefix = "/v1/mobile/"
     /// The first path segments under `/v1/mobile/` the phone relays (an allowlist).
     static let relayable: Set<String> = ["summary", "t3", "calendar", "journal", "conversations", "blobs", "ui", "mac",
-                                         "assistant"]
+                                         "assistant", "briefing", "capture", "captures"]
     /// Relayed another way (`TurnRelay`: the answer streams back in pieces), never as one request.
     static let notRelayed: Set<String> = ["assistant/turn"]
+    /// The iPhone's own refusals (`Response.refusal`) that say nothing about the Mac: the phone isn't paired, doesn't
+    /// pass that on, or passes on too much right now.
+    static let phoneRefusalCodes: Set<String> = ["not_paired", "relay_forbidden", "relay_busy", "transcribe_busy"]
 
     public struct Request: Codable, Sendable, Equatable {
         public var method: String
@@ -84,8 +87,9 @@ public enum WatchRelay {
         }
 
         /// Only what the watch itself does may be relayed: the dashboard, tasks, the calendar, the
-        /// journal, conversations, generated UIs, the Mac and the assistant's warm-up, cancel, end and
-        /// announcements. Never pairing, unpairing or device management (`pair`, `pairing/start`, `unpair`,
+        /// journal, conversations, generated UIs, the Mac, the assistant's warm-up, cancel, end and
+        /// announcements, the morning brief and what became of a voice note (the note itself goes in chunks,
+        /// `relayCapture`). Never pairing, unpairing or device management (`pair`, `pairing/start`, `unpair`,
         /// `devices`, `devices/child`), never the SSE stream, and never an assistant turn this way (it streams:
         /// `TurnRelay`).
         public var allowed: Bool {
@@ -182,6 +186,11 @@ public protocol BridgeRelay: Sendable {
     /// pieces as it streams in, `TurnRelay`). Returns the bridge's status, content type and body (status 0: the
     /// relay could not reach the bridge). Throws `BridgeError.unreachable` when the relay itself is down.
     func relayAssistantTurn(_ turn: AssistantTurnRequest) async throws -> AssistantTurnResponse
+    /// A voice note for `POST /v1/mobile/capture` through the relay (the watch: in chunks to the iPhone, which
+    /// uploads it with the watch's own token and the note's headers). Returns the bridge's status and body (status
+    /// 0: the relay could not reach the bridge either). Throws `BridgeError.unreachable` when the relay itself is
+    /// down.
+    func relayCapture(_ audio: Data, meta: CaptureMeta) async throws -> (status: Int, body: Data)
 }
 
 extension BridgeRelay {
@@ -194,5 +203,10 @@ extension BridgeRelay {
     public func relayTranscription(_ audio: Data, contentType: String,
                                    language: String?) async throws -> (status: Int, body: Data) {
         throw BridgeError.unreachable("no voice relay")
+    }
+
+    /// A relay that can't carry voice notes.
+    public func relayCapture(_ audio: Data, meta: CaptureMeta) async throws -> (status: Int, body: Data) {
+        throw BridgeError.unreachable("no capture relay")
     }
 }

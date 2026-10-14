@@ -10,6 +10,14 @@ struct SamRabbitShortcuts: AppShortcutsProvider {
             "Start a conversation with \(.applicationName)",
             "\(.applicationName) voice",
         ], shortTitle: "Talk", systemImageName: "waveform")
+        // A one-shot voice note: the recorder, recording at once; the Mac files it. The Action Button's Shortcut
+        // picker and Back Tap (Settings > Accessibility > Touch) list it too.
+        AppShortcut(intent: VoiceNoteIntent(), phrases: [
+            "\(.applicationName) note",
+            "Take a note with \(.applicationName)",
+            "Voice note in \(.applicationName)",
+            "Record a \(.applicationName) note",
+        ], shortTitle: "Voice Note", systemImageName: "waveform.badge.mic")
         AppShortcut(intent: AskSamRabbitIntent(), phrases: [
             "Ask \(.applicationName)",
             "Ask \(.applicationName) to do something",

@@ -29,18 +29,22 @@ public enum VoiceRelay {
         public var contentType: String
         public var language: String?
         /// What the recording is for: nil (or `transcribe`) for words back, `turn` for an assistant turn
-        /// (`TurnRelay`: the phone keeps it until the turn starts).
+        /// (`TurnRelay`: the phone keeps it until the turn starts), `capture` for a voice note (`capture` says
+        /// which, and when it was said).
         public var purpose: String?
+        /// A voice note's id, time and source (`purpose == VoiceRelay.capturePurpose`).
+        public var capture: CaptureMeta?
         public var data: Data
 
         public init(id: String, seq: Int, of: Int, contentType: String, language: String?, purpose: String? = nil,
-                    data: Data) {
+                    capture: CaptureMeta? = nil, data: Data) {
             self.id = id
             self.seq = seq
             self.of = of
             self.contentType = contentType
             self.language = language
             self.purpose = purpose
+            self.capture = capture
             self.data = data
         }
 
@@ -51,13 +55,15 @@ public enum VoiceRelay {
             var contentType: String
             var language: String?
             var purpose: String?
+            var capture: CaptureMeta?
         }
 
         public var isLast: Bool { seq == of - 1 }
 
         /// The `sendMessage` dictionary: a small JSON header and the raw bytes.
         public var message: [String: Any] {
-            let header = Header(id: id, seq: seq, of: of, contentType: contentType, language: language, purpose: purpose)
+            let header = Header(id: id, seq: seq, of: of, contentType: contentType, language: language, purpose: purpose,
+                                capture: capture)
             guard let encoded = try? JSONEncoder().encode(header) else { return [:] }
             return [VoiceRelay.chunkKey: encoded, VoiceRelay.dataKey: data]
         }
@@ -67,20 +73,21 @@ public enum VoiceRelay {
                   let header = try? JSONDecoder().decode(Header.self, from: encoded),
                   let data = message[VoiceRelay.dataKey] as? Data else { return nil }
             self.init(id: header.id, seq: header.seq, of: header.of, contentType: header.contentType,
-                      language: header.language, purpose: header.purpose, data: data)
+                      language: header.language, purpose: header.purpose, capture: header.capture, data: data)
         }
     }
 
     /// Splits a recording into chunks of at most `chunkSize` bytes (one empty chunk for no data).
     public static func chunks(of data: Data, id: String = UUID().uuidString, contentType: String = VoiceFormat.contentType,
-                              language: String? = nil, purpose: String? = nil, size: Int = chunkSize) -> [Chunk] {
+                              language: String? = nil, purpose: String? = nil, capture: CaptureMeta? = nil,
+                              size: Int = chunkSize) -> [Chunk] {
         let size = max(1, size)
         let count = max(1, (data.count + size - 1) / size)
         return (0..<count).map { seq in
             let start = data.startIndex + seq * size
             let end = min(data.endIndex, start + size)
             return Chunk(id: id, seq: seq, of: count, contentType: contentType, language: language, purpose: purpose,
-                         data: Data(data[start..<end]))
+                         capture: capture, data: Data(data[start..<end]))
         }
     }
 
@@ -90,8 +97,13 @@ public enum VoiceRelay {
         public var contentType: String
         public var language: String?
         public var purpose: String?
+        /// A voice note's id, time and source (`purpose == VoiceRelay.capturePurpose`).
+        public var capture: CaptureMeta?
         public var data: Data
     }
+
+    /// The purpose of a voice note's chunks: the phone uploads it to `POST /v1/mobile/capture`.
+    public static let capturePurpose = "capture"
 
     /// The phone's side: collects chunks by recording id until every one arrived. Thread-safe.
     public final class Assembler: Sendable {
@@ -109,6 +121,7 @@ public enum VoiceRelay {
             var contentType: String
             var language: String?
             var purpose: String?
+            var capture: CaptureMeta?
             var parts: [Int: Data]
             var bytes: Int
             var touched: Date
@@ -126,8 +139,8 @@ public enum VoiceRelay {
             return open.withLock { open -> Outcome in
                 open = open.filter { now.timeIntervalSince($0.value.touched) < VoiceRelay.expiry }
                 var partial = open[chunk.id] ?? Partial(of: chunk.of, contentType: chunk.contentType,
-                                                        language: chunk.language, purpose: chunk.purpose, parts: [:],
-                                                        bytes: 0, touched: now)
+                                                        language: chunk.language, purpose: chunk.purpose,
+                                                        capture: chunk.capture, parts: [:], bytes: 0, touched: now)
                 guard partial.of == chunk.of, partial.contentType == chunk.contentType,
                       partial.language == chunk.language else {
                     open[chunk.id] = nil
@@ -151,7 +164,7 @@ public enum VoiceRelay {
                 var data = Data(capacity: partial.bytes)
                 for seq in 0..<partial.of { data.append(partial.parts[seq] ?? Data()) }
                 return .complete(Upload(id: chunk.id, contentType: partial.contentType, language: partial.language,
-                                        purpose: partial.purpose, data: data))
+                                        purpose: partial.purpose, capture: partial.capture, data: data))
             }
         }
 

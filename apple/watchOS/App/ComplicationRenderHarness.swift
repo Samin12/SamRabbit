@@ -23,6 +23,12 @@ enum ComplicationRenderHarness {
              AnyView(NextUpRectangularComplication(snapshot: snapshot))),
             ("complication-inline", CGSize(width: 186, height: 22),
              AnyView(StatusInlineComplication(snapshot: snapshot).font(.system(size: 14, weight: .medium)))),
+            ("complication-note-circular", CGSize(width: 50, height: 50), AnyView(VoiceNoteCircularComplication())),
+            ("complication-note-corner", CGSize(width: 50, height: 50), AnyView(VoiceNoteCornerComplication())),
+            ("complication-brief-rectangular", CGSize(width: 186, height: 66),
+             AnyView(BriefRectangularComplication(snapshot: snapshot))),
+            ("complication-brief-inline", CGSize(width: 186, height: 22),
+             AnyView(BriefInlineComplication(snapshot: snapshot).font(.system(size: 14, weight: .medium)))),
         ]
         for (name, size, face) in faces {
             let tile = face

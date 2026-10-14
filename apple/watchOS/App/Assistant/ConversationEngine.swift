@@ -246,7 +246,7 @@ final class ConversationEngine {
                 let earlier = cancelling
                 cancelling = Task {
                     await earlier?.value
-                    _ = try? await client.assistantCancel(conversationId: conversationId, timeout: 3)
+                    _ = try? await client.assistantCancel(conversationId: conversationId, turnId: turnId, timeout: 3)
                     task?.cancel()
                 }
             } else {

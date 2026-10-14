@@ -25,6 +25,11 @@ public enum PendingRoute {
     /// Button, the Talk control).
     public static let talk = "samrabbit://talk"
 
+    /// A voice note: the recorder, recording at once (the "Voice Note" intent: the Action Button, the Voice Note
+    /// control, the widgets' Voice note buttons, Siri). Only this route starts the microphone for a note; the same
+    /// link from outside the app opens the recorder waiting for a tap (`AppLink.capture`).
+    public static let capture = "samrabbit://capture"
+
     /// Leaves `url` for the app and tells it.
     public static func set(_ url: String, in defaults: UserDefaults, now: Date = .now) {
         defaults.set(["url": url, "at": now.timeIntervalSince1970], forKey: key)

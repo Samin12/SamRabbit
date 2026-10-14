@@ -23,6 +23,8 @@ enum AppSheet: Identifiable, Equatable {
     case manualPair
     /// A link asked for something that writes: what will happen, and a Confirm button.
     case confirm(LinkAction)
+    /// Make task on a brief item: the words the task starts with (written from an email), to read and edit first.
+    case briefTask(BriefingItem, BriefingAction)
 
     var id: String {
         switch self {
@@ -34,6 +36,7 @@ enum AppSheet: Identifiable, Equatable {
         case .pair: "pair"
         case .manualPair: "manualPair"
         case .confirm: "confirm"
+        case .briefTask: "briefTask"
         }
     }
 }
@@ -105,6 +108,16 @@ final class AppModel {
     /// Where a new task can go (`/inbox/targets`: projects, Claude / Codex and their models); nil until loaded or
     /// on an older bridge.
     var targets: InboxTargets?
+    /// Today's morning brief (`/v1/mobile/briefing`) when the Mac has one; Home shows it at the top until noon.
+    var briefing: Briefing?
+    /// The bridge has no brief (an older one: 404); the summary says so too (no `briefing` part).
+    var briefingMissing = false
+    /// Brief items with a tap on its way.
+    var busyBriefItems: Set<String> = []
+    /// A refresh of the brief asked for (the header's button) and not built yet.
+    var briefingRefreshing = false
+    /// An item a link asked for (`samrabbit://brief/<id>`): Home scrolls to the brief.
+    var briefFocus: String?
 
     var tab: AppTab = .home
     var homePath = NavigationPath()
@@ -133,11 +146,14 @@ final class AppModel {
     let liveActivities = LiveActivityController()
     /// The live conversation with SamRabbit (Talk).
     let talk: TalkModel
+    /// Voice notes: the recorder and the outbox (`CaptureModel`).
+    let capture: CaptureModel
 
     init(account: BridgeAccount = .shared) {
         self.account = account
         actions = SamRabbitActions(account: account)
         talk = TalkModel(account: account)
+        capture = CaptureModel(account: account)
         pairing = account.isPaired ? account.pairing : nil
         if let cached = SummaryCache.shared.load() {
             summary = cached.summary
@@ -153,6 +169,17 @@ final class AppModel {
             self?.lastError = .unauthorized
             self?.handleUnauthorized()
         }
+        // One microphone: a voice note ends a conversation and stops dictation before it records.
+        capture.willRecord = { [weak self] in
+            SpeechDictation.stopListening()
+            guard let self, self.talk.active else { return }
+            self.talk.end()
+        }
+        // A note the Mac saved shows in Tasks (and a task it started): refresh.
+        capture.onDelivered = { [weak self] _ in
+            Task { await self?.refresh() }
+        }
+        BackgroundNote.start = { [weak capture] in await capture?.startInBackground() ?? false }
         talk.engine.onTurnFinished = { [weak self] in
             // A turn may have started a task or answered one: refresh, at most every 10 s.
             guard let self, self.lastTurnRefresh.map({ -$0.timeIntervalSinceNow > 10 }) ?? true else { return }
@@ -230,7 +257,22 @@ final class AppModel {
         let (summaryResult, inboxResult) = await (summaryCall, inboxCall)
         switch summaryResult {
         case .success(let fresh):
-            summary = fresh.with(inbox: inboxResult, kept: summary?.inbox)
+            let kept = summary
+            var merged = fresh.with(inbox: inboxResult, kept: kept?.inbox)
+            // The brief, when the summary says there is one: read again only when it changed (its revision or its
+            // day); its first open items go into the widgets' copy either way.
+            if let part = fresh.briefing {
+                if let shown = briefing, shown.revision == part.revision, shown.date == part.date {
+                    merged = merged.with(briefing: .success(shown), kept: nil)
+                } else {
+                    let result = await BridgeError.capture { try await client.briefing() }
+                    apply(briefing: result)
+                    merged = merged.with(briefing: result, kept: kept?.briefing)
+                }
+            } else {
+                briefing = nil
+            }
+            summary = merged
             summaryDate = .now
             lastError = nil
             if let summary { SummaryCache.shared.publish(summary) } // reloads the widgets only when something changed
@@ -256,6 +298,148 @@ final class AppModel {
             // The Mac answered, its inbox didn't: T3's own list (what Tasks read before the inbox), the others'
             // last rows; only the task areas say so (no toast).
             await refreshThreadList(client, inboxError: error)
+        }
+    }
+
+    /// The brief as it loaded (whatever differs from the shown one replaces it), or none for an older bridge.
+    private func apply(briefing result: Result<Briefing, BridgeError>) {
+        switch result {
+        case .success(let fresh):
+            briefingMissing = false
+            if fresh != briefing {
+                withAnimation(.smooth) { briefing = fresh }
+            }
+            if fresh.status != .building { briefingRefreshing = false }
+        case .failure(let error) where error.isRouteMissing:
+            briefingMissing = true
+            briefing = nil
+        case .failure:
+            break // the last brief stays
+        }
+    }
+
+    /// Home shows the brief now: today's, before noon (`-SamRabbitBriefAllDay YES` lifts that in debug builds, for
+    /// the UI tests and screenshots), with something left in it.
+    var showsBriefing: Bool {
+        guard isPaired, let briefing else { return false }
+        return briefing.showsOnHome(allDay: Self.briefAllDay)
+    }
+
+    static var briefAllDay: Bool {
+        #if DEBUG
+        UserDefaults.standard.bool(forKey: "SamRabbitBriefAllDay")
+        #else
+        false
+        #endif
+    }
+
+    /// Make task on a brief item: its words first (`BriefTaskSheet`), editable; the task starts only on Start, with
+    /// exactly those words (`act(on:_:options:)` with `text`). They were written from an email, so an agent never runs
+    /// words he didn't see.
+    func confirmTask(_ item: BriefingItem, _ verb: BriefingAction) {
+        sheet = .briefTask(item, verb)
+    }
+
+    /// One of a brief item's verbs, by his tap. Draft reply makes a Gmail draft (never sent) and opens it; Make task
+    /// (after `confirmTask`) starts a T3 task with the words he saw; Block time and Remind me go on the calendar; Done
+    /// and Dismiss take it off; Open opens its Gmail thread (with the right account). The item changes at once; the
+    /// Mac's next brief confirms. False: the Mac didn't do it (said in a toast).
+    @discardableResult
+    func act(on item: BriefingItem, _ action: BriefingAction, options: [String: JSONValue] = [:]) async -> Bool {
+        if action.kind == .open, let url = action.url ?? item.openURL {
+            UIApplicationOpener.open(url)
+            return true
+        }
+        // An agent waiting (Agents): its item in Tasks, where it is approved or answered.
+        if action.kind == .open, let itemId = item.inboxItemId {
+            openInbox(itemId)
+            return true
+        }
+        guard !busyBriefItems.contains(item.id) else { return false }
+        busyBriefItems.insert(item.id)
+        defer { busyBriefItems.remove(item.id) }
+        do {
+            let fallback = Self.state(after: action.kind)
+            let result = try await actions.briefingAct(item.id, action: action.action, options: options, state: fallback)
+            let state = result.state ?? fallback ?? item.state
+            withAnimation(.smooth) {
+                briefing = briefing?.with(item.id, state: state, draftUrl: action.kind == .draftReply ? result.url : nil,
+                                          line: result.message)
+            }
+            switch action.kind {
+            case .draftReply:
+                Haptics.success()
+                show(.success, "Draft saved in Gmail", detail: "Nothing was sent: review it in Gmail, then send it.")
+                if let url = result.url { UIApplicationOpener.open(url) }
+            case .makeTask:
+                Haptics.success()
+                show(.success, "Task started", detail: result.message)
+            case .blockTime:
+                Haptics.success()
+                show(.success, "Time blocked", detail: result.message)
+            case .remind:
+                Haptics.success()
+                show(.success, "I'll bring it back", detail: result.message)
+            case .open:
+                if let url = result.url {
+                    UIApplicationOpener.open(url)
+                } else if let itemId = result.itemId {
+                    openInbox(itemId)
+                }
+            case .done, .dismiss, .agent, .other:
+                Haptics.tap()
+            }
+            if action.kind == .makeTask || action.kind == .blockTime { await refresh() } else { await reloadBriefing() }
+            return true
+        } catch {
+            fail(error)
+            await reloadBriefing()
+            return false
+        }
+    }
+
+    /// What an item becomes after a verb, when the Mac doesn't say.
+    static func state(after kind: BriefingAction.Kind) -> BriefingItem.State? {
+        switch kind {
+        case .draftReply: .drafted
+        case .makeTask: .tasked
+        case .blockTime: .blocked
+        case .remind: .snoozed
+        case .done: .done
+        case .dismiss: .dismissed
+        case .open, .agent, .other: nil
+        }
+    }
+
+    /// The brief again (after a tap), with the widgets' copy.
+    func reloadBriefing() async {
+        guard let client, !briefingMissing else { return }
+        let result = await BridgeError.capture { try await client.briefing() }
+        apply(briefing: result)
+        if let summary {
+            let merged = summary.with(briefing: result, kept: summary.briefing)
+            self.summary = merged
+            SummaryCache.shared.publish(merged)
+        }
+    }
+
+    /// Builds the brief again on the Mac now (the header's button; at most every five minutes there), then follows it
+    /// until the new one is in.
+    func refreshBriefing() async {
+        guard let client, !briefingRefreshing else { return }
+        briefingRefreshing = true
+        defer { briefingRefreshing = false }
+        do {
+            let before = briefing?.revision ?? 0
+            try await client.refreshBriefing()
+            for _ in 0..<6 {
+                let result = await BridgeError.capture { try await client.briefing(after: before, wait: 10) }
+                apply(briefing: result)
+                if let fresh = try? result.get(), fresh.revision > before, fresh.status != .building { break }
+            }
+            await reloadBriefing()
+        } catch {
+            fail(error)
         }
     }
 
@@ -455,6 +639,8 @@ final class AppModel {
         threadsLoaded = false
         tasksError = nil
         lastError = nil
+        briefing = nil
+        briefingMissing = false
         SamRabbitActions.reloadWidgets()
         await liveActivities.endAll()
     }
@@ -589,6 +775,22 @@ final class AppModel {
         tab = .tasks
         tasksPath = NavigationPath()
         tasksPath.append(ThreadRoute(threadId: threadId))
+    }
+
+    /// An inbox item by its id (`samrabbit://inbox/<id>`, a brief's agent): a T3 thread's own screen, a chat in Chats,
+    /// any other item's screen in Tasks.
+    func openInbox(_ id: String) {
+        tab = .tasks
+        tasksPath = NavigationPath()
+        if id.hasPrefix("t3:") {
+            tasksPath.append(ThreadRoute(threadId: String(id.dropFirst(3))))
+        } else if id.hasPrefix("chat:") {
+            tab = .chats
+            chatsPath = NavigationPath()
+            chatsPath.append(ConversationRoute(conversationId: String(id.dropFirst(5)), title: nil))
+        } else {
+            tasksPath.append(InboxRoute(itemId: id))
+        }
     }
 
     /// The Tasks tab with this item open: a T3 thread's own screen, a Claude Code or Codex session's, a chat in Chats.
@@ -815,7 +1017,11 @@ final class AppModel {
     func handle(url: URL, fromApp: Bool = false) {
         guard let link = AppLink(url: url, fromApp: fromApp) else { return }
         // Anywhere else in the app: Talk steps aside (the conversation goes on, over the tab bar), and a sheet
-        // waits for it to go.
+        // waits for it to go. A voice note handles Talk itself (it ends it: one microphone).
+        if case .capture(let record) = link {
+            startVoiceNote(record: record)
+            return
+        }
         let overTalk = link != .talk && talk.presented
         if overTalk { talk.minimize() }
         func present(_ next: AppSheet) { self.present(next, afterTalk: overTalk) }
@@ -843,18 +1049,11 @@ final class AppModel {
             tasksPath = NavigationPath()
             if let id { tasksPath.append(ThreadRoute(threadId: id)) }
         case .inbox(let id):
-            tab = .tasks
-            tasksPath = NavigationPath()
             if let id {
-                if id.hasPrefix("t3:") {
-                    tasksPath.append(ThreadRoute(threadId: String(id.dropFirst(3))))
-                } else if id.hasPrefix("chat:") {
-                    tab = .chats
-                    chatsPath = NavigationPath()
-                    chatsPath.append(ConversationRoute(conversationId: String(id.dropFirst(5)), title: nil))
-                } else {
-                    tasksPath.append(InboxRoute(itemId: id))
-                }
+                openInbox(id)
+            } else {
+                tab = .tasks
+                tasksPath = NavigationPath()
             }
         case .conversation(let id):
             tab = .chats
@@ -865,6 +1064,12 @@ final class AppModel {
             if screenshot { pendingScreenshot = true }
         case .tab(let name):
             if let value = AppTab(rawValue: name) { tab = value }
+        case .capture:
+            break // above
+        case .briefing(let itemId):
+            tab = .home
+            homePath = NavigationPath()
+            briefFocus = itemId ?? "brief"
         }
     }
 
@@ -897,11 +1102,21 @@ final class AppModel {
     }
 
     /// Opens Talk and starts a conversation (the Home button, `samrabbit://talk`, Siri, the Action Button, the
-    /// Talk control and Lock Screen widget). A sheet that is up (a composer, a confirmation) closes first.
+    /// Talk control and Lock Screen widget). A sheet that is up (a composer, a confirmation) closes first, and a voice
+    /// note that records is sent first (one microphone).
     func startTalk() {
         guard isPaired else {
             tab = .settings
             show(.info, "Pair with your Mac first", detail: "Then you can talk to SamRabbit from here.")
+            return
+        }
+        if capture.presented {
+            if capture.recording { capture.stop() }
+            capture.close()
+            Task {
+                try? await Task.sleep(for: .milliseconds(450)) // the recorder's dismissal first
+                talk.start()
+            }
             return
         }
         guard sheet != nil else {
@@ -912,6 +1127,29 @@ final class AppModel {
         Task {
             try? await Task.sleep(for: .milliseconds(450)) // the sheet's dismissal first
             talk.start()
+        }
+    }
+
+    /// Opens the voice-note recorder (the Voice Note intent: the Action Button, the control, the widgets' buttons,
+    /// Siri; Home's tile). `record`: it records at once (only the app's own intents and buttons; a link from outside
+    /// opens it waiting for a tap). The intent again while it records: stop and send. Talk or a sheet that is up goes
+    /// first (one microphone, one screen).
+    func startVoiceNote(record: Bool) {
+        guard isPaired else {
+            tab = .settings
+            show(.info, "Pair with your Mac first", detail: "Then a voice note goes straight to it.")
+            return
+        }
+        let busy = talk.presented || sheet != nil
+        if talk.presented { talk.minimize() }
+        sheet = nil
+        guard busy else {
+            capture.open(record: record)
+            return
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(450)) // Talk's or the sheet's dismissal first
+            capture.open(record: record)
         }
     }
 

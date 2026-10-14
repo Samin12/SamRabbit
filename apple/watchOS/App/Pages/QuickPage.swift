@@ -1,14 +1,19 @@
 import SamRabbitKit
 import SwiftUI
 
-/// Page 5: one-tap actions: block the next 30 minutes, a spoken journal note, a new T3 task by voice (the words
-/// checked before they go; the conversation on the main page can start tasks too).
+/// Page 5: one-tap actions: a voice note (it goes as it is; the Mac files it), block the next 30 minutes, a spoken
+/// journal note, a new T3 task by voice (the words checked before they go; the conversation on the main page can
+/// start tasks too).
 struct QuickPage: View {
     @Environment(WatchModel.self) private var model
 
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
+                VoiceButton(title: "Voice note", symbol: "waveform.badge.mic", purpose: .capture,
+                            colors: [SamTheme.red, Color(hex: 0xD93A5C)], height: 46)
+                    .accessibilityIdentifier("voiceNote")
+
                 Button {
                     Task { await model.block(minutes: 30) }
                 } label: {
@@ -54,7 +59,7 @@ struct ActionButtonHint: View {
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Action Button").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(SamTheme.ink)
-                Text("Settings > Action Button: Action > Control, then Control > Ask SamRabbit. Press once to talk.")
+                Text("Settings > Action Button: Action > Control, then Control > Ask SamRabbit (press once to talk) or Voice Note.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(SamTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)

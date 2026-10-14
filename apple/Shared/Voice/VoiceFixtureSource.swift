@@ -4,10 +4,12 @@ import Foundation
 import SamRabbitKit
 
 /// Debug builds only (never in a release build): a made-up voice instead of the microphone, so the simulator
-/// walkthrough and the watch UI tests drive the real capture without a mic or a permission prompt.
+/// walkthroughs and the UI tests (the watch's voice input, voice notes on the watch and the iPhone) drive the real
+/// capture without a mic or a permission prompt. Without a fixture the simulators hear this in `quiet` mode: they
+/// never record through the Mac's microphone.
 ///
 ///     -SamRabbitVoiceFixture speech    about 1.8 s of a voice-like sound, then quiet: it stops by itself
-///     -SamRabbitVoiceFixture hold      the sound the whole time: tap Stop (or the 60 s cap)
+///     -SamRabbitVoiceFixture hold      the sound the whole time: tap Stop (or the cap)
 ///     -SamRabbitVoiceFixture quiet     nothing: tap Stop
 ///     -SamRabbitVoicePermission denied the microphone permission was refused
 ///
@@ -25,6 +27,7 @@ final class VoiceFixtureSource: VoiceSource {
     let permitted: Bool
     private var file: URL?
     private var startedAt: Date?
+    var onInterrupted: (@MainActor () -> Void)?
 
     init(mode: Mode, permitted: Bool = true) {
         self.mode = mode

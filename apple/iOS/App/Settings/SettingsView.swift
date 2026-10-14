@@ -125,7 +125,7 @@ struct SettingsView: View {
                 }
                 .accessibilityIdentifier("action-button-help")
             } footer: {
-                Text("Pick Ask SamRabbit, then press and hold the button: SamRabbit opens at Ask, already listening. Apple Watch Ultra: Settings > Action Button > Action > Control, then Control > Ask SamRabbit.")
+                Text("Pick Talk to SamRabbit (the live call) or Voice Note (records at once, sends when you pause). Set to Ask SamRabbit before? It opens the call now. Apple Watch Ultra: Settings > Action Button > Action > Control, then Control > Ask SamRabbit or Voice Note.")
             }
             .listRowBackground(SamTheme.glass2)
 

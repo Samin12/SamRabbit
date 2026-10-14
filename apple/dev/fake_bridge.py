@@ -105,6 +105,56 @@ The inbox (CONTRACTS-WAVE6 §A, the phone's twin of WAVE7: every agent on the Ma
   ``reply``, and a reply answers 503 ``session_check_failed``); ``refuse: [actions]`` makes those item actions answer
   503 (a rollback to look at; ``[]`` ends it); the answer lists what arrived (replies, seen, dismissals, new tasks,
   refusals; ids and sizes only).
+
+Voice notes (CONTRACTS-WAVE8 §A2), with the real bridge's shapes and words (``samrabbit_capture.py``):
+
+* ``POST /v1/mobile/capture[?wait=0..10&lang=]``: a recording (``audio/mp4``, ``audio/x-m4a``, ``audio/aac``,
+  ``audio/wav``; at most 8 MiB and 300 s) or JSON ``{text}``, with ``X-SamRabbit-Capture`` (a lowercase UUID, required:
+  the same id and bytes give the note as it is, other bytes 409 ``capture_conflict``), ``X-SamRabbit-Captured-At``
+  (ISO 8601 with an offset, the last 7 days) and ``X-SamRabbit-Source`` (r1, iphone, watch, mac; else the token's
+  device) -> 202 ``{captureId, state: "received", …}`` at once (200 with the outcome when it was done within
+  ``wait``). In the background (``delay``, 1.2 s): ``transcribed``, then ``done`` by the real router's explicit cues:
+  "put this in my journal: …" adds his words after the cue to the fake journal (outcome ``journal``, "Added to your
+  journal."), "make a new task to …" starts a fake T3 task with all he said (``task``, "Started “…” in …."),
+  "remind me to … at 3 pm" and "block 30 minutes" put a fake event on the calendar (``event``); anything else is saved
+  as a note (``note``, the suggestion "Start it as a T3 task?", where the real bridge asks Claude Haiku) and shows in
+  the inbox as ``note:<captureId>`` (``can: act, dismiss, seen``; ``needs-input`` while unseen, else ``idle``; a
+  failed note ``error``). No speech: ``done`` with outcome ``nothing``; a failure: ``failed`` with ``error {code,
+  message}`` and outcome ``failed``.
+* ``GET /v1/mobile/capture/<id>?wait=0..10`` -> ``{captureId, state, source, kind: audio | text, capturedAt,
+  receivedAt, updatedAt, heard, outcome: {kind, title, detail, threadId?, eventId?, noteId?, journalDate?},
+  suggestion?: {action, label, startsAt?}, say, error?, seen, dismissed}`` (``wait`` holds it until done or failed);
+  ``GET /v1/mobile/captures?limit=`` -> ``{captures, pending, updatedAt}``; ``POST /v1/mobile/captures/<id>/act
+  {action: task | journal | event (startsAt) | note | undo | dismiss | seen | retry}`` and the inbox's
+  ``POST /inbox/items/note:<id>/act | dismiss | seen`` (``{ok, capture}``). The summary says ``captures: {available,
+  recent: [the last three: {captureId, state, kind, title, say, at}], failed, pending, notes}``.
+* ``POST /__fake/capture {mode?, heard?, delay?, clear?}`` / ``GET /__fake/capture``: modes ``ok``, ``fail``,
+  ``no_speech``, ``unavailable`` (503), ``drop`` (the connection closes: the Mac out of reach), ``missing`` (404, no
+  ``captures`` in the summary); the notes and what arrived (ids, sizes, sources, the device; never the audio).
+
+The morning brief (CONTRACTS-WAVE8 §A3), with the real bridge's layout, verbs and answers (``samrabbit_briefing.py``)
+and a made-up morning (nothing reads mail; a draft is a made-up link): Do first (a reply owed, a bug report, a
+calendar conflict), Today (the calendar's events, the first flagged), Agents (the staging deploy) and FYI:
+
+* ``GET /v1/mobile/briefing[?after=<revision>&wait=0..25]`` -> ``{available, date, status: ready | building | waiting |
+  failed | off, revision, building, generatedAt, headline, spoken, needsYou, sections: [{id, title, items: [{id,
+  section, kind, title, why, actions: [{type, label}], can, state, updatedAt, account?, url?, suggestion?, draft?,
+  startsAt?, endsAt?, conflict?, itemId?, source?, result?}]}], accounts, counts, composed}``.
+* ``POST /v1/mobile/briefing/items/<id>/act {action, …}`` -> ``{ok, item, result, revision}``: ``draft_reply`` (``body?``;
+  a made-up Gmail drafts link in the item's account: nothing is ever sent), ``make_task`` (``text?``, the words the
+  phone showed; a fake T3 task),
+  ``block_time`` (``minutes?``, a fake block), ``remind`` (``in``: 1h, 2pm, tonight, tomorrow; state ``reminded``),
+  ``done``, ``dismiss``, ``open`` (its link, or the agent's ``itemId``); an action the item's ``can`` doesn't list
+  answers 409 ``unsupported_action``, a second tap of the same verb what the first did.
+  ``POST /v1/mobile/briefing/refresh`` -> 202 ``{status: "building", revision}`` (a new revision 1.2 s later; at most
+  one every five minutes, else 429 ``refresh_too_soon`` with ``retryAfter``). The summary says ``briefing: {available,
+  date, status, revision, headline, needsYou}``.
+* ``POST /__fake/briefing {mode?, reset?, clear?}`` / ``GET /__fake/briefing``: modes ``ready``, ``none`` (not built
+  yet), ``building``, ``failed``, ``off``, ``missing`` (an older bridge: 404, nothing in the summary); the taps that
+  arrived, the refreshes and the items' states.
+
+``POST /v1/mobile/assistant/cancel {conversationId, turnId?}``: with ``turnId`` only that turn is cancelled (the cancels
+log records it), like the real bridge.
 Stdlib only, Python 3.9.
 """
 
@@ -271,6 +321,119 @@ def loopback_peer(address: str) -> bool:
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
     return ip.is_loopback
+
+
+# Voice notes (CONTRACTS-WAVE8 §A2: the real bridge's samrabbit_capture.py limits, words and explicit cues)
+CAPTURE_MAX_BYTES = 8 * 1024 * 1024
+CAPTURE_MAX_SECONDS = 300.5
+CAPTURE_MODES = ("ok", "fail", "no_speech", "unavailable", "drop", "missing")
+CAPTURE_SOURCES = ("iphone", "watch", "mac", "r1")
+CAPTURE_FINAL = ("done", "failed")
+CAPTURE_ACTIONS = ("task", "journal", "event", "note", "undo", "dismiss", "seen", "retry")
+CAPTURE_SUGGESTIONS = {"task": "Start it as a T3 task?", "journal": "Add it to your journal?",
+                       "event": "Put it on your calendar?", "block": "Block the time?"}
+_CAPTURE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+DEFAULT_CAPTURE_HEARD = "Put this in my journal: called the dentist and moved the cleaning to Friday"
+_CUE_LEAD = r"^(?:(?:hey|ok|okay|so|um|uh)[\s,]+)*(?:please\s+)?(?:can you\s+|could you\s+)?"
+_CUE_SEP = r"[\s,:;.!\-–—]*"
+_JOURNAL_LEAD = re.compile(_CUE_LEAD + r"(?:put|add|write|save|log|note|jot)\s+(?:this|it|that)?\s*(?:down\s+)?"
+                           r"(?:in|into|to|on)\s+(?:my|the)\s+journal\b" + _CUE_SEP + r"(?P<text>.*)$",
+                           re.IGNORECASE | re.DOTALL)
+_JOURNAL_TAG = re.compile(r"^journal(?:\s+(?:entry|note))?\s*[:,;\-–—]\s*(?P<text>.+)$", re.IGNORECASE | re.DOTALL)
+_JOURNAL_TAIL = re.compile(r"^(?P<text>.+?)" + _CUE_SEP + r"(?:(?:and\s+)?please\s+)?(?:put|add|write|save|log|note)\s+"
+                           r"(?:this|it|that)\s+(?:down\s+)?(?:in|into|to|on)\s+(?:my|the)\s+journal[\s.!]*$",
+                           re.IGNORECASE | re.DOTALL)
+_TASK_CUE = re.compile(_CUE_LEAD + r"(?:(?:make|create|start|open|add|spin up|kick off)\s+(?:a\s+|an\s+)?(?:new\s+)?"
+                       r"(?:t3\s+)?task|new\s+(?:t3\s+)?task)\b" + _CUE_SEP + r"(?:to\s+|for\s+|that\s+|which\s+)?"
+                       r"(?P<text>.*)$", re.IGNORECASE | re.DOTALL)
+_REMIND_CUE = re.compile(_CUE_LEAD + r"remind me\s+(?:to\s+|about\s+|that\s+)?(?P<what>.+?)\s+at\s+(?P<h>\d{1,2})"
+                         r"(?::(?P<m>\d{2}))?\s*(?P<ampm>[ap])\.?\s?m\.?(?:\s+(?P<day>today|tonight|tomorrow))?[\s.!]*$",
+                         re.IGNORECASE | re.DOTALL)
+_BLOCK_CUE = re.compile(_CUE_LEAD + r"block\s+(?:off\s+|out\s+)?(?:the\s+next\s+)?(?P<n>\d{1,3}|half an?|an?|one|two|"
+                        r"three|fifteen|twenty|thirty|forty-five|sixty|ninety)\s*(?P<unit>minutes?|mins?|hours?|hrs?)\b"
+                        + _CUE_SEP + r"(?:for\s+|to\s+|of\s+)?(?P<what>.*)$", re.IGNORECASE | re.DOTALL)
+_CUE_NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "fifteen": 15, "twenty": 20, "thirty": 30,
+                "forty-five": 45, "sixty": 60, "ninety": 90, "half a": 0.5, "half an": 0.5}
+
+
+def title_from_prompt(text: str, limit: int = 60) -> str:
+    """The real bridge's title for a note or a task (``samrabbit_t3.title_from_prompt``)."""
+    flat = " ".join(str(text).split())
+    if len(flat) <= limit:
+        return flat or "New task"
+    cut = flat[:limit]
+    space = cut.rfind(" ")
+    if space > limit * 0.5:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:-.") + "…"
+
+
+def parse_offset_time(text: Any) -> Optional[datetime]:
+    """An ISO 8601 time with an offset (``Z`` or ``±hh:mm``), else None (``X-SamRabbit-Captured-At``)."""
+    if not isinstance(text, str) or not re.search(r"(Z|[+-]\d{2}:?\d{2})$", text.strip()):
+        return None
+    value = text.strip().replace("Z", "+00:00")
+    if re.search(r"[+-]\d{4}$", value):
+        value = value[:-2] + ":" + value[-2:]
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def epoch_of_any(text: Any) -> Optional[float]:
+    moment = parse_offset_time(text)
+    return moment.timestamp() if moment is not None else None
+
+
+def capture_rules(heard: str, captured: datetime) -> Dict[str, Any]:
+    """The real router's explicit cues (``CaptureRouter._rules``; the remind cue only reads "at 3 pm [today|
+    tomorrow]"). With no cue the real bridge asks Claude Haiku; this stands in for it: a note suggesting a task."""
+    for pattern in (_JOURNAL_LEAD, _JOURNAL_TAG, _JOURNAL_TAIL):
+        match = pattern.match(heard)
+        if match is None:
+            continue
+        text = (match.group("text") or "").strip().strip(" ,;:-–—")
+        return {"kind": "journal", "text": text} if text else {"kind": "note", "suggestion": "journal"}
+    match = _TASK_CUE.match(heard)
+    if match is not None:
+        rest = match.group("text").strip(" ,;:.-–—")
+        return {"kind": "task", "title": title_from_prompt(rest[:1].upper() + rest[1:])} if rest else \
+            {"kind": "note", "suggestion": "task"}
+    match = _REMIND_CUE.match(heard)
+    if match is not None:
+        local = captured.astimezone()
+        hour = int(match.group("h")) % 12 + (12 if match.group("ampm").lower() == "p" else 0)
+        moment = local.replace(hour=hour, minute=int(match.group("m") or 0), second=0, microsecond=0)
+        if (match.group("day") or "").lower() == "tomorrow" or moment <= local:
+            moment += timedelta(days=1)
+        what = re.sub(r"^(?:to|about|that)\s+", "", match.group("what").strip(" ,;:.-–—"), flags=re.IGNORECASE)
+        return {"kind": "event", "title": ("Reminder: " + what[:1].upper() + what[1:])[:80],
+                "start": moment.timestamp(), "end": moment.timestamp() + 15 * 60}
+    match = _BLOCK_CUE.match(heard)
+    if match is not None:
+        word = match.group("n").lower()
+        amount = float(word) if word.isdigit() else float(_CUE_NUMBERS.get(word, 30))
+        minutes = int(round(amount * (60 if match.group("unit").lower().startswith("h") else 1)))
+        what = match.group("what").strip(" ,;:.-–—")
+        start = time.time() - time.time() % 60
+        if 5 <= minutes <= 720:
+            return {"kind": "block", "title": (what[:1].upper() + what[1:])[:80] if what else "Focus",
+                    "start": start, "end": start + minutes * 60}
+    return {"kind": "note", "suggestion": "task"}
+
+
+# The morning brief (CONTRACTS-WAVE8 §A3: the real bridge's samrabbit_briefing.py layout and verbs)
+BRIEFING_MODES = ("ready", "none", "building", "failed", "off", "missing")
+BRIEFING_SECTIONS = (("doFirst", "Do first"), ("today", "Today"), ("agents", "Agents"), ("fyi", "FYI"))
+BRIEFING_STATES = {"draft_reply": "drafted", "make_task": "tasked", "block_time": "blocked", "remind": "reminded",
+                   "done": "done", "dismiss": "dismissed"}
+
+
+def gmail_link(fragment: str, email: Optional[str]) -> str:
+    """A Gmail link in the right account, like the real bridge's (``with_google_account``: ``authuser=<email>``)."""
+    base = "https://mail.google.com/mail/"
+    return base + ("?authuser=" + quote(email, safe="") if email else "") + fragment
 
 
 class ApiError(Exception):
@@ -488,6 +651,8 @@ class FakeBridge:
             self._seed_calendar(now)
             self._seed_conversations(now)
             self._seed_inbox(now)
+            self._seed_captures()
+            self._seed_briefing(now)
 
     def _seed_threads(self, now: float) -> None:
         self.projects = [
@@ -1096,6 +1261,7 @@ class FakeBridge:
             items += [self.t3_inbox_item(t) for t in self.threads.values()]
         chats = sorted(self.conversations.values(), key=lambda c: c["lastAt"], reverse=True)[:6]
         items += [self.chat_item(c) for c in chats]
+        items += self.note_items()
         items = [self.phone_view(item) for item in items]
 
         def rank(item: Dict[str, Any]) -> Tuple[int, float]:
@@ -1164,6 +1330,8 @@ class FakeBridge:
             return source, self.sessions[item_id]
         if source == "chat" and key in self.conversations:
             return source, self.conversations[key]
+        if source == "note" and key in self.captures:
+            return source, self.captures[key]
         raise ApiError(404, "item_not_found", "That is not in the inbox.")
 
     def inbox_detail(self, item_id: str) -> Dict[str, Any]:
@@ -1171,6 +1339,13 @@ class FakeBridge:
             source, record = self.inbox_find(item_id)
             if source == "t3":
                 item, messages = self.t3_inbox_item(record), record["messages"]
+            elif source == "note":
+                # What he said, then what the Mac did (the real bridge's ``inbox_messages``).
+                item = self.note_item(record)
+                detail = (record.get("outcome") or {}).get("detail")
+                messages = ([{"role": "user", "text": record["heard"], "at": record["capturedAt"]}]
+                            if record.get("heard") else []) + \
+                    ([{"role": "assistant", "text": detail, "at": iso(record["updatedAt"])}] if detail else [])
             elif source == "chat":
                 item = self.chat_item(record)
                 messages = [{"role": "user" if p["type"] == "message.user" else "assistant", "text": p["text"],
@@ -1226,6 +1401,21 @@ class FakeBridge:
                 self.inbox_log["refused"].append({"id": item_id, "code": "fake_refused"})
                 raise ApiError(503, "fake_refused", "The fake bridge refuses that right now.", retryable=True)
             source, record = self.inbox_find(item_id)
+            if source == "note":
+                # A voice note, like the real inbox: the capture service does what it says. ``act``: its suggestion
+                # (or ``body.action``; a failed note: try again), ``dismiss``, ``seen`` -> ``{ok, capture}``.
+                if action not in ("act", "dismiss", "seen"):
+                    raise ApiError(409, "unsupported_action", "A voice note can be acted on, dismissed or marked seen.")
+                if action == "seen":
+                    self.inbox_log["seen"].append({"id": item_id})
+                if action == "act":
+                    chosen = body.get("action") or (record.get("suggestion") or {}).get("action") or \
+                        ("retry" if record["state"] == "failed" else None)
+                    if chosen not in CAPTURE_ACTIONS:
+                        raise ApiError(400, "invalid_action", "Say what to do with it: task, journal or event.")
+                    action = str(chosen)
+                status, view = self.capture_act(record["captureId"], action, body)
+                return status, {"ok": True, "capture": view}
             if action == "dismiss":
                 # Seen, and out of the list and its counts until it changes; nothing reaches T3.
                 known = self.inbox_dismissed.get(item_id) or {}
@@ -1245,6 +1435,8 @@ class FakeBridge:
                 self.inbox_log["undismissed"].append({"id": item_id})
                 revision = self.inbox(include_dismissed=False)["revision"]
                 return 200, {"ok": True, "dismissed": False, "revision": revision}
+            if action == "act":
+                raise ApiError(409, "unsupported_action", "That item can't do that here.")
             if action == "seen":
                 self.inbox_log["seen"].append({"id": item_id})
                 record["unread"] = False
@@ -1309,6 +1501,465 @@ class FakeBridge:
                                           "model": model})
         return dict(created, itemId="t3:" + created["threadId"])
 
+    # ------------------------------------------------------------------ voice notes (CONTRACTS-WAVE8 §A2)
+    # The shapes and words of the real bridge's ``samrabbit_capture.py`` (its ``view``, ``inbox_items``,
+    # ``summary_part`` and outcomes), with its explicit cues as the router and nothing else.
+
+    def _seed_captures(self) -> None:
+        self.captures: Dict[str, Dict[str, Any]] = {}
+        self.capture_mode = "ok"
+        self.capture_heard = DEFAULT_CAPTURE_HEARD
+        self.capture_delay = 1.2
+        self.capture_log: Dict[str, List[Dict[str, Any]]] = {"uploads": [], "acts": [], "polls": []}
+
+    def capture_view(self, c: Dict[str, Any]) -> Dict[str, Any]:
+        """A note as the real bridge shows it (``GET /capture/<id>``, the uploads' answers, ``/captures``)."""
+        final = c["state"] in CAPTURE_FINAL
+        outcome = c.get("outcome")
+        view: Dict[str, Any] = {"captureId": c["captureId"], "state": c["state"], "source": c["source"],
+                                "kind": c["kind"], "capturedAt": c["capturedAt"], "receivedAt": iso(c["receivedAt"]),
+                                "updatedAt": iso(c["updatedAt"]), "heard": c.get("heard"), "outcome": outcome,
+                                "suggestion": c.get("suggestion"),
+                                "say": (outcome or {}).get("detail") or ("Sent." if not final else None)}
+        if c.get("error"):
+            view["error"] = c["error"]
+        view["seen"] = bool(c["seen"])
+        view["dismissed"] = bool(c["dismissed"])
+        return view
+
+    def capture_receive(self, meta: Dict[str, Any], digest: str, text: Optional[str]) -> Tuple[int, Dict[str, Any]]:
+        """Stores a note (idempotent by id: the same id and bytes give the note as it is, other bytes 409), then
+        works on it in the background: words after 40 % of ``capture_delay``, filed after all of it."""
+        with self.lock:
+            found = self.captures.get(meta["captureId"])
+            if found is not None:
+                if found["sha"] != digest:
+                    raise ApiError(409, "capture_conflict", "A different note already has this id.")
+                return (200 if found["state"] in CAPTURE_FINAL else 202), self.capture_view(found)
+            now = time.time()
+            c = dict(meta, sha=digest, state="received", heard=None, outcome=None, suggestion=None, error=None,
+                     receivedAt=now, updatedAt=now, seen=False, dismissed=False, kind="text" if text else "audio",
+                     words=text or self.capture_heard)
+            self.captures[c["captureId"]] = c
+            self.capture_work(c)
+            self.changed.notify_all()
+            return 202, self.capture_view(c)
+
+    def capture_work(self, c: Dict[str, Any]) -> None:
+        """Hears it (``capture_mode``: ``ok``, ``no_speech``, ``fail``), then files it."""
+        mode, delay = self.capture_mode, self.capture_delay
+
+        def heard_step() -> None:
+            with self.lock:
+                if c["state"] == "received" and mode == "ok":
+                    c.update(state="transcribed", heard=c["words"], updatedAt=time.time())
+                    self.changed.notify_all()
+
+        def done_step() -> None:
+            with self.lock:
+                if c["state"] in CAPTURE_FINAL:
+                    return
+                if mode == "no_speech":
+                    # Like the real bridge: done, nothing saved ("nothing").
+                    c.update(state="done", outcome={"kind": "nothing", "title": "Nothing heard",
+                                                    "detail": "I didn't catch anything."}, updatedAt=time.time())
+                elif mode == "fail":
+                    message = "The Mac could not turn the recording into words."
+                    c.update(state="failed", error={"code": "transcribe_failed", "message": message},
+                             outcome={"kind": "failed", "title": "Voice note",
+                                      "detail": "Couldn't save it: " + message[:1].lower() + message[1:]},
+                             updatedAt=time.time())
+                else:
+                    if not c.get("heard"):
+                        c["heard"] = c["words"]
+                    self.capture_route(c)
+                self.changed.notify_all()
+        self.later(delay * 0.4, heard_step)
+        self.later(delay, done_step)
+
+    def capture_route(self, c: Dict[str, Any], kind: Optional[str] = None, body: Optional[Dict[str, Any]] = None) -> None:
+        """The real router's explicit cues (its own patterns): "put this in my journal …" adds his words after the cue
+        to the fake journal, "make a new task to …" starts a fake T3 task with all he said, "remind me … at 3 pm" and
+        "block 30 minutes" put a fake event on the calendar; anything else is saved as a note with the suggestion
+        "Start it as a T3 task?". ``kind`` (his tap, ``act``) files it that way instead."""
+        heard = " ".join(c["heard"].split())
+        captured = parse_offset_time(c["capturedAt"]) or datetime.now().astimezone()
+        plan = capture_rules(heard, captured)
+        tapped = kind is not None
+        kind = kind or plan["kind"]
+        outcome: Dict[str, Any]
+        if kind == "journal":
+            words = plan.get("text") if plan["kind"] == "journal" else heard
+            local = captured.astimezone()
+            self.journal.append("**%s** %s" % (local.strftime("%H:%M"), words))
+            outcome = {"kind": "journal", "title": "Journal", "detail": "Added to your journal.",
+                       "journalDate": local.date().isoformat(), "time": local.strftime("%H:%M")}
+        elif kind == "task":
+            # All he said is the prompt; the title is the words after the cue (the real router's).
+            created = self.t3_create(heard)
+            title = plan.get("title") if plan["kind"] == "task" else title_from_prompt(heard)
+            if created["threadId"] in self.threads:
+                self.threads[created["threadId"]]["title"] = title
+            outcome = {"kind": "task", "title": title, "threadId": created["threadId"],
+                       "projectName": created["projectName"],
+                       "detail": "Started “%s” in %s." % (title, created["projectName"])}
+        elif kind in ("event", "block"):
+            start, end, title = plan.get("start"), plan.get("end"), plan.get("title") or "Reminder"
+            if body is not None:  # his tap: the time he gave, else the suggestion's
+                start = epoch_of_any(body.get("startsAt")) or epoch_of_any((c.get("suggestion") or {}).get("startsAt"))
+                if start is None:
+                    raise ApiError(400, "invalid_time", "Say when: startsAt (ISO 8601 with an offset).")
+                end = epoch_of_any(body.get("endsAt")) or start + 15 * 60
+                title = str(body.get("title") or "")[:80] or "Reminder: " + title_from_prompt(heard, 60)
+            event = self._event("ev_" + uuid.uuid4().hex[:10], title, start, end - start)
+            self.calendar.append(event)
+            when = datetime.fromtimestamp(start).strftime("%-I:%M %p")
+            outcome = {"kind": "event", "title": title, "eventId": event["eventId"], "startsAt": event["startsAt"],
+                       "endsAt": event["endsAt"], "detail": "Added “%s” for %s." % (title, when)}
+        else:
+            # Kept as a note by his tap: no suggestion (the real bridge's ``_as_note(record, None)``).
+            suggestion = plan.get("suggestion") if plan["kind"] == "note" and not tapped else None
+            outcome = {"kind": "note", "title": title_from_prompt(heard), "detail": "Saved as a note.",
+                       "noteId": "note:" + c["captureId"]}
+            c["suggestion"] = ({"action": suggestion, "label": CAPTURE_SUGGESTIONS[suggestion]}
+                               if suggestion in CAPTURE_SUGGESTIONS else None)
+        if outcome["kind"] != "note":
+            c["suggestion"] = None
+        c.update(state="done", outcome=outcome, error=None, updatedAt=time.time())
+
+    def capture_act(self, capture_id: str, action: str, body: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
+        """``POST /captures/<id>/act {action}``, the real bridge's rules: ``seen``, ``dismiss``, ``retry`` (a failed
+        note), ``undo`` (an event: removed and kept as a note; a note: dismissed; a journal line or a task: 409),
+        ``task`` / ``journal`` / ``event`` (``startsAt``, else the suggestion's) / ``note``."""
+        body = body or {}
+        with self.lock:
+            c = self.captures.get(capture_id)
+            if c is None:
+                raise ApiError(404, "capture_not_found", "There is no such voice note.")
+            if action not in CAPTURE_ACTIONS:
+                raise ApiError(400, "invalid_action", "action must be one of " + ", ".join(CAPTURE_ACTIONS) + ".")
+            self.capture_log["acts"].append({"captureId": capture_id, "action": action})
+            if action in ("seen", "dismiss"):
+                c["seen"] = True
+                if action == "dismiss":
+                    c["dismissed"] = True
+                c["updatedAt"] = time.time()
+                self.changed.notify_all()
+                return 200, self.capture_view(c)
+            if action == "retry":
+                if c["state"] != "failed":
+                    raise ApiError(409, "not_failed", "Only a note that failed can be tried again.")
+                c.update(state="received", error=None, outcome=None, updatedAt=time.time())
+                self.capture_work(c)
+                self.changed.notify_all()
+                return 202, self.capture_view(c)
+            if c["state"] != "done" or not c.get("heard"):
+                raise ApiError(409, "capture_not_ready", "That note isn't finished yet.", retryable=True)
+            kind = (c.get("outcome") or {}).get("kind")
+            if action == "undo":
+                if kind == "event":
+                    self.calendar = [e for e in self.calendar if e["eventId"] != c["outcome"].get("eventId")]
+                    start = c["outcome"].get("startsAt")
+                    c.update(outcome={"kind": "note", "title": title_from_prompt(c["heard"]),
+                                      "detail": "Removed from your calendar; kept as a note.",
+                                      "noteId": "note:" + capture_id, "undone": "event"},
+                             suggestion={"action": "event", "label": CAPTURE_SUGGESTIONS["event"], "startsAt": start},
+                             seen=True, updatedAt=time.time())
+                elif kind in ("note", "nothing", "failed"):
+                    c.update(dismissed=True, seen=True, updatedAt=time.time())
+                elif kind == "journal":
+                    raise ApiError(409, "cannot_undo", "A journal line can't be taken back from here: remove it in "
+                                   "Heptabase.")
+                else:
+                    raise ApiError(409, "cannot_undo", "A task that started can't be taken back from here: stop it "
+                                   "in Tasks.")
+                self.changed.notify_all()
+                return 200, self.capture_view(c)
+            if action != kind:
+                if kind == "event":
+                    self.calendar = [e for e in self.calendar if e["eventId"] != c["outcome"].get("eventId")]
+                self.capture_route(c, kind=action, body=body if action == "event" else None)
+                c["seen"] = True
+            self.changed.notify_all()
+            return 200, self.capture_view(c)
+
+    def note_item(self, c: Dict[str, Any]) -> Dict[str, Any]:
+        """A saved (or failed) voice note in the inbox (``note:<captureId>``), as the real bridge lists it:
+        ``needs-input`` while its suggestion is unseen, ``error`` when the Mac couldn't hear it, else ``idle``."""
+        failed = c["state"] == "failed"
+        suggestion = c.get("suggestion") or None
+        status = "error" if failed else ("needs-input" if suggestion and not c["seen"] else "idle")
+        heard = c.get("heard") or ""
+        return {"id": "note:" + c["captureId"], "source": "note", "agent": None,
+                "title": title_from_prompt(heard, 120) if heard else "Voice note", "project": "Voice note",
+                "cwd": None, "status": status,
+                "statusLabel": "Couldn't hear it" if failed else (suggestion or {}).get("label") or "Saved note",
+                "summary": (heard or str((c.get("outcome") or {}).get("detail") or ""))[:240],
+                "updatedAt": iso(c["updatedAt"]), "unread": not c["seen"], "pending": {"approvals": [], "inputs": []},
+                "can": ["act", "dismiss", "seen"], "live": False, "progress": None, "phase": None,
+                "suggestion": suggestion, "captureId": c["captureId"], "capturedAt": c["capturedAt"]}
+
+    def note_items(self) -> List[Dict[str, Any]]:
+        now = time.time()
+        return [self.note_item(c) for c in self.captures.values()
+                if c["state"] in CAPTURE_FINAL and not c["dismissed"] and now - c["receivedAt"] < 3 * 86400
+                and (c.get("outcome") or {}).get("kind") in ("note", "failed")]
+
+    def captures_newest(self) -> List[Dict[str, Any]]:
+        return sorted(self.captures.values(), key=lambda c: c["receivedAt"], reverse=True)
+
+    def captures_part(self) -> Dict[str, Any]:
+        """``summary.captures`` like the real bridge: the last three notes, failed ones (a week, not dismissed),
+        how many are on their way, how many saved notes wait in the inbox."""
+        if self.capture_mode == "missing":
+            return {}
+        now = time.time()
+        records = self.captures_newest()
+        recent = [{"captureId": c["captureId"], "state": c["state"], "kind": (c.get("outcome") or {}).get("kind"),
+                   "title": (c.get("outcome") or {}).get("title"), "say": (c.get("outcome") or {}).get("detail"),
+                   "at": c["capturedAt"]} for c in records[:3]]
+        return {"captures": {
+            "available": True, "recent": recent,
+            "failed": sum(1 for c in records if c["state"] == "failed" and not c["dismissed"]
+                          and now - c["receivedAt"] < 7 * 86400),
+            "pending": sum(1 for c in records if c["state"] not in CAPTURE_FINAL),
+            "notes": len([item for item in self.note_items() if item["status"] != "error"])}}
+
+    # ------------------------------------------------------------------ the morning brief (CONTRACTS-WAVE8 §A3)
+    # The shapes and words of the real bridge's ``samrabbit_briefing.py`` (its ``view``, item layout, verbs and
+    # answers), with a made-up morning: nothing here reads mail, and a draft is only a made-up link.
+
+    def _seed_briefing(self, now: float) -> None:
+        self.briefing_mode = "ready"
+        # Like the real bridge: epoch milliseconds to start with, so it only grows (also across a restart or a reset).
+        self.briefing_revision = max(int(getattr(self, "briefing_revision", 0)) + 1, int(now * 1000))
+        self.briefing_built = now - 3 * 3600
+        self.briefing_building = False
+        self.briefing_refreshed = -1e12  # the last refresh's start (one every five minutes)
+        self.briefing_log: Dict[str, List[Dict[str, Any]]] = {"acts": [], "refreshes": []}
+        stamp = iso(now - 3 * 3600)
+        business = "sam@example.com"
+        personal = "sam.personal@example.com"
+
+        def email(item_id: str, section: str, account: str, address: str, thread: str, title: str, why: str,
+                  verbs: List[Tuple[str, str]], suggestion: Optional[str] = None,
+                  draft: Optional[str] = None) -> Dict[str, Any]:
+            actions = [{"type": verb, "label": label} for verb, label in verbs]
+            item = {"id": item_id, "section": section, "kind": "email" if section == "doFirst" else "fyi",
+                    "title": title, "why": why, "actions": actions,
+                    "can": list(dict.fromkeys([verb for verb, _ in verbs] + ["done", "dismiss", "open"])),
+                    "state": "open", "updatedAt": stamp, "account": account,
+                    "url": gmail_link("#all/" + thread, address)}
+            if suggestion:
+                item["suggestion"] = suggestion
+            if draft:
+                item["draft"] = draft
+            item["_email"] = address
+            return item
+
+        self.briefing_items: List[Dict[str, Any]] = [
+            email("bi_dana", "doFirst", "business", business, "18f2a9c4d1e0b7a2", "Reply to Dana about the SOW",
+                  "She needs it signed by Friday; asked twice",
+                  [("draft_reply", "Draft reply"), ("remind", "Remind me")],
+                  suggestion="Draft a reply confirming Thu 2 pm",
+                  draft="Hi Dana,\n\nThursday at 2 pm works. I'll have the SOW signed by then.\n\nSam"),
+            email("bi_acme", "doFirst", "personal", personal, "18f2c11b9e4d3a10", "Look into Acme's checkout errors",
+                  "Two customers saw 500s since last night", [("make_task", "Make task"), ("draft_reply", "Draft reply")],
+                  suggestion="Start a T3 task to find the failing endpoint"),
+        ]
+        events = [e for e in self.calendar if not e["allDay"] and now - 3600 < e["_start"] < now + 12 * 3600][:5]
+        if events:
+            first = events[0]
+            conflict = {"id": "bi_conflict", "section": "doFirst", "kind": "conflict",
+                        "title": "Move the dentist or skip %s" % first["title"],
+                        "why": "Both at %s" % datetime.fromtimestamp(first["_start"]).strftime("%-I:%M %p"),
+                        "actions": [{"type": "block_time", "label": "Block 30 min"}, {"type": "open", "label": "Join"}],
+                        "can": ["block_time", "open", "done", "dismiss"], "state": "open", "updatedAt": stamp,
+                        "startsAt": first["startsAt"], "endsAt": first["endsAt"], "conflict": True}
+            if first.get("meetingUrl"):
+                conflict["url"] = first["meetingUrl"]
+            self.briefing_items.append(conflict)
+        for index, event in enumerate(events):
+            start = datetime.fromtimestamp(event["_start"])
+            end = datetime.fromtimestamp(event["_end"])
+            when = start.strftime("%-I:%M %p") + "–" + end.strftime("%-I:%M %p")
+            meeting = event.get("meetingUrl")
+            item = {"id": "bi_ev_" + event["eventId"], "section": "today", "kind": "conflict" if index == 0 else "event",
+                    "title": ("Join " + event["title"])[:60], "why": ("Overlaps Dentist · " + when) if index == 0 else when,
+                    "actions": [{"type": "open", "label": "Join"}] if meeting else [{"type": "done", "label": "Got it"}],
+                    "can": ["open", "done", "dismiss"] if meeting else ["done", "dismiss"], "state": "open",
+                    "updatedAt": stamp, "startsAt": event["startsAt"], "endsAt": event["endsAt"]}
+            if meeting:
+                item["url"] = meeting
+            if index == 0:
+                item["conflict"] = True
+            self.briefing_items.append(item)
+        self.briefing_items += [
+            {"id": "bi_agent_deploy", "section": "agents", "kind": "agent", "title": "Approve “Deploy staging”",
+             "why": "Wants to run a command · Assistant", "actions": [{"type": "open", "label": "Review"}],
+             "can": ["open", "done", "dismiss"], "state": "open", "updatedAt": stamp, "itemId": "t3:t_deploy24",
+             "source": "t3"},
+            email("bi_fyi_payout", "fyi", "business", business, "18f2d7aa01c2e3f4", "Stripe payout arrived",
+                  "$3,420 landed in checking", [("open", "Open")]),
+            email("bi_fyi_renewal", "fyi", "personal", personal, "18f2e01b77a9c5d2", "Domain renews in 9 days",
+                  "samrabbit.dev, auto-renew is on", [("open", "Open")]),
+        ]
+
+    @staticmethod
+    def briefing_item_view(item: Dict[str, Any]) -> Dict[str, Any]:
+        return {key: value for key, value in item.items() if not key.startswith("_")}
+
+    def briefing(self) -> Dict[str, Any]:
+        """``GET /v1/mobile/briefing``, the real bridge's ``view``: ``sections: [{id, title, items}]``."""
+        mode = self.briefing_mode
+        today = datetime.now().strftime("%Y-%m-%d")
+        building = self.briefing_building or mode == "building"
+        base = {"revision": self.briefing_revision, "date": today, "building": building}
+        if mode == "off":
+            return dict(base, available=False, status="off", reason="briefing_turned_off")
+        if mode in ("none", "building", "failed"):
+            value = dict(base, available=False, status="building" if building else
+                         ("failed" if mode == "failed" else "waiting"))
+            if mode == "failed":
+                value["reason"] = "gmail_not_connected"
+            return value
+        sections = []
+        for name, title in BRIEFING_SECTIONS:
+            items = [self.briefing_item_view(i) for i in self.briefing_items if i["section"] == name]
+            sections.append({"id": name, "title": title, "items": items})
+        needs = sum(1 for s in sections if s["id"] in ("doFirst", "agents") for i in s["items"] if i["state"] == "open")
+        meetings = [i for i in self.briefing_items if i["section"] == "today"]
+        # The headline is the build's (the real bridge writes it once): Do first as it was built.
+        first_count = sum(1 for i in self.briefing_items if i["section"] == "doFirst")
+        parts = ["%d thing%s need%s you" % (first_count, "" if first_count == 1 else "s",
+                                             "s" if first_count == 1 else "")] if first_count else []
+        if meetings:
+            first = datetime.fromtimestamp(epoch_of(meetings[0]["startsAt"])).strftime("%H:%M")
+            parts.append("%d meeting%s, first at %s" % (len(meetings), "" if len(meetings) == 1 else "s", first))
+        parts.append("1 agent waiting")
+        return dict(base, available=True, status="building" if building else "ready",
+                    generatedAt=iso(self.briefing_built), headline=" · ".join(parts),
+                    spoken="First: reply to Dana about the SOW; look into Acme's checkout errors. You have %d meetings "
+                           "today." % len(meetings),
+                    needsYou=needs, sections=sections,
+                    accounts=[{"label": "business", "ok": True, "fetched": 64, "kept": 9},
+                              {"label": "personal", "ok": True, "fetched": 41, "kept": 5}],
+                    counts={"emails": 105, "kept": 14, "events": len(meetings), "agents": 1}, composed="claude")
+
+    def briefing_part(self) -> Dict[str, Any]:
+        """``summary.briefing`` like the real bridge: ``{available, date, status, revision, headline, needsYou}``."""
+        if self.briefing_mode == "missing":
+            return {}
+        full = self.briefing()
+        return {"briefing": {"available": full["available"], "date": full["date"], "status": full["status"],
+                             "revision": full["revision"], "headline": full.get("headline") if full["available"] else None,
+                             "needsYou": int(full.get("needsYou") or 0)}}
+
+    def briefing_act(self, item_id: str, action: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """One tap on a verb, the real bridge's rules and answers (``{ok, item, result, revision}``; a second tap of
+        the same verb answers what the first did). Draft reply makes a made-up Gmail draft link: nothing is ever
+        sent, and nothing here reaches Gmail."""
+        with self.lock:
+            item = next((i for i in self.briefing_items if i["id"] == item_id), None)
+            if self.briefing_mode not in ("ready", "building") or item is None:
+                raise ApiError(404, "item_not_found", "That is not in today's brief.")
+            if action not in item["can"]:
+                raise ApiError(409, "unsupported_action", "That item can't do that.")
+            self.briefing_log["acts"].append(dict({"itemId": item_id, "action": action},
+                                                  **({"in": str(body["in"])} if body.get("in") else {}),
+                                                  **({"text": body["text"]} if isinstance(body.get("text"), str)
+                                                     else {})))
+            if action == "open":
+                if not item.get("url") and not item.get("itemId"):
+                    raise ApiError(409, "unsupported_action", "There is nothing to open for it.")
+                return {"ok": True, "item": self.briefing_item_view(item),
+                        "result": {"url": item.get("url"), "itemId": item.get("itemId")},
+                        "revision": self.briefing_revision}
+            if item["state"] == BRIEFING_STATES[action] and item.get("result"):
+                return {"ok": True, "item": self.briefing_item_view(item), "result": item["result"],
+                        "revision": self.briefing_revision}
+            result: Dict[str, Any] = {}
+            now = datetime.now()
+            if action == "draft_reply":
+                if item["kind"] not in ("email", "fyi"):
+                    raise ApiError(409, "unsupported_action", "Only an email can get a reply.")
+                text = body.get("body") if isinstance(body.get("body"), str) else item.get("draft") or ""
+                draft = "r" + uuid.uuid4().hex[:15]
+                self.briefing_log.setdefault("drafts", []).append({"itemId": item_id, "chars": len(text)})
+                result = {"draftId": draft, "url": gmail_link("#drafts?compose=" + draft, item.get("_email")),
+                          "account": item.get("account"), "say": "Saved as a draft in Gmail. Open it to send."}
+            elif action == "make_task":
+                text = body.get("text") if isinstance(body.get("text"), str) and body["text"].strip() else \
+                    "%s. %s" % (item["title"], item.get("why") or "")
+                created = self.t3_create(text)
+                result = {"threadId": created["threadId"], "itemId": "t3:" + created["threadId"],
+                          "title": created["title"], "say": "Started it as a T3 task."}
+            elif action == "block_time":
+                minutes = body.get("minutes", 30)
+                if isinstance(minutes, bool) or not isinstance(minutes, int) or not 5 <= minutes <= 240:
+                    raise ApiError(400, "invalid_minutes", "minutes must be a whole number from 5 to 240.")
+                start = time.time() - (time.time() % 300) + 300
+                event = self._event("ev_" + uuid.uuid4().hex[:10], item["title"], start, minutes * 60)
+                self.calendar.append(event)
+                result = {"eventId": event["eventId"], "startsAt": event["startsAt"], "endsAt": event["endsAt"],
+                          "say": "Blocked %d min at %s." % (minutes, datetime.fromtimestamp(start).strftime("%-I:%M %p"))}
+            elif action == "remind":
+                choice = str(body.get("in") or "1h")
+                if choice == "2pm":
+                    at = now.replace(hour=14, minute=0, second=0, microsecond=0)
+                elif choice == "tonight":
+                    at = now.replace(hour=18, minute=0, second=0, microsecond=0)
+                elif choice == "tomorrow":
+                    at = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+                elif choice == "1h":
+                    at = (now + timedelta(minutes=60)).replace(second=0, microsecond=0)
+                else:
+                    raise ApiError(400, "invalid_time", "in must be 1h, 2pm, tonight or tomorrow (or give at).")
+                if at <= now:
+                    at += timedelta(days=1)
+                event = self._event("ev_" + uuid.uuid4().hex[:10], "Reminder: " + item["title"], at.timestamp(), 900)
+                self.calendar.append(event)
+                result = {"eventId": event["eventId"], "until": iso(at.timestamp()),
+                          "say": "I'll remind you at %s." % at.strftime("%-I:%M %p")}
+            item["state"] = BRIEFING_STATES[action]
+            item["updatedAt"] = iso(time.time())
+            if result:
+                item["result"] = result
+            self.briefing_revision += 1
+            self.changed.notify_all()
+            return {"ok": True, "item": self.briefing_item_view(item), "result": result,
+                    "revision": self.briefing_revision}
+
+    def briefing_refresh(self) -> Tuple[int, Dict[str, Any]]:
+        """``POST /briefing/refresh``: 202 ``{status: "building", revision}``, a new brief 1.2 s later; at most one
+        every five minutes (429 ``refresh_too_soon`` with ``retryAfter``), like the real bridge."""
+        with self.lock:
+            if self.briefing_mode == "off":
+                raise ApiError(503, "briefing_dev_copy", "This copy of the Mac bridge doesn't make morning briefs.")
+            if self.briefing_building:
+                return 202, {"status": "building", "revision": self.briefing_revision}
+            left = 300 - (time.time() - self.briefing_refreshed)
+            if left > 0:
+                self.briefing_log["refreshes"].append({"at": iso(time.time()), "refused": True})
+                return 429, {"error": {"code": "refresh_too_soon", "retryable": True, "retryAfter": int(left) + 1,
+                                       "message": "The brief was made a moment ago. Try again in a few minutes."}}
+            self.briefing_log["refreshes"].append({"at": iso(time.time())})
+            self.briefing_refreshed = time.time()
+            self.briefing_building = True
+            self.briefing_revision += 1
+            self.changed.notify_all()
+
+        def built() -> None:
+            with self.lock:
+                if self.briefing_mode in ("none", "building", "failed"):
+                    self.briefing_mode = "ready"
+                self.briefing_building = False
+                self.briefing_built = time.time()
+                self.briefing_revision += 1
+                self.changed.notify_all()
+        self.later(1.2, built)
+        return 202, {"status": "building", "revision": self.briefing_revision}
+
     # ------------------------------------------------------------------ summary
 
     def upcoming(self, hours: float, *, include_all_day: bool = True) -> List[Dict[str, Any]]:
@@ -1347,6 +1998,8 @@ class FakeBridge:
             "journal": {"available": True},
             **self.transcribe_part(),
             **self.assistant_part(),
+            **self.captures_part(),
+            **self.briefing_part(),
         }
 
     def transcribe_part(self) -> Dict[str, Any]:
@@ -1714,6 +2367,54 @@ class Handler(BaseHTTPRequestHandler):
             with b.lock:
                 return self.send_json(200, {"missing": b.inbox_missing, "revision": b.inbox_revision,
                                             **{k: list(v) for k, v in b.inbox_log.items()}})
+        if path == "/__fake/capture":
+            # What the voice-note routes do: ``mode`` (ok; fail: the Mac couldn't hear it; no_speech: done, nothing
+            # saved; unavailable: 503; drop: no answer, the Mac out of reach; missing: an older bridge, 404),
+            # ``heard`` (the words the next notes "say"), ``delay`` (seconds until filed), ``clear``; GET lists the
+            # notes and what arrived (ids, sizes, sources, the device; never the audio).
+            if method == "POST":
+                body = self.body()
+                with b.lock:
+                    mode = str(body.get("mode") or b.capture_mode)
+                    if mode not in CAPTURE_MODES:
+                        raise ApiError(400, "invalid_mode", "mode must be one of " + ", ".join(CAPTURE_MODES))
+                    b.capture_mode = mode
+                    if "heard" in body:
+                        b.capture_heard = str(body.get("heard") or DEFAULT_CAPTURE_HEARD)
+                    if "delay" in body:
+                        b.capture_delay = max(0.0, min(30.0, float(body.get("delay") or 0)))
+                    if body.get("clear"):
+                        for log in b.capture_log.values():
+                            del log[:]
+                        b.captures.clear()
+                    b.changed.notify_all()
+            with b.lock:
+                return self.send_json(200, {"mode": b.capture_mode, "heard": b.capture_heard,
+                                            "delay": b.capture_delay,
+                                            "captures": [b.capture_view(c) for c in b.captures_newest()],
+                                            **{k: list(v) for k, v in b.capture_log.items()}})
+        if path == "/__fake/briefing":
+            # ``mode``: ready, none (not built yet: "waiting"), building, failed, off, missing (an older bridge);
+            # ``reset`` puts today's fixture back (and the five-minute refresh limit); GET lists the taps (item,
+            # action, Remind's ``in`` and Make task's ``text``), the refreshes and the items' states.
+            if method == "POST":
+                body = self.body()
+                with b.lock:
+                    mode = str(body.get("mode") or b.briefing_mode)
+                    if mode not in BRIEFING_MODES:
+                        raise ApiError(400, "invalid_mode", "mode must be one of " + ", ".join(BRIEFING_MODES))
+                    if body.get("reset"):
+                        b._seed_briefing(time.time())
+                    b.briefing_mode = mode
+                    b.briefing_revision += 1
+                    if body.get("clear"):
+                        for log in b.briefing_log.values():
+                            del log[:]
+                    b.changed.notify_all()
+            with b.lock:
+                return self.send_json(200, {"mode": b.briefing_mode, "revision": b.briefing_revision,
+                                            "states": {i["id"]: i["state"] for i in b.briefing_items},
+                                            **{k: list(v) for k, v in b.briefing_log.items()}})
         if path == "/__fake/t3" and method == "POST":
             with b.lock:
                 b.t3_available = bool(self.body().get("available", True))
@@ -1787,6 +2488,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.ui(method, rest)
         if rest == "inbox" or rest.startswith("inbox/"):
             return self.inbox(method, rest)
+        if rest == "capture" or rest.startswith("capture/") or rest == "captures" or rest.startswith("captures/"):
+            return self.capture(method, rest, device)
+        if rest == "briefing" or rest.startswith("briefing/"):
+            return self.briefing(method, rest)
         if rest.startswith("t3/"):
             return self.t3(method, rest)
         if rest.startswith("calendar/"):
@@ -2069,14 +2774,190 @@ class Handler(BaseHTTPRequestHandler):
             # Like the real bridge: the phone never brings anything up on the Mac's screen.
             self.only(method, "POST")
             raise ApiError(409, "unsupported_action", "Opening is done on the Mac (the dock or the SamRabbit window).")
-        if action not in ("approve", "answer", "reply", "stop", "seen", "dismiss", "undismiss"):
+        if action not in ("approve", "answer", "reply", "stop", "seen", "act", "dismiss", "undismiss"):
             raise ApiError(404, "not_found", "Not found.")
         self.only(method, "POST")
-        body = self.optional_body() if action in ("stop", "seen", "dismiss", "undismiss") else self.body()
+        body = self.optional_body() if action in ("stop", "seen", "act", "dismiss", "undismiss") else self.body()
         status, payload = b.inbox_action(item_id, action, body)
         return self.send_json(status, payload)
 
     # ------------------------------------------------------------------ calendar
+
+    # ------------------------------------------------------------------ voice notes
+
+    def capture(self, method: str, rest: str, device: Dict[str, Any]) -> None:
+        """``POST /v1/mobile/capture`` (audio, or JSON ``{text}``), ``GET /capture/<id>?wait=``, ``GET /captures``,
+        ``POST /captures/<id>/act {action}``: the real bridge's checks and answers (see ``/__fake/capture``)."""
+        b = self.bridge
+        with b.lock:
+            mode = b.capture_mode
+        if mode == "missing":
+            self.drain()
+            raise ApiError(404, "not_found", "Not found.")
+        if rest == "capture":
+            self.only(method, "POST")
+            if mode == "drop":
+                # The Mac can't be reached: the connection closes without an answer.
+                self.drain()
+                self.close_connection = True
+                self.consumed = True
+                with b.lock:
+                    b.capture_log["uploads"].append({"dropped": True,
+                                                     "captureId": (self.headers.get("X-SamRabbit-Capture") or "").lower()})
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                return
+            if mode == "unavailable":
+                self.drain()
+                raise ApiError(503, "capture_unavailable", "The Mac can't take voice notes right now.", retryable=True)
+            content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > CAPTURE_MAX_BYTES:
+                raise ApiError(413, "body_too_large", "The body must be at most %d bytes." % CAPTURE_MAX_BYTES)
+            if not length:
+                raise ApiError(400, "invalid_audio", "Send the recording as the request body.")
+            data = self.rfile.read(length)
+            self.consumed = True
+            if len(data) != length:
+                raise ApiError(400, "invalid_audio", "The recording did not arrive completely.", retryable=True)
+            text: Optional[str] = None
+            seconds: Optional[float] = None
+            body: Dict[str, Any] = {}
+            if content_type in ("application/json", "text/json", "text/plain", ""):
+                # Words (the R1 transcribes on the device); audio always says its type.
+                try:
+                    body = json.loads(data.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    raise ApiError(400, "invalid_json", "The body must be a JSON object.") from None
+                raw = body.get("text") if isinstance(body, dict) else None
+                if not isinstance(raw, str) or not raw.strip():
+                    raise ApiError(400, "invalid_text", "Send the words as text, or the recording as the body.")
+                text = " ".join(raw.split())
+                kind = "text"
+            else:
+                if TRANSCRIBE_TYPES.get(content_type) is None:
+                    raise ApiError(415, "unsupported_audio", "Send the recording as audio/mp4, audio/x-m4a, "
+                                   "audio/wav or audio/aac.")
+                kind = sniff_audio(data)
+                if kind is None:
+                    raise ApiError(415, "unsupported_audio", "The body is not an m4a, WAV or AAC recording.")
+                seconds = mp4_seconds(data) if kind == "mp4" else None
+                if seconds is not None and seconds > CAPTURE_MAX_SECONDS:
+                    raise ApiError(413, "audio_too_long", "Voice notes can be at most 5 minutes.")
+            header_id = (self.headers.get("X-SamRabbit-Capture") or "").strip().lower()
+            inside = str(body.get("captureId") or "").strip().lower() if isinstance(body, dict) else ""
+            if header_id and inside and header_id != inside:
+                raise ApiError(400, "invalid_capture_id", "The capture id in the header and the body differ.")
+            capture_id = header_id or inside
+            if not _CAPTURE_ID.match(capture_id):
+                raise ApiError(400, "invalid_capture_id", "X-SamRabbit-Capture must be the note's UUID.")
+            raw_at = self.headers.get("X-SamRabbit-Captured-At") or (body.get("capturedAt") if body else None)
+            if raw_at in (None, ""):
+                captured = datetime.now().astimezone()
+            else:
+                captured = parse_offset_time(raw_at)
+                if captured is None:
+                    raise ApiError(400, "invalid_captured_at", "X-SamRabbit-Captured-At must be ISO 8601 with an offset.")
+                if not time.time() - 7 * 86400 <= captured.timestamp() <= time.time() + 300:
+                    raise ApiError(400, "invalid_captured_at", "X-SamRabbit-Captured-At is not a recent time.")
+            source = (self.headers.get("X-SamRabbit-Source") or (body.get("source") if body else "") or "").strip().lower()
+            if source and source not in CAPTURE_SOURCES:
+                raise ApiError(400, "invalid_source", "X-SamRabbit-Source must be r1, iphone, watch or mac.")
+            # Without a source: who sent it (a paired watch's token, else the phone).
+            source = source or ("watch" if device.get("platform") == "watchos" else "iphone")
+            meta = {"captureId": capture_id, "capturedAt": captured.isoformat(timespec="seconds"), "source": source,
+                    "deviceId": device["deviceId"], "platform": device.get("platform"),
+                    "relayedFor": self.headers.get("X-SamRabbit-Relayed-For")}
+            status, answer = b.capture_receive(meta, sha(data), text)
+            with b.lock:
+                b.capture_log["uploads"].append({"captureId": capture_id, "bytes": length, "kind": kind,
+                                                 "contentType": content_type, "seconds": seconds, "source": source,
+                                                 "capturedAt": meta["capturedAt"], "deviceId": device["deviceId"],
+                                                 "platform": device.get("platform"),
+                                                 "parentId": device.get("parentId"),
+                                                 "relayedFor": meta["relayedFor"], "replay": status == 200 or
+                                                 answer.get("state") != "received", "lang": self.q1("lang")})
+                del b.capture_log["uploads"][:-40]
+            wait = min(10.0, max(0.0, float(self.q1("wait", "0") or 0)))
+            if wait > 0:
+                answer = self.capture_wait(capture_id, wait)
+                status = 200 if answer["state"] in CAPTURE_FINAL else 202
+            return self.send_json(status, answer)
+        if rest == "captures":
+            self.only(method, "GET")
+            limit = max(1, min(50, int(self.q1("limit", "20") or 20)))
+            with b.lock:
+                records = b.captures_newest()
+                return self.send_json(200, {"captures": [b.capture_view(c) for c in records[:limit]],
+                                            "pending": sum(1 for c in records if c["state"] not in CAPTURE_FINAL),
+                                            "updatedAt": iso(time.time())})
+        match = re.match(r"^(capture|captures)/([0-9A-Fa-f-]{36})(?:/(act))?$", rest)
+        if not match or (match.group(3) is None) != (match.group(1) == "capture"):
+            raise ApiError(404, "not_found", "Not found.")
+        capture_id = match.group(2).lower()
+        if match.group(3) == "act":
+            self.only(method, "POST")
+            body = self.body()
+            status, view = b.capture_act(capture_id, str(body.get("action") or ""), body)
+            return self.send_json(status, view)
+        self.only(method, "GET")
+        with b.lock:
+            if capture_id not in b.captures:
+                raise ApiError(404, "capture_not_found", "There is no such voice note.")
+            b.capture_log["polls"].append({"captureId": capture_id, "wait": self.q1("wait")})
+            del b.capture_log["polls"][:-40]
+        wait = min(10.0, max(0.0, float(self.q1("wait", "0") or 0)))
+        return self.send_json(200, self.capture_wait(capture_id, wait))
+
+    def capture_wait(self, capture_id: str, wait: float) -> Dict[str, Any]:
+        """The note once it is done or failed, or as it is after ``wait`` (the real bridge's ``_wait_final``)."""
+        b = self.bridge
+        deadline = time.time() + wait
+        with b.lock:
+            c = b.captures[capture_id]
+            while time.time() < deadline and c["state"] not in CAPTURE_FINAL:
+                b.changed.wait(timeout=min(0.2, max(0.01, deadline - time.time())))
+            return b.capture_view(c)
+
+    # ------------------------------------------------------------------ the morning brief
+
+    def briefing(self, method: str, rest: str) -> None:
+        b = self.bridge
+        with b.lock:
+            mode = b.briefing_mode
+        if mode == "missing":
+            self.drain()
+            raise ApiError(404, "not_found", "Not found.")
+        if rest == "briefing":
+            self.only(method, "GET")
+            after = self.q1("after")
+            if after is not None and not after.isdigit():
+                raise ApiError(400, "invalid_query", "after must be a revision number.")
+            wait = min(25.0, max(0.0, float(self.q1("wait", "0") or 0)))
+            with b.lock:
+                deadline = time.time() + wait
+                # Like the real bridge: with ``after`` it waits for another revision; without, for a build to end.
+                while time.time() < deadline and ((after is not None and int(after) == b.briefing_revision) or
+                                                  (after is None and b.briefing_building)):
+                    b.changed.wait(timeout=min(0.2, max(0.01, deadline - time.time())))
+                return self.send_json(200, b.briefing())
+        if rest == "briefing/refresh":
+            self.only(method, "POST")
+            self.optional_body()
+            status, answer = b.briefing_refresh()
+            return self.send_json(status, answer)
+        match = re.match(r"^briefing/items/([^/]{2,120})/act$", rest)
+        if not match:
+            raise ApiError(404, "not_found", "Not found.")
+        self.only(method, "POST")
+        body = self.body()
+        action = body.get("action") or body.get("type")
+        if action not in BRIEFING_STATES and action != "open":
+            raise ApiError(400, "invalid_action", "action must be one of draft_reply, make_task, block_time, remind, "
+                           "open, done, dismiss.")
+        return self.send_json(200, b.briefing_act(unquote(match.group(1)), str(action), body))
 
     # ------------------------------------------------------------------ voice
 
@@ -2190,11 +3071,17 @@ class Handler(BaseHTTPRequestHandler):
             found = b.assistant_conversations.get(conversation_id)
             mine = found is not None and found["deviceId"] == device["deviceId"]
         if rest == "assistant/cancel":
-            cancelled = bool(mine and found["active"])
+            # Like the real bridge: with ``turnId`` only that turn stops (a cancel that arrives after it ended never
+            # stops the next one).
+            turn_id = body.get("turnId")
+            if turn_id is not None and (not isinstance(turn_id, str) or not _TURN_ID.match(turn_id.strip())):
+                raise ApiError(400, "invalid_turn", "turnId must be the turn's id.")
+            cancelled = bool(mine and found["active"]) and (turn_id is None or found["active"] == turn_id.strip())
             if cancelled:
                 found["cancel"].set()
             with b.lock:
-                b.assistant_log["cancels"].append({"conversationId": conversation_id, "cancelled": cancelled})
+                b.assistant_log["cancels"].append({"conversationId": conversation_id, "turnId": turn_id,
+                                                   "cancelled": cancelled})
             return self.send_json(200, {"ok": True, "cancelled": cancelled})
         if rest == "assistant/end":
             if mine:

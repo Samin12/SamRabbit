@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// T3 Code / Claude Code / Codex / SamRabbit as a small drawn tile (SF Symbols and letters, not logos), the Agent
-/// Dock's glyphs: "T3" in rounded type, an asterisk for Claude, the code chevrons for Codex, the orb for a chat. A
+/// Dock's glyphs: "T3" in rounded type, an asterisk for Claude, the code chevrons for Codex, the orb for a chat, a
+/// waveform for a voice note. A
 /// T3 tile carries the model family that runs the thread in its corner. Each mark has its own quiet tint so a
 /// glance tells them apart.
 public struct SourceGlyph: View {
@@ -26,6 +27,7 @@ public struct SourceGlyph: View {
         case .claude: Color(hex: 0xF0A27E)
         case .codex: SamTheme.mint
         case .samrabbit: SamTheme.accent
+        case .note: SamTheme.mint
         case .unknown: SamTheme.ink2
         }
     }
@@ -75,6 +77,10 @@ public struct SourceGlyph: View {
                 .foregroundStyle(Self.tint(.codex))
         case .samrabbit:
             OrbView(mood: .idle, animated: false, halo: false).frame(width: size * 0.7, height: size * 0.7)
+        case .note:
+            Image(systemName: "waveform.badge.mic")
+                .font(.system(size: size * 0.4, weight: .semibold))
+                .foregroundStyle(Self.tint(.note))
         case .unknown:
             Image(systemName: "sparkle").font(.system(size: size * 0.42)).foregroundStyle(Self.tint(.unknown))
         }
