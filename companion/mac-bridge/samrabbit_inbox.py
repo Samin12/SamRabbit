@@ -1393,7 +1393,8 @@ class InboxService:
                                       for thread in snapshot.threads.values()})
         self._read_t3_details(hub, rows)
         workspace = {record["id"]: record.get("workspaceRoot") or None for record in snapshot.records}
-        items = [self._t3_item(thread, base, workspace) for thread, base in rows]
+        drivers = self._drivers(hub)
+        items = [self._t3_item(thread, base, workspace, drivers) for thread, base in rows]
         return items, {"connected": True}
 
     def _read_t3_details(self, hub: Any, rows: List[Tuple[Dict[str, Any], Dict[str, Any]]]) -> None:
@@ -1433,7 +1434,8 @@ class InboxService:
                     self._t3_details.clear()
                 self._t3_details[thread_id] = (str(thread.get("updatedAt") or ""), pending, answer)
 
-    def _t3_item(self, thread: Dict[str, Any], base: Dict[str, Any], workspace: Dict[str, Any]) -> Dict[str, Any]:
+    def _t3_item(self, thread: Dict[str, Any], base: Dict[str, Any], workspace: Dict[str, Any],
+                 drivers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         thread_id = str(thread.get("id") or "")
         item_id = "t3:" + thread_id
         status = _MOBILE.get(str(base.get("status")), IDLE)
@@ -1467,7 +1469,8 @@ class InboxService:
             can.append("seen")
         project_id = str(thread.get("projectId") or "")
         return {
-            "id": item_id, "source": "t3", "agent": self._agent_of(thread),
+            "id": item_id, "source": "t3",
+            "agent": self._agent_of(thread, drivers if drivers is not None else self._drivers(self._hub())),
             "title": _clip(base.get("title") or "Untitled task", MAX_TITLE_CHARS),
             "project": base.get("projectName"), "cwd": thread.get("worktreePath") or workspace.get(project_id),
             "status": status, "statusLabel": label, "summary": _clip(summary, MAX_SUMMARY_CHARS),
@@ -1477,13 +1480,18 @@ class InboxService:
             "phase": base.get("phase") if status == WORKING else None,
         }
 
-    def _agent_of(self, thread: Dict[str, Any]) -> Optional[str]:
+    @staticmethod
+    def _drivers(hub: Any) -> Dict[str, str]:
+        """instance id -> driver, from T3's provider list when it was read (never a T3 call)."""
+        config = hub.cached_server_config() if hasattr(hub, "cached_server_config") else None
+        return {entry["instanceId"]: entry["driver"] for entry in (config or {}).get("providers") or []}
+
+    @staticmethod
+    def _agent_of(thread: Dict[str, Any], drivers: Dict[str, str]) -> Optional[str]:
+        """``claude`` / ``codex`` for the provider a T3 thread runs on (its instance's driver when known)."""
         selection = _dict(thread.get("modelSelection"))
         instance = str(selection.get("instanceId") or "")
         provider = str(_dict(thread.get("session")).get("providerName") or "")
-        hub = self._hub()
-        config = hub.cached_server_config() if hasattr(hub, "cached_server_config") else None
-        drivers = {entry["instanceId"]: entry["driver"] for entry in (config or {}).get("providers") or []}
         driver = drivers.get(instance) or provider or instance
         return _family(driver, str(selection.get("model") or ""))
 
@@ -1994,9 +2002,10 @@ class InboxService:
                     for record in snapshot.records if not record.get("scratch")]
         agents = self._agent_targets(hub, snapshot)
         recent = sorted(snapshot.threads.values(), key=lambda thread: _epoch(t3.activity_time(thread)), reverse=True)
+        drivers = self._drivers(hub)
         default_agent, default_model = None, None
         for thread in recent:
-            family = self._agent_of(thread)
+            family = self._agent_of(thread, drivers)
             model = str(_dict(thread.get("modelSelection")).get("model") or "")
             if family in agents and model:
                 default_agent = family

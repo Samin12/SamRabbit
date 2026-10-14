@@ -1619,15 +1619,16 @@ class T3Hub:
             if cached is not None and self._monotonic() - cached[0] < (
                     CONFIG_MAX_AGE if cached[1] is not None else CONFIG_RETRY_SECONDS):
                 return cached[1]
-            try:  # never through ``session.call``: a T3 without this RPC must not mark the session as failing
-                raw = self.session.http.rpc("server.getConfig", {}, token=self.session.token())
-            except (T3Error, _Unavailable, _Unauthorized, _RequestFailed):
-                raw = None
-            value = trim_server_config(raw) if isinstance(raw, dict) else None
-            if value is None:
-                _LOG.info("t3 provider list unavailable")
+        try:  # never through ``session.call``: a T3 without this RPC must not mark the session as failing
+            raw = self.session.http.rpc("server.getConfig", {}, token=self.session.token())
+        except (T3Error, _Unavailable, _Unauthorized, _RequestFailed):
+            raw = None
+        value = trim_server_config(raw) if isinstance(raw, dict) else None
+        if value is None:
+            _LOG.info("t3 provider list unavailable")
+        with self._config_lock:  # never held across the call: ``cached_server_config`` answers meanwhile
             self._config = (self._monotonic(), value)
-            return value
+        return value
 
     # ------------------------------------------------------------------ details
     def detail(self, thread_id: str, *, turns: int = 2, fresh: bool = False) -> Dict[str, Any]:
