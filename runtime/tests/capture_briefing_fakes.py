@@ -51,7 +51,7 @@ def sample_brief(date: str, *, revision: int = 3, needs_you: int = 2) -> dict[st
     return {
         "available": True, "building": False,
         "date": date, "revision": revision, "status": "ready", "generatedAt": date + "T11:01:00Z",
-        "headline": "2 things need you · 3 meetings, first at 10:00 · 1 agent waiting",
+        "headline": "2 things need you · 3 meetings, first at 10:00 AM · 1 agent waiting",
         "spoken": "Two emails need replies, your first meeting is at ten, and one agent is waiting for you.",
         "needsYou": needs_you, "footer": "Skipped 182 promos · business 64 · personal 41 read",
         "sections": [

@@ -151,7 +151,7 @@ public final class BoardFixtures {
                 + ",\"status\":\"" + (full ? "ready" : "unconfigured".equals(state) ? "unconfigured" : "loading")
                 + "\",\"today\":\"" + today + "\",\"morning\":true,\"stale\":false,\"briefing\":" + (!full ? "null"
                 : "{\"date\":\"" + today + "\",\"revision\":3,\"status\":\"ready\",\"updatedAt\":\"" + built + "\","
-                + "\"headline\":\"3 things need you · 4 meetings, first at 10:00 · 1 agent waiting\","
+                + "\"headline\":\"3 things need you · 4 meetings, first at 10:00 AM · 1 agent waiting\","
                 + "\"spoken\":\"Three things need you this morning.\",\"needsYou\":3,"
                 + "\"footer\":\"Skipped 182 promos and newsletters · business 64 · personal 41 read\","
                 + "\"sections\":["

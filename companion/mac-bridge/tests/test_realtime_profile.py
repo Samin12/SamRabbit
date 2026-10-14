@@ -107,9 +107,9 @@ class RuntimeSyncTest(unittest.TestCase):
         self.assertEqual(cards, {tool["name"] for tool in profile.CARD_TOOLS})
         self.assertEqual(set(sources) | cards | {name for name, *_rest in profile.R1_T3_TOOL_SPECS} |
                          {name for name, *_rest in profile.R1_MAC_TOOL_SPECS}, set(profile.R1_TOOL_NAMES))
-        # The only names that are not the R1's are the watch's own two.
+        # The only names that are not the R1's are the watch's own two and the dock's Mark seen.
         own = {tool["name"] for tool in profile.tool_definitions()} - set(profile.R1_TOOL_NAMES)
-        self.assertEqual({"get_status", "recent_conversations"}, own)
+        self.assertEqual({"get_status", "recent_conversations", "mark_seen"}, own)
 
     def test_the_session_is_the_r1s_shape(self) -> None:
         source = (RUNTIME / "providers" / "openai" / "platform.py").read_text(encoding="utf-8")

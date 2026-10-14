@@ -283,7 +283,7 @@ The bridge builds one brief a day from Gmail, the calendar and the agents (CONTR
 noon: on Home (`web/morning.js`, the rules in `web/briefing.js`) and at the top of the Agent Dock's list
 (`Sources/DockMorning.swift`, the rules in `DockBriefing.swift`, the same as the page's).
 
-- The headline ("3 things need you · 4 meetings, first at 09:30 · 1 agent waiting"), **Do first** (each item's verbs
+- The headline ("3 things need you · 4 meetings, first at 9:30 AM · 1 agent waiting"), **Do first** (each item's verbs
   are its buttons: **Draft reply**, **Make task**, **Block time**, **Remind me** (in an hour, 2 PM, tonight, tomorrow
   9 AM: the bridge puts a 15-minute reminder on the calendar; the item then says "Reminder set for 4:40 PM"), **Open**,
   plus Done and Dismiss), **Today** (the next events, a clash flagged, **Join** on a meeting with a

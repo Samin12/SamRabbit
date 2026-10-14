@@ -1199,6 +1199,29 @@ class ToolRunner:
                           action={"kind": "task_stopped", "title": "Stopped", "threadId": thread_id} if stopped
                           else None)
 
+    def _t_mark_seen(self, arguments: Dict[str, Any]) -> ToolResult:
+        """The dock's Mark seen by voice (``mcp.mark_seen``), the thing found as the T3 tools find a thread."""
+        items = mcp.inbox_items(self.bridge)
+        if arguments.get("all") is True:
+            targets = mcp.unseen_finished(items)
+        else:
+            text = " ".join(str(arguments.get("item") or "").split())
+            if not text:
+                raise _Failure("invalid_arguments", "Say which one, or all.")
+            views = [dict(item, threadId=item["id"]) for item in items]
+            found, candidates = match_thread(text, views)
+            if found is None:  # a thread id from t3_list_threads
+                found = next((view for view in views if view["threadId"] == "t3:" + text), None)
+            if found is None:
+                if candidates:
+                    raise _Failure("item_ambiguous", "Nothing clearly matches “" + text + "”. Closest: " + "; ".join(
+                        f"“{item.get('title')}”" for item in candidates) + ". Ask the user which one.")
+                raise _Failure("item_not_found", f"Nothing in the inbox matches “{text}”.")
+            targets = [next(item for item in items if item["id"] == found["threadId"])]
+        value = mcp.mark_items_seen(self.bridge, targets)
+        self._threads = None
+        return ToolResult({key: item for key, item in value.items() if item is not None})
+
     # ------------------------------------------------------------------ calendar
     def _event_view(self, item: Dict[str, Any], now: datetime) -> Dict[str, Any]:
         start = _parse_time(item.get("startsAt"), self.zone)

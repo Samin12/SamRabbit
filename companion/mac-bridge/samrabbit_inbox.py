@@ -181,6 +181,9 @@ ACTIONS = ("approve", "answer", "reply", "stop", "seen", "open", "dismiss", "und
 AGENT_DRIVERS = {"claude": "claudeAgent", "codex": "codex"}
 AGENT_LABELS = {"claude": "Claude", "codex": "Codex"}
 _ITEM_ID = re.compile(r"^(t3|claude|codex|chat|note):([A-Za-z0-9][A-Za-z0-9._:\-]{0,190})$")
+# What the assistant's tools may do here besides reading the list (``mark_seen``): mark an agent seen.
+_ASSISTANT_SEEN = re.compile(re.escape(MOBILE_PREFIX)
+                             + r"/items/(t3|claude|codex)(?::|%3[Aa])[A-Za-z0-9._:%\-]{1,200}/seen")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _DAY = re.compile(r"^\d{1,4}$")
@@ -1611,12 +1614,15 @@ class InboxService:
             return _sync.desktop_request_denied(handler)
         return InboxError(503, "desktop_unavailable", "The desktop token check is not installed.")
 
-    def _device_denied(self, handler: Any) -> Optional[Exception]:
+    def _device_denied(self, handler: Any, method: str = "", route: str = "") -> Optional[Exception]:
         """The phone's rule for ``/v1/mobile/inbox*``: the mobile API's own (a paired device's token from a LAN or
-        tailnet peer)."""
+        tailnet peer). The assistant's tools may read the list and mark an item seen (their ``mark_seen``, the dock's
+        Mark seen by voice), nothing else."""
         mobile = getattr(self.server, "mobile", None)
         if mobile is not None and hasattr(mobile, "device_denied"):
-            return mobile.device_denied(handler)
+            assistant = (method == "GET" and route == MOBILE_PREFIX) or (
+                method == "POST" and _ASSISTANT_SEEN.fullmatch(route) is not None)
+            return mobile.device_denied(handler, assistant=assistant)
         return InboxError(503, "mobile_unavailable", "The mobile API is not running on the Mac bridge.")
 
     # ------------------------------------------------------------------ building the list
@@ -2123,7 +2129,7 @@ class InboxService:
         handlers (``mobile``: the phone's item view and words)."""
         mobile = _phone_route(route)
         try:
-            denied = self._device_denied(handler) if mobile else self._desktop_denied(handler)
+            denied = self._device_denied(handler, method, route) if mobile else self._desktop_denied(handler)
             if denied is not None:
                 raise denied
             found = None

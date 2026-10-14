@@ -1,13 +1,14 @@
 {
- "_about": "Answers of the real Mac bridge (feat/w8-bridge 2df9f3f, samrabbit_briefing.py, its own test fakes: fake Gmail, calendar, Claude and T3) for GET /v1/briefing and POST /v1/briefing/items/<id>/act. The R1 tests parse these so a change in the bridge's shape shows up here. Addresses replaced with example.com.",
+ "_about": "Answers of the real Mac bridge (feat/w8-bridge 2df9f3f, then 12-hour times and buildTime at integration; samrabbit_briefing.py, its own test fakes: fake Gmail, calendar, Claude and T3) for GET /v1/briefing and POST /v1/briefing/items/<id>/act. The R1 tests parse these so a change in the bridge's shape shows up here. Addresses replaced with example.com.",
  "view": {
   "revision": 1791484665001,
   "date": "2026-10-08",
   "building": false,
+  "buildTime": "06:40",
   "available": true,
   "status": "ready",
   "generatedAt": "2026-10-08T18:37:45Z",
-  "headline": "3 things need you · 3 meetings, first at 15:00 · and a very long tail that goes on and…",
+  "headline": "3 things need you · 3 meetings, first at 3:00 PM · and a very long tail that goes on and…",
   "spoken": "Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. Good afternoon. Sign Dana's SOW, fix the Stripe…",
   "needsYou": 6,
   "sections": [

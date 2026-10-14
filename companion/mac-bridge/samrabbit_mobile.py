@@ -919,17 +919,18 @@ class MobileService:
             return _sync._desktop_denied(handler, self._desktop_token)  # noqa: SLF001 - the same rule
         return MobileError(503, "desktop_unavailable", "The desktop token check is not installed.")
 
-    def device_denied(self, handler: Any) -> Optional[Exception]:
+    def device_denied(self, handler: Any, *, assistant: bool = False) -> Optional[Exception]:
         """The phone's rule (a LAN or tailnet peer with a paired device's own token; never the assistant's internal
-        token), as every ``/v1/mobile/*`` route here applies it: None when allowed, else the error to answer. The
-        inbox's phone routes (``samrabbit_inbox``, ``/v1/mobile/inbox*``) use it."""
+        token unless ``assistant``), as every ``/v1/mobile/*`` route here applies it: None when allowed, else the
+        error to answer. The inbox's phone routes (``samrabbit_inbox``, ``/v1/mobile/inbox*``) use it, letting the
+        assistant's tools read the list and mark things seen (its ``mark_seen``) and nothing else."""
         if not mobile_peer_allowed(str(handler.client_address[0])):
             return MobileError(403, "forbidden", "Only devices on your local network or tailnet may use this.")
         try:
             device = self._device(handler)
         except MobileError as error:
             return error
-        if device.get("internal"):
+        if device.get("internal") and not assistant:
             return MobileError(403, "forbidden", "The assistant's tools cannot use this route.")
         return None
 

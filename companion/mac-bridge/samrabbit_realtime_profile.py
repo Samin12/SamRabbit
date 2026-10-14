@@ -518,6 +518,22 @@ WATCH_TOOLS: List[Dict[str, Any]] = [
 ]
 
 
+# The bridge's own (no R1 tool does it): the dock's Mark seen, by voice.
+INBOX_TOOLS: List[Dict[str, Any]] = [
+    {"type": "function", "name": "mark_seen",
+     "description": "Mark what Samin saw in his agent inbox (the dock's Needs you: T3 Code threads, Claude Code and "
+                    "Codex sessions) as seen, when he says 'mark it as seen', 'I saw that', 'clear it': a finished "
+                    "one stops being new and a failed one settles, out of Needs you until it fails again. item: its "
+                    "title as he said it (or an id from t3_list_threads); all: true for everything finished or "
+                    "failed he hasn't seen. Approvals and questions keep needing him: seeing them doesn't answer "
+                    "them. Then say in a few words what you marked.",
+     "parameters": {"type": "object", "properties": {
+         "item": {"type": "string", "description": "The title as the user said it, or an id. Never invent ids."},
+         "all": {"type": "boolean", "description": "Everything finished or failed that he hasn't seen."}},
+         "additionalProperties": False}},
+]
+
+
 def _function(spec: Sequence[Any]) -> Dict[str, Any]:
     name, description, _effect, schema = spec
     return {"type": "function", "name": name, "description": description, "parameters": schema}
@@ -543,7 +559,7 @@ def tool_definitions(*, t3: bool = True, mac: bool = True, calendar: bool = True
         tools += MAC_TOOLS if t3 else [tool for tool in MAC_TOOLS if tool["name"] != "mac_task"]
     if visuals:
         tools += UI_TOOLS
-    return [json.loads(json.dumps(tool)) for tool in tools + CARD_TOOLS + WATCH_TOOLS]
+    return [json.loads(json.dumps(tool)) for tool in tools + CARD_TOOLS + WATCH_TOOLS + INBOX_TOOLS]
 
 
 _LABELS = {"needs_approval": "needs approval", "needs_input": "has a question", "working": "working"}

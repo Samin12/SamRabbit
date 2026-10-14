@@ -110,8 +110,11 @@ export function createMorning(ctx, { onChange } = {}) {
       if (patchBefore) patches.set(item.id, patchBefore);
       else patches.delete(item.id);
       changed();
+      // A tap the Mac stopped in the middle of (it may be done): the bridge says where to look, and the next tap does it.
+      const uncertain = Boolean(failure && failure.code === 'action_uncertain' && failure.detail);
       toast(failure && failure.status === 0 ? 'The Mac bridge isn’t answering.'
-        : `That didn’t work${failure && failure.detail ? `: ${failure.detail}` : '.'}`, { tone: 'error' });
+        : uncertain ? failure.detail
+          : `That didn’t work${failure && failure.detail ? `: ${failure.detail}` : '.'}`, { tone: uncertain ? undefined : 'error' });
     }
   }
 

@@ -461,9 +461,9 @@ answer with ElevenLabs (the Jarvis voice). Every route takes the mobile token, f
   project settings, hooks, plugins, CLAUDE.md or MCP servers load (the user's hooks would upload utterances); never
   `--bare` (no login) or `--safe-mode` (no MCP servers). Its session files are pruned after two weeks.
 - Its tools (`samrabbit_assistant_mcp.py`, a stdio MCP server: `get_status`, `list_tasks`, `read_task`,
-  `start_task`, `reply_task`, `respond_task`, `stop_task`, `calendar_agenda`, `calendar_block`, `calendar_create`,
-  `journal_add`, `mac_open`, `mac_look` (an image the model sees), `generate_ui`, `recent_conversations`) call this
-  bridge's own mobile API over loopback with an internal assistant token (made at start, in a 0600 file; loopback
+  `start_task`, `reply_task`, `respond_task`, `stop_task`, `mark_seen`, `calendar_agenda`, `calendar_block`,
+  `calendar_create`, `journal_add`, `mac_open`, `mac_look` (an image the model sees), `generate_ui`,
+  `recent_conversations`) call this bridge's own mobile API over loopback with an internal assistant token (made at start, in a 0600 file; loopback
   only; a short list of routes, never pairing, the stream or the assistant itself).
 - Settings: `~/.config/samrabbit/assistant.json` `{"model": "claude-haiku-5-5" | "claude-sonnet-5-5", "voice":
   "<ElevenLabs voice id>"}` (re-read every turn), or `--assistant-model` / `--assistant-voice`
@@ -527,7 +527,8 @@ interrupted, never answered by Claude. The summary says `assistant: {available, 
   addendum. Tools: the R1's `t3_*` and `mac_*` specs verbatim, `calendar_list_upcoming`, `calendar_create_event`,
   `journal_add` (only Samin's own words: the Mac checks them against what he said), `journal_read`, `ui_generate`
   (it appears on the iPhone and in the desktop app), `show_card` / `update_card` / `dismiss_card` (a small card on the
-  watch), plus `get_status` and `recent_conversations`. They run on the Mac one at a time (like the R1's tool queue),
+  watch), plus `get_status`, `recent_conversations` and `mark_seen` (the dock's Mark seen by voice: one item by its
+  title, or `all` finished or failed agents he hasn't seen; a failure settles). They run on the Mac one at a time (like the R1's tool queue),
   through the same mobile API calls as the Claude path's tools (loopback, never through a system proxy).
 - **A conversation's session** opens with `POST /v1/mobile/assistant/session` (or the first turn) and closes on
   `/end`, a goodbye, three idle minutes, or after 55 minutes (the next turn opens a new one with a short summary).
@@ -716,7 +717,8 @@ memory and opens nothing (answers say `dryRun: true`) unless started with `--inb
 
 **On the iPhone** (`/v1/mobile/inbox*`, CONTRACTS-WAVE7): the same list, revisions, long poll, items and actions for
 a paired phone's own mobile token from a LAN or Tailscale peer (the mobile API's rule; the R1's token, the desktop
-token and the assistant's internal token get 401 / 403), so the phone shows Claude Code and Codex sessions too and
+token and the assistant's internal token get 401 / 403; the internal token may only read the list and mark a T3,
+Claude or Codex item seen, for `mark_seen`), so the phone shows Claude Code and Codex sessions too and
 what it marks seen is seen in the dock:
 
 | Route | Answer |
@@ -816,7 +818,7 @@ and auth as the voice notes.
 
 | Route | What |
 |---|---|
-| `GET …/briefing?after=<revision>&wait=0..25` | `{available, status: ready \| building \| failed \| waiting \| off, date, revision, building, generatedAt, headline, spoken, needsYou, sections: [{id: doFirst \| today \| agents \| fyi, title, items}], accounts: [{label, ok, fetched?, kept?, reason?}], counts, composed: claude \| rules, reason?}`. With `after` equal to `revision` it waits up to `wait` seconds for a change; without `after`, `wait` waits for a running build. The first request after 05:00 with no brief for today builds one (made again at 06:40, see below) |
+| `GET …/briefing?after=<revision>&wait=0..25` | `{available, status: ready \| building \| failed \| waiting \| off, date, revision, building, buildTime ("06:40", when it builds each morning; not while off), generatedAt, headline, spoken, needsYou, sections: [{id: doFirst \| today \| agents \| fyi, title, items}], accounts: [{label, ok, fetched?, kept?, reason?}], counts, composed: claude \| rules, reason?}`. With `after` equal to `revision` it waits up to `wait` seconds for a change; without `after`, `wait` waits for a running build. The first request after 05:00 with no brief for today builds one (made again at 06:40, see below) |
 | `POST …/briefing/refresh` | 202 `{status: "building", revision}`; at most one build every 5 minutes (429 `refresh_too_soon` with `retryAfter` seconds) |
 | `POST …/briefing/items/<id>/act {action, …}` | `{ok, item, result, revision}`; on his tap only, each action done once per item and day whatever the item's state is by then (`draft_reply`, `remind`, `draft_reply` again: one draft; a second tap answers what the first did, and the item's `acted` lists them); marked in progress before Composio or T3 is called, so one the Mac stopped in the middle of answers 409 `action_uncertain` once ("look in Gmail's Drafts first") instead of doing it again blind; a refresh landing mid-tap keeps it |
 

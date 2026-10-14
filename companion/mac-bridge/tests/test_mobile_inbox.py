@@ -101,14 +101,27 @@ class PhoneAuthTest(PhoneInboxBase):
         self.assertEqual(404, self.call("GET", "/v1/mobile/inbox/nope", token=self.phone)[0])
         self.assertEqual(405, self.call("DELETE", "/v1/mobile/inbox", token=self.phone)[0])
 
-    def test_the_assistants_own_tools_cannot_read_the_inbox(self) -> None:
+    def test_the_assistants_own_tools_only_read_the_list_and_mark_seen(self) -> None:
+        # Their ``mark_seen`` (the dock's Mark seen by voice); every other inbox route stays the phone's.
+        self.build_world()
         self.service.assistant = _AssistantTools()
         try:
             status, value = self.call("GET", "/v1/mobile/inbox", token=INTERNAL)
-            self.assertEqual((403, "forbidden"), (status, value["error"]["code"]))
-            status, value = self.call("POST", "/v1/mobile/inbox/items/t3:t-done/reply", {"text": REPLY},
-                                      token=INTERNAL)
-            self.assertEqual((403, "forbidden"), (status, value["error"]["code"]))
+            self.assertEqual(200, status, value)
+            for item_id in ("t3:t-done", "t3%3At-done"):
+                status, value = self.call("POST", f"/v1/mobile/inbox/items/{item_id}/seen", {}, token=INTERNAL)
+                self.assertEqual((200, {"ok": True}), (status, value))
+            for method, route, body in (("POST", "/v1/mobile/inbox/items/t3:t-done/reply", {"text": REPLY}),
+                                        ("POST", "/v1/mobile/inbox/items/t3:t-approval/approve",
+                                         {"decision": "accept"}),
+                                        ("POST", "/v1/mobile/inbox/items/t3:t-done/dismiss", {}),
+                                        ("POST", "/v1/mobile/inbox/items/chat:c_x/seen", {}),
+                                        ("POST", "/v1/mobile/inbox/new", {"text": REPLY}),
+                                        ("GET", "/v1/mobile/inbox/items/t3:t-done", None),
+                                        ("GET", "/v1/mobile/inbox/targets", None)):
+                with self.subTest(route=route):
+                    status, value = self.call(method, route, body, token=INTERNAL)
+                    self.assertEqual((403, "forbidden"), (status, value["error"]["code"]))
         finally:
             self.service.assistant = None
         self.assertEqual([], self.fake_t3.dispatched)

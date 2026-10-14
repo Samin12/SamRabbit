@@ -88,6 +88,16 @@ TOOLS: List[Dict[str, Any]] = [
      "description": "Stop a running T3 Code task. Only after Samin clearly confirmed.",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"],
                      "additionalProperties": False}},
+    {"name": "mark_seen",
+     "description": "Mark what Samin saw in his agent inbox (the dock's Needs you: T3 Code tasks, Claude Code and "
+                    "Codex sessions) as seen, when he says 'mark it as seen', 'I saw that', 'clear it': a finished "
+                    "one stops being new and a failed one settles, out of Needs you until it fails again. item: its "
+                    "title as he said it (or an id); all: true for everything finished or failed he hasn't seen. "
+                    "Approvals and questions keep needing him: seeing them doesn't answer them.",
+     "inputSchema": {"type": "object", "properties": {
+         "item": {"type": "string", "description": "the title as he said it, or an id"},
+         "all": {"type": "boolean", "description": "everything finished or failed that he hasn't seen"}},
+         "additionalProperties": False}},
     {"name": "calendar_agenda",
      "description": "Samin's Google Calendar. withinMinutes for 'the next N minutes' (events happening now or "
                     "starting in that window); hours for a longer window (default 12).",
@@ -363,6 +373,59 @@ def stop_task(bridge: Bridge, arguments: Dict[str, Any]) -> Dict[str, Any]:
             "note": None if value.get("wasWorking") else "It was not running."}
 
 
+SEEN_SOURCES = ("t3", "claude", "codex")
+
+
+def inbox_items(bridge: Bridge) -> List[Dict[str, Any]]:
+    """The inbox as the phone sees it (T3 Code, Claude Code, Codex, chats and voice notes), dismissed ones left out."""
+    value = bridge.call("GET", "/v1/mobile/inbox")
+    return [item for item in value.get("items") or [] if isinstance(item, dict) and item.get("id")]
+
+
+def unseen_finished(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """``mark_seen {all}``: every finished or failed agent he hasn't seen (approvals and questions still need him)."""
+    return [item for item in items if item.get("source") in SEEN_SOURCES and item.get("status") in ("done", "error")
+            and "seen" in (item.get("can") or [])]
+
+
+def mark_items_seen(bridge: Bridge, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """``POST /v1/mobile/inbox/items/<id>/seen`` for each (what the dock's Mark seen does); one already seen is left."""
+    marked = [item for item in items if "seen" in (item.get("can") or [])]
+    for item in marked:
+        bridge.call("POST", f"/v1/mobile/inbox/items/{quote(str(item['id']), safe=':')}/seen", {})
+    settled = sum(1 for item in marked if item.get("status") == "error")
+    return {"marked": len(marked), "titles": [_short(item.get("title"), 80) for item in marked[:5]],
+            "settled": settled or None,
+            "note": None if marked else "Nothing to mark: it was already seen, or it is waiting for his answer."}
+
+
+def _match_item(text: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    lowered = text.lower()
+    for item in items:
+        if str(item.get("id")).lower() == lowered or str(item.get("id")).lower().endswith(":" + lowered):
+            return item
+    exact = [item for item in items if " ".join(str(item.get("title") or "").split()).lower() == lowered]
+    if exact:
+        return exact[0]
+    near = [item for item in items if lowered in str(item.get("title") or "").lower()
+            or str(item.get("title") or "").lower() in lowered and str(item.get("title") or "").strip()]
+    if len(near) == 1:
+        return near[0]
+    if near:
+        raise ToolFailure("ambiguous", "More than one matches: " + "; ".join(
+            f"“{_short(item.get('title'), 60)}”" for item in near[:3]) + ". Ask him which one.")
+    raise ToolFailure("not_found", f"Nothing in the inbox matches “{_short(text, 60)}”.")
+
+
+def mark_seen(bridge: Bridge, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    everything = arguments.get("all") is True
+    text = " ".join(str(arguments.get("item") or "").split())
+    if not everything and not text:
+        raise ToolFailure("invalid_arguments", "Say which one, or all.")
+    items = inbox_items(bridge)
+    return mark_items_seen(bridge, unseen_finished(items) if everything else [_match_item(text, items)])
+
+
 def calendar_agenda(bridge: Bridge, arguments: Dict[str, Any]) -> Dict[str, Any]:
     within = _int_arg(arguments, "withinMinutes", 1, 1440)
     hours = _int_arg(arguments, "hours", 1, 168)
@@ -475,7 +538,7 @@ def recent_conversations(bridge: Bridge, _arguments: Dict[str, Any]) -> Dict[str
 
 
 HANDLERS = {"get_status": get_status, "list_tasks": list_tasks, "read_task": read_task, "start_task": start_task,
-            "reply_task": reply_task, "respond_task": respond_task, "stop_task": stop_task,
+            "reply_task": reply_task, "respond_task": respond_task, "stop_task": stop_task, "mark_seen": mark_seen,
             "calendar_agenda": calendar_agenda, "calendar_block": calendar_block, "calendar_create": calendar_create,
             "journal_add": journal_add, "mac_open": mac_open, "mac_look": mac_look, "generate_ui": generate_ui,
             "recent_conversations": recent_conversations}

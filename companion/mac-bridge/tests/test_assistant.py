@@ -38,6 +38,7 @@ import samrabbit_assistant as assistant  # noqa: E402
 import samrabbit_assistant_mcp as tools  # noqa: E402
 import samrabbit_bridge as bridge  # noqa: E402
 import samrabbit_calendar as gcal  # noqa: E402
+import samrabbit_inbox as inbox  # noqa: E402
 import samrabbit_t3 as t3  # noqa: E402
 from test_installed_copy import DESKTOP as DEV_DESKTOP, TOKEN as DEV_TOKEN  # noqa: E402
 from test_installed_copy import FakesMixin, ISOLATED, _call, _restore  # noqa: E402
@@ -682,9 +683,9 @@ class McpServerTest(AssistantBase):
                          self.rpc(process, {"jsonrpc": "2.0", "id": 2, "method": "ping"}),
                          "the notification got no answer: the next line is the ping's")
         listed = self.rpc(process, {"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-        self.assertEqual(15, len(listed))
+        self.assertEqual(16, len(listed))
         self.assertEqual({"get_status", "list_tasks", "read_task", "start_task", "reply_task", "respond_task",
-                          "stop_task", "calendar_agenda", "calendar_block", "calendar_create", "journal_add",
+                          "stop_task", "mark_seen", "calendar_agenda", "calendar_block", "calendar_create", "journal_add",
                           "mac_open", "mac_look", "generate_ui", "recent_conversations"},
                          {tool["name"] for tool in listed})
 
@@ -718,6 +719,7 @@ class McpServerTest(AssistantBase):
                 ("calendar_block", {"minutes": 2}, "invalid_arguments"), ("read_task", {"id": "no-such"},
                                                                           "t3_thread_not_found"),
                 ("start_task", {"text": "x", "project": "Nope"}, "project_not_found"),
+                ("mark_seen", {}, "invalid_arguments"),
                 ("nonexistent", {}, "unknown_tool"))):
             with self.subTest(tool=name, arguments=arguments):
                 result = call(20 + number, name, arguments)
@@ -726,6 +728,34 @@ class McpServerTest(AssistantBase):
         self.assertEqual(-32700, self.rpc(process, "not json")["error"]["code"])
         self.assertEqual(-32601, self.rpc(process, {"jsonrpc": "2.0", "id": 40, "method": "resources/list"})
                          ["error"]["code"])
+
+    def test_mark_seen_settles_a_failure_he_saw(self) -> None:
+        own = inbox.InboxService(home=str(self.root / "home-seen"))
+        self.addCleanup(own.close)
+        self.server.inbox = own
+        own.attach(self.server)
+        own.refresh(force=True)  # the first look: what is there is seen ...
+        with self.fake_t3.lock:  # ... so the deploy preview fails again: news, in Needs you
+            self.fake_t3.get_thread("t-error")["session"]["updatedAt"] = "2026-10-08T18:00:00.000Z"
+        self.hub.invalidate()
+        own.refresh_soon()
+        process = self.start_server()
+        self.rpc(process, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+
+        def call(number: int, arguments: Dict[str, Any]) -> Dict[str, Any]:
+            result = self.rpc(process, {"jsonrpc": "2.0", "id": number, "method": "tools/call",
+                                        "params": {"name": "mark_seen", "arguments": arguments}})["result"]
+            return dict(json.loads(result["content"][0]["text"]), isError=result["isError"])
+
+        missing = call(2, {"item": "the moon landing"})
+        self.assertEqual(("not_found", True), (missing["error"], missing["isError"]))
+        marked = call(3, {"item": "deploy preview"})
+        self.assertEqual((False, 1, ["Deploy preview"], 1),
+                         (marked["isError"], marked["marked"], marked["titles"], marked["settled"]))
+        own.refresh_soon()
+        settled = next(item for item in own.refresh(force=True).items if item["id"] == "t3:t-error")
+        self.assertEqual(("idle", False), (settled["status"], settled["unread"]), "out of Needs you")
+        self.assertEqual(0, call(4, {"all": True})["marked"], "nothing else finished or failed unseen")
 
     def test_a_wrong_token_gets_nothing(self) -> None:
         process = self.start_server(token="sra_" + "x" * 43)

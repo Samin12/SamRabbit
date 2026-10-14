@@ -89,7 +89,7 @@ def events() -> Dict[str, Any]:
 
 
 ANSWER = {
-    "headline": "3 things need you · 3 meetings, first at 15:00 · and a very long tail that goes on and on and on",
+    "headline": "3 things need you · 3 meetings, first at 3:00 PM · and a very long tail that goes on and on and on",
     "spoken": "Good afternoon. Sign Dana's SOW, fix the Stripe payout, and you have standup at three. " * 8,
     "doFirst": [
         {"ref": "b1", "title": "Sign the SOW for Dana by Friday", "why": "Dana at Acme needs the Q4 SOW signed by Fri",
@@ -322,7 +322,7 @@ class BuildTest(BriefingBase):
                                  [item["title"] for item in self.items(value, "doFirst")])
                 self.assertEqual(["Join Standup", "Join Dentist", "Join Dinner with Ana"],
                                  [item["title"] for item in self.items(value, "today")])
-                self.assertEqual("3 things need you · 3 meetings, first at 15:00 · 3 agents waiting",
+                self.assertEqual("3 things need you · 3 meetings, first at 3:00 PM · 3 agents waiting",
                                  value["headline"])
                 self.assertTrue(value["spoken"].startswith("First: Reply to Dana Lee"))
 
@@ -590,6 +590,7 @@ class RouteTest(BriefingBase):
         self.service.build("test")
         status, phone = self.call("GET", "/v1/mobile/briefing", token=self.phone)
         status, desktop = self.call("GET", "/v1/desktop/briefing", desktop=True)
+        self.assertEqual("06:40", phone["buildTime"], "when it builds each morning (the R1 waits for it)")
         r1 = self.brief()
         self.assertEqual(phone["revision"], desktop["revision"])
         self.assertEqual(phone["headline"], r1["headline"])

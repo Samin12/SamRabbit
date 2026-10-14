@@ -390,6 +390,35 @@ class ToolTest(RealtimeBase):
         self.assertIn("1 need the user", instructions, "the session's T3 status leaves it out too")
         self.assertNotIn("Fix the login redirect", instructions)
 
+    def test_mark_it_as_seen_settles_it_like_the_docks_button(self) -> None:
+        # Samin: "if I say 'Mark as seen,' it should settle it, and I shouldn't be seeing it in 'Needs You.'"
+        own = inbox.InboxService(home=str(self.root / "home-seen"))
+        self.addCleanup(own.close)
+        self.server.inbox = own
+        own.attach(self.server)
+        own.refresh(force=True)  # the first look: what is there is seen ...
+        with self.fake_t3.lock:  # ... so the deploy preview fails again: news, in Needs you
+            self.fake_t3.get_thread("t-error")["session"]["updatedAt"] = "2026-10-08T18:00:00.000Z"
+        self.hub.invalidate()
+        own.refresh_soon()
+        failed = next(item for item in own.refresh(force=True).items if item["id"] == "t3:t-error")
+        self.assertEqual(("error", True), (failed["status"], failed["unread"]))
+        self.rt_script({"call": "mark_seen", "arguments": {"item": "the deploy preview"}},
+                       {"call": "mark_seen", "arguments": {"all": True}},
+                       {"call": "mark_seen", "arguments": {"item": "the moon landing"}},
+                       {"say": "Marked the deploy preview as seen.", "ms": 200})
+        self.say_turn("mark the deploy preview as seen")
+        outputs = [json.loads(event["item"]["output"]) for event in self.received()
+                   if event["type"] == "conversation.item.create" and event["item"]["type"] == "function_call_output"]
+        self.assertEqual({"marked": 1, "titles": ["Deploy preview"], "settled": 1}, outputs[0])
+        self.assertEqual(0, outputs[1]["marked"], "nothing else finished or failed unseen")
+        self.assertEqual(("item_not_found", True), (outputs[2]["error"], outputs[2]["isError"]))
+        own.refresh_soon()
+        settled = next(item for item in own.refresh(force=True).items if item["id"] == "t3:t-error")
+        self.assertEqual(("idle", False), (settled["status"], settled["unread"]), "out of Needs you")
+        self.assertEqual([], [command for command in self.fake_t3.dispatched
+                              if command.get("threadId") == "t-error"], "seeing it tells T3 nothing")
+
     def test_cards_show_on_the_watch(self) -> None:
         self.rt_script({"call": "show_card", "arguments": {"id": "next", "title": "Next up",
                                                            "lines": ["Dentist 3 PM", "Standup 4 PM"]}},
