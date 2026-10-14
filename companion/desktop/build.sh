@@ -116,6 +116,15 @@ if [ "$ADHOC" != 1 ]; then
   CERT=$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development: / { print $2; exit }')
   if [ -n "$CERT" ]; then IDENTITY=$CERT; SIGNED_WITH="Apple Development"; fi
 fi
-codesign -s "$IDENTITY" --force --deep --timestamp=none "$APP" >/dev/null 2>&1
+sign() { codesign -s "$1" --force --deep --timestamp=none "$APP" 2>&1; }
+if ! SIGNING=$(sign "$IDENTITY"); then
+  [ "$IDENTITY" = - ] && { printf '%s\n' "$SIGNING" >&2; echo "build.sh: ad-hoc signing failed" >&2; exit 1; }
+  # A locked keychain (a non-GUI session), a denied key prompt, a missing intermediate certificate: say why, and
+  # sign ad-hoc rather than fail (macOS then asks for the microphone again after this build).
+  echo "build.sh: the Apple Development identity couldn't sign (pass --adhoc to skip it); signing ad-hoc:" >&2
+  printf '%s\n' "$SIGNING" | sed 's/^/  /' >&2
+  SIGNED_WITH="ad-hoc, the Apple Development identity couldn't sign"
+  SIGNING=$(sign -) || { printf '%s\n' "$SIGNING" >&2; echo "build.sh: ad-hoc signing failed" >&2; exit 1; }
+fi
 codesign --verify --deep --strict "$APP"
 echo "built $APP ($(du -sh "$APP" | cut -f1), signed $SIGNED_WITH)"
