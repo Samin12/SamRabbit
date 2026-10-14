@@ -21,12 +21,13 @@ const ICONS = {
   draft_reply: 'reply', make_task: 'plus', block_time: 'calendar', remind: 'bell', done: 'check', dismiss: 'close',
   open: 'external',
 };
+// The bridge's own names (samrabbit_briefing STATES); "snoozed" is the research draft's "reminded".
 const STATES = {
-  draft_reply: 'drafted', make_task: 'tasked', block_time: 'blocked', remind: 'snoozed', done: 'done', dismiss: 'dismissed',
+  draft_reply: 'drafted', make_task: 'tasked', block_time: 'blocked', remind: 'reminded', done: 'done', dismiss: 'dismissed',
 };
 const STATE_LINES = {
-  drafted: 'Draft saved in Gmail · not sent', tasked: 'T3 task started', blocked: 'Time blocked', snoozed: 'Reminder set',
-  done: 'Done', dismissed: 'Dismissed',
+  drafted: 'Draft saved in Gmail · not sent', tasked: 'T3 task started', blocked: 'Time blocked', reminded: 'Reminder set',
+  snoozed: 'Reminder set', done: 'Done', dismissed: 'Dismissed',
 };
 
 function text(value) {
@@ -77,6 +78,21 @@ export function stateLine(state) {
   return STATE_LINES[state] || '';
 }
 
+/** "4:40 PM" today, "Thu 9:00 AM" another day (en-US, this Mac's zone). */
+export function remindWhen(ms, now = Date.now()) {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return localDay(ms) === localDay(now) ? time : `${d.toLocaleDateString('en-US', { weekday: 'short' })} ${time}`;
+}
+
+/** What a handled item's line says: its state, and for a reminder when it is ("Reminder set for 4:40 PM"). */
+export function itemStateLine(item, now = Date.now()) {
+  if ((item.state === 'reminded' || item.state === 'snoozed') && item.remindAt) {
+    return `Reminder set for ${remindWhen(item.remindAt, now)}`;
+  }
+  return stateLine(item.state);
+}
+
 function normalizeItem(raw, fallback) {
   if (!raw || typeof raw !== 'object') return null;
   const id = text(raw.id);
@@ -95,6 +111,9 @@ function normalizeItem(raw, fallback) {
   }
   const account = text(raw.account);
   const accountIsEmail = account.includes('@');
+  const state = text(raw.state).toLowerCase() || 'open';
+  // The bridge keeps an action's result on the item: a Draft reply's Gmail draft opens again from it.
+  const result = raw.result && typeof raw.result === 'object' ? raw.result : {};
   return {
     id,
     section,
@@ -105,8 +124,10 @@ function normalizeItem(raw, fallback) {
     why: oneLine(raw.why || raw.detail || raw.subtitle),
     suggestion: oneLine(raw.suggestion) || null,
     actions,
-    state: text(raw.state).toLowerCase() || 'open',
+    state,
     url: text(raw.url || raw.openUrl || raw.link) || null,
+    draftUrl: state === 'drafted' ? text(result.url || raw.draftUrl) || null : null,
+    remindAt: state === 'reminded' || state === 'snoozed' ? toMs(result.until) : null,
     startsAt: toMs(raw.startsAt || raw.start),
     endsAt: toMs(raw.endsAt || raw.end),
     conflict: raw.conflict === true || kind === 'conflict',
@@ -115,9 +136,10 @@ function normalizeItem(raw, fallback) {
 }
 
 /**
- * One answer of GET /v1/desktop/briefing (or its {briefing: …} wrapper): `{available, status, date, revision,
- * updatedAt, headline, spoken, reason, sections: {doFirst, today, agents, fyi}}` (each a list, capped 3/5/3/3).
- * Null for nothing usable.
+ * One answer of GET /v1/desktop/briefing (or its {briefing: …} wrapper). The bridge's: `{available, status: ready |
+ * building | waiting | failed | off, date, revision, generatedAt, headline, spoken, needsYou, sections: [{id, title,
+ * items}], accounts, counts}`. Normalized: `{available, status, date, revision, updatedAt, headline, spoken, reason,
+ * counts, sections: {doFirst, today, agents, fyi}}` (each a list, capped 3/5/3/3). Null for nothing usable.
  */
 export function normalizeBriefing(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -157,21 +179,31 @@ export function normalizeBriefing(raw) {
     status,
     date: text(body.date) || null,
     revision: Number.isFinite(body.revision) ? body.revision : 0,
-    updatedAt: toMs(body.updatedAt || body.builtAt),
+    updatedAt: toMs(body.generatedAt || body.updatedAt || body.builtAt),
     headline: oneLine(body.headline),
     spoken: text(body.spoken),
     reason: text(body.reason) || null,
     skipped: body.skipped && typeof body.skipped === 'object' ? body.skipped : null,
+    counts: body.counts && typeof body.counts === 'object' ? body.counts : null,
     sections,
     count,
   };
 }
 
-/** "Read 105 emails · skipped 182 promotions": what the brief looked at, for trust (empty when the bridge didn't say). */
+/**
+ * "Read 105 emails · 12 worth a look": what the brief looked at, for trust (empty when the bridge didn't say). The
+ * bridge's `counts: {emails, kept}`; the research draft's `skipped: {promotions, business, personal}` too.
+ */
 export function skippedLine(brief) {
+  const count = (value) => (Number.isFinite(value) && value > 0 ? value : 0);
+  const counts = brief && brief.counts;
+  if (counts && count(counts.emails)) {
+    const read = count(counts.emails);
+    const kept = count(counts.kept);
+    return `Read ${read} email${read === 1 ? '' : 's'}${kept && kept < read ? ` · ${kept} worth a look` : ''}`;
+  }
   const skipped = brief && brief.skipped;
   if (!skipped) return '';
-  const count = (value) => (Number.isFinite(value) && value > 0 ? value : 0);
   const read = count(skipped.business) + count(skipped.personal);
   const parts = [];
   if (read) parts.push(`Read ${read} email${read === 1 ? '' : 's'}`);
@@ -196,11 +228,12 @@ export function isMorning(brief, now = Date.now(), { force = false } = {}) {
 }
 
 export function isOpen(item) {
-  return !['done', 'dismissed', 'snoozed'].includes(item.state);
+  return !['done', 'dismissed', 'reminded', 'snoozed'].includes(item.state);
 }
 
+/** Drafted, a task made, time blocked, put off with a reminder: shown quieter, with what happened. */
 export function isHandled(item) {
-  return ['drafted', 'tasked', 'blocked'].includes(item.state);
+  return ['drafted', 'tasked', 'blocked', 'reminded', 'snoozed'].includes(item.state);
 }
 
 /** What Samin still has to deal with: Do first and Agents (events and FYI ask nothing). */
@@ -226,11 +259,14 @@ export function shownSections(brief, now = Date.now()) {
   return SECTIONS.filter((kind) => rows[kind].length).map((kind) => ({ kind, title: SECTION_TITLES[kind], items: rows[kind] }));
 }
 
-/** The same brief with one item's state changed (an action's result, shown at once; or its rollback). */
-export function withItemState(brief, id, state) {
+/**
+ * The same brief with one item's state changed (an action's result, shown at once; or its rollback); `patch` adds
+ * what came with it (a reminder's `remindAt`).
+ */
+export function withItemState(brief, id, state, patch = null) {
   if (!brief) return brief;
   const sections = {};
-  for (const kind of SECTIONS) sections[kind] = brief.sections[kind].map((i) => (i.id === id ? { ...i, state } : i));
+  for (const kind of SECTIONS) sections[kind] = brief.sections[kind].map((i) => (i.id === id ? { ...i, state, ...(patch || {}) } : i));
   return { ...brief, sections };
 }
 
@@ -243,15 +279,17 @@ export function findItem(brief, id) {
   return null;
 }
 
-/** What an action answered: `{ok, state, result: {draftId?, url?, itemId?, eventId?, until?}}`. */
+/** What an action answered: `{ok, item: {…, state}, result: {draftId?, url?, itemId?, eventId?, until?}, revision}`. */
 export function actResult(raw) {
   const body = raw && typeof raw === 'object' ? raw : {};
   const result = body.result && typeof body.result === 'object' ? body.result : {};
+  const item = body.item && typeof body.item === 'object' ? body.item : {};
   return {
-    state: text(body.state) || null,
+    state: text(body.state || item.state) || null,
     url: text(result.url || body.url) || null,
     itemId: text(result.itemId || body.itemId) || null,
     draftId: text(result.draftId) || null,
+    until: toMs(result.until),
   };
 }
 
@@ -294,6 +332,12 @@ export function withAccount(link, email) {
   if (url.hostname.toLowerCase() !== 'mail.google.com' || url.searchParams.has('authuser')) return link;
   url.searchParams.set('authuser', email);
   return url.toString();
+}
+
+/** A meeting's "Join" (Open with a web link): Today's rows offer it. */
+export function joinAction(item) {
+  if (!item || !item.url || !isWebLink(item.url)) return null;
+  return item.actions.find((a) => a.type === 'open') || null;
 }
 
 /** Only web links open (never `file:`, `javascript:` or an app's own scheme from a brief). */

@@ -273,6 +273,10 @@
 .brief-event.now .brief-event-time { color: var(--orb-pale); }
 .brief-event-title { font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brief-event-why { grid-column: 2 / 4; font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A meeting with its link: "Join" at the row's end (and the clash before it, when there is one). */
+.brief-event.joinable { grid-template-columns: 72px minmax(0, 1fr) auto auto; }
+.brief-event.joinable .brief-event-why { grid-column: 2 / -1; }
+.brief-event .brief-join { align-self: center; gap: 4px; }
 .brief-clash { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #ff9a96; padding: 1px 6px; border-radius: 6px; background: rgba(255, 99, 99, 0.14); }
 .brief-line { display: flex; align-items: center; gap: 9px; padding: 6px 6px; border-radius: 10px; }
 .brief-line:hover { background: rgba(255, 255, 255, 0.035); }

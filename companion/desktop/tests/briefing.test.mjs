@@ -1,6 +1,6 @@
-// The morning brief as the window reads it (web/briefing.js) and Home's voice note button (web/note.js): the fixture
-// (dev/samples/briefing.json), the other shapes a bridge may send, before noon only, the verbs and their results,
-// Gmail links in the right account, remind choices; the note's states as the shell pushes them.
+// The morning brief as the window reads it (web/briefing.js): the fixture (dev/samples/briefing.json, the bridge's own
+// shape), the other shapes a bridge may send, before noon only, the verbs and their results, Gmail links in the right
+// account, remind choices.
 // Run: node --test companion/desktop/tests/*.mjs
 
 import assert from 'node:assert/strict';
@@ -8,11 +8,10 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
-  actResult, findItem, isHandled, isMorning, isWebLink, isoLocal, localDay, normalizeBriefing, openCount, primaryActions,
-  remindChoices, resultingState, sectionKind, shownSections, skippedLine, stateLine, verb, verbLabel, VERBS, withAccount,
-  withItemState,
+  actResult, findItem, isHandled, isMorning, isOpen, isWebLink, isoLocal, itemStateLine, joinAction, localDay,
+  normalizeBriefing, openCount, primaryActions, remindChoices, remindWhen, resultingState, sectionKind, shownSections,
+  skippedLine, stateLine, verb, verbLabel, VERBS, withAccount, withItemState,
 } from '../web/briefing.js';
-import { elapsed, normalizeNote, quickAction } from '../web/note.js';
 
 const sample = JSON.parse(readFileSync(new URL('../dev/samples/briefing.json', import.meta.url)));
 // Local times on the sample's day (the tests run in whatever zone the Mac is in; the rules use local days).
@@ -30,17 +29,27 @@ test('reads the fixture: sections in order, items, verbs, accounts', () => {
   assert.equal(brief.revision, 3);
   assert.match(brief.headline, /^3 things need you/);
   assert.deepEqual(Object.keys(brief.sections), ['doFirst', 'today', 'agents', 'fyi']);
+  assert.equal(brief.updatedAt, Date.parse('2026-10-14T11:01:00Z'), 'the bridge’s generatedAt');
   const [dana, stripe, clash] = brief.sections.doFirst;
   assert.deepEqual(dana.actions.map((a) => a.type), ['draft_reply', 'remind']);
   assert.equal(dana.account, 'business');
-  assert.equal(dana.accountEmail, 'sam@example.com');
+  assert.equal(dana.accountEmail, null, 'the bridge names the account on the link itself');
+  assert.match(dana.url, /authuser=sam@example\.com/);
+  assert.equal(dana.draftUrl, null);
   assert.equal(stripe.actions[0].type, 'open');
   assert.equal(clash.conflict, true);
-  assert.equal(brief.sections.agents[0].inboxItemId, 't3:th_pairing_redirect');
-  assert.equal(brief.sections.today.length, 4);
-  assert.equal(brief.sections.today[0].startsAt, Date.parse('2026-10-14T09:30:00-04:00'));
+  assert.deepEqual(primaryActions(clash).map((a) => a.label), ['Block 45 min', 'Remind me']);
+  assert.equal(brief.sections.agents[0].inboxItemId, 't3:th_pairing_redirect', 'the bridge’s itemId');
+  const today = brief.sections.today;
+  assert.equal(today.length, 4);
+  assert.equal(today[0].startsAt, Date.parse('2026-10-14T09:30:00-04:00'));
+  assert.equal(joinAction(today[0]).label, 'Join', 'a meeting’s link');
+  assert.equal(joinAction(today[3]), null, 'the gym has none');
   assert.equal(openCount(brief), 4, '3 to do first and 1 agent');
-  assert.equal(skippedLine(brief), 'Read 105 emails · skipped 182 promotions and newsletters');
+  assert.equal(skippedLine(brief), 'Read 105 emails · 12 worth a look', 'the bridge’s counts');
+  assert.equal(skippedLine({ skipped: { promotions: 182, business: 64, personal: 41 } }),
+    'Read 105 emails · skipped 182 promotions and newsletters', 'the research draft’s shape');
+  assert.equal(skippedLine({ counts: { emails: 0 } }), '');
 });
 
 test('reads other shapes: keyed sections, the R1 wrapper, one flat list; nothing usable is null', () => {
@@ -112,10 +121,47 @@ test('verbs, their labels and results', () => {
   assert.equal(verb('snooze'), 'remind');
   assert.equal(verb('agent_action'), 'agent_action');
   assert.deepEqual(['draft_reply', 'make_task', 'block_time', 'remind', 'done', 'dismiss', 'open'].map(resultingState),
-    ['drafted', 'tasked', 'blocked', 'snoozed', 'done', 'dismissed', null]);
-  assert.deepEqual(actResult({ ok: true, state: 'drafted', result: { draftId: 'r-1', url: 'https://mail.google.com/mail/u/0/#drafts/r-1' } }),
-    { state: 'drafted', url: 'https://mail.google.com/mail/u/0/#drafts/r-1', itemId: null, draftId: 'r-1' });
-  assert.deepEqual(actResult('nonsense'), { state: null, url: null, itemId: null, draftId: null });
+    ['drafted', 'tasked', 'blocked', 'reminded', 'done', 'dismissed', null], 'the bridge’s own state names');
+  for (const state of ['reminded', 'snoozed']) {
+    assert.equal(isOpen({ state }), false, state);
+    assert.equal(stateLine(state), 'Reminder set');
+  }
+  // The bridge's answer: {ok, item, result, revision}; a bare state is read too.
+  const url = 'https://mail.google.com/mail/?authuser=sam@example.com#drafts?compose=m-1';
+  assert.deepEqual(actResult({ ok: true, item: { id: 'bi_1', state: 'drafted' }, result: { draftId: 'r-1', url }, revision: 4 }),
+    { state: 'drafted', url, itemId: null, draftId: 'r-1', until: null });
+  assert.equal(actResult({ ok: true, state: 'tasked', result: { itemId: 't3:th_1' } }).itemId, 't3:th_1');
+  assert.equal(actResult({ ok: true, item: { state: 'reminded' }, result: { until: '2026-10-14T16:40:00-04:00' } }).until,
+    Date.parse('2026-10-14T16:40:00-04:00'));
+  assert.deepEqual(actResult('nonsense'), { state: null, url: null, itemId: null, draftId: null, until: null });
+  // A drafted item read again keeps its draft (the bridge keeps the action's result on the item).
+  const drafted = normalizeBriefing({ sections: [{ id: 'doFirst', items: [
+    { id: 'd', title: 'T', state: 'drafted', url: 'https://mail.google.com/thread', result: { url: 'https://mail.google.com/draft' } },
+    { id: 't', title: 'U', state: 'tasked', result: { url: 'https://x.y/z' } },
+  ] }] });
+  assert.equal(drafted.sections.doFirst[0].draftUrl, 'https://mail.google.com/draft');
+  assert.equal(drafted.sections.doFirst[1].draftUrl, null, 'only a draft');
+});
+
+test('a reminder puts the item off: shown quieter, saying when it comes back', () => {
+  let brief = todays();
+  const clash = brief.sections.doFirst[2];
+  const until = at(16, 40);
+  brief = withItemState(brief, clash.id, resultingState('remind'), { remindAt: until });
+  const item = findItem(brief, clash.id);
+  assert.equal(isHandled(item), true);
+  assert.equal(isOpen(item), false);
+  assert.equal(itemStateLine(item, at(8)), 'Reminder set for 4:40 PM');
+  assert.equal(itemStateLine({ ...item, remindAt: at(9, 0, 1) }, at(8)), 'Reminder set for Thu 9:00 AM', 'another day');
+  assert.equal(itemStateLine({ ...item, remindAt: null }), 'Reminder set');
+  assert.equal(itemStateLine({ state: 'tasked' }), 'T3 task started');
+  assert.equal(remindWhen(at(14), at(8)), '2:00 PM');
+  assert.equal(openCount(brief), 3, 'two to do first and the agent');
+  // Read again from the bridge: the result's `until` on the item.
+  const read = normalizeBriefing({ sections: [{ id: 'doFirst', items: [
+    { id: 'r', title: 'T', state: 'reminded', result: { eventId: 'e1', until: '2026-10-14T16:40:00-04:00' } },
+  ] }] });
+  assert.equal(read.sections.doFirst[0].remindAt, Date.parse('2026-10-14T16:40:00-04:00'));
 });
 
 test('Gmail links open in the item’s own account; only web links open', () => {
@@ -137,16 +183,4 @@ test('remind choices are still ahead; times go up with their offset', () => {
   const iso = isoLocal(at(14));
   assert.match(iso, /^2026-10-14T14:00:00[+-]\d\d:\d\d$/);
   assert.equal(Date.parse(iso), at(14));
-});
-
-test('the voice note button says what a press does now', () => {
-  assert.deepEqual(normalizeNote(null), { state: 'idle', held: false, line: '', detail: '', shortcut: '', waiting: 0, startedAt: null });
-  const recording = normalizeNote({ state: 'recording', shortcut: '⌃⌥N', startedAt: 1_000_000 });
-  assert.equal(elapsed(recording, 1_000_000 + 73_400), '1:13');
-  assert.deepEqual(quickAction(recording, 1_007_400), { label: 'Send note 0:07', hint: 'Send the voice note now (⌃⌥N)', recording: true, busy: false });
-  assert.equal(quickAction(normalizeNote({ state: 'sending' })).busy, true);
-  const idle = quickAction(normalizeNote({ state: 'sent', shortcut: '⌃⌥N', waiting: 2 }));
-  assert.equal(idle.label, 'Voice note');
-  assert.match(idle.hint, /Hold ⌃⌥N anywhere · 2 waiting for the bridge$/);
-  assert.equal(normalizeNote({ state: 'shouting', waiting: -3 }).state, 'idle');
 });

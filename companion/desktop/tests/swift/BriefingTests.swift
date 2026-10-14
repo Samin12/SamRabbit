@@ -38,19 +38,28 @@ enum BriefingTests {
         expectEqual(brief.revision, 3)
         expect(brief.headline.hasPrefix("3 things need you"))
         expectEqual(brief.sections.map(\.kind), [.doFirst, .today, .agents, .fyi])
+        expectEqual(brief.updatedAt, at("2026-10-14T11:01:00Z"), "the bridge's generatedAt")
         let first = try require(brief.section(.doFirst)?.items.first)
         expectEqual(first.kind, "email")
         expectEqual(first.account, "business")
-        expectEqual(first.accountEmail, "sam@example.com")
+        expectEqual(first.accountEmail, nil, "the bridge names the account on the link itself")
+        expect(first.url?.contains("authuser=sam@example.com") == true)
         expectEqual(first.actions.map(\.type), ["draft_reply", "remind"])
         expectEqual(first.state, "open")
+        expectEqual(first.draftUrl, nil)
         expect(first.url?.hasPrefix("https://mail.google.com/") == true)
         let conflict = try require(brief.section(.doFirst)?.items.last)
         expect(conflict.conflict)
+        expectEqual(conflict.primaryActions.map(\.label), ["Block 45 min", "Remind me"])
         let agent = try require(brief.section(.agents)?.items.first)
-        expectEqual(agent.inboxItemId, "t3:th_pairing_redirect")
-        expectEqual(brief.section(.today)?.items.count, 4)
-        expectEqual(brief.section(.today)?.items.first?.startsAt, at("2026-10-14T13:30:00Z"))
+        expectEqual(agent.inboxItemId, "t3:th_pairing_redirect", "the bridge's itemId")
+        expectEqual(agent.url, nil)
+        let today = brief.section(.today)?.items ?? []
+        expectEqual(today.count, 4)
+        expectEqual(today.first?.startsAt, at("2026-10-14T13:30:00Z"))
+        expectEqual(today.first?.joinAction?.label, "Join", "a meeting's link")
+        expectEqual(today.last?.joinAction, nil, "the gym has no link")
+        expectEqual(today.last?.actions.first?.label, "Got it")
         expectEqual(brief.openCount, 4, "3 to do first and 1 agent (events and FYI ask nothing)")
     }
 
@@ -141,21 +150,53 @@ enum BriefingTests {
         expectEqual(DockBriefAction.normalize("snooze"), "remind")
         expectEqual(DockBriefAction.normalize("block"), "block_time")
         expectEqual(DockBriefAction.normalize("agent_action"), "agent_action", "unknown verbs are kept")
-        for (verb, state) in [("draft_reply", "drafted"), ("make_task", "tasked"), ("block_time", "blocked"), ("remind", "snoozed"),
+        for (verb, state) in [("draft_reply", "drafted"), ("make_task", "tasked"), ("block_time", "blocked"), ("remind", "reminded"),
                               ("done", "done"), ("dismiss", "dismissed")] {
-            expectEqual(DockBriefAction.resultingState(verb), state)
+            expectEqual(DockBriefAction.resultingState(verb), state, "the bridge's own state names")
         }
+        // A reminded item is put off (the research draft called it snoozed): not open, handled, "Reminder set".
+        for state in ["reminded", "snoozed"] {
+            let item = DockBriefItem.from(["id": "r", "title": "T", "state": state], section: .doFirst)
+            expect(item?.isOpen == false, state)
+            expect(item?.isHandled == true, state)
+            expectEqual(item?.stateLine, "Reminder set")
+        }
+        // With when it comes back: the bridge's result.until, or the choice tapped.
+        let read = DockBriefItem.from(["id": "r", "title": "T", "state": "reminded",
+                                       "result": ["eventId": "e1", "until": "2026-10-14T16:40:00-04:00"]], section: .doFirst)
+        expectEqual(read?.remindAt, at("2026-10-14T16:40:00-04:00"))
+        let open = DockBriefItem.from(["id": "o", "title": "T"], section: .doFirst)
+        expectEqual(open?.acted("remind", at: at("2026-10-14T16:40:00-04:00")).remindAt, at("2026-10-14T16:40:00-04:00"))
+        expectEqual(open?.acted("done", at: at("2026-10-14T16:40:00-04:00")).remindAt, nil, "only a reminder")
+        let newYork = Self.newYork
+        expectEqual(DockBriefRemind.when(at("2026-10-14T16:40:00-04:00"), now: at("2026-10-14T08:00:00-04:00"), calendar: newYork),
+                    "4:40 PM")
+        expectEqual(DockBriefRemind.when(at("2026-10-15T09:00:00-04:00"), now: at("2026-10-14T08:00:00-04:00"), calendar: newYork),
+                    "Thu 9:00 AM", "another day")
+        expectEqual(DockBriefActResult.decode(Data(#"{"ok":true,"item":{"state":"reminded"},"result":{"until":"2026-10-14T16:40:00-04:00"}}"#.utf8)).until,
+                    at("2026-10-14T16:40:00-04:00"))
         expect(DockBriefAction.resultingState("open") == nil, "opening changes nothing")
         for verb in DockBriefAction.known { expect(!DockBriefAction.symbol(verb).isEmpty) }
     }
 
     static func actResults() throws {
+        // The bridge's answer: {ok, item, result, revision}.
         let draft = DockBriefActResult.decode(Data("""
-            {"ok":true,"state":"drafted","result":{"draftId":"r-123","url":"https://mail.google.com/mail/u/0/?authuser=sam%40example.com#drafts/r-123"}}
+            {"ok":true,"item":{"id":"bi_1","state":"drafted"},"revision":4,
+             "result":{"draftId":"r-123","url":"https://mail.google.com/mail/?authuser=sam@example.com#drafts?compose=m-1",
+                       "account":"business","say":"Saved as a draft in Gmail. Open it to send."}}
             """.utf8))
         expectEqual(draft.state, "drafted")
         expectEqual(draft.draftId, "r-123")
-        expect(draft.url?.contains("#drafts/r-123") == true)
+        expect(draft.url?.contains("#drafts?compose=m-1") == true)
+        let bare = DockBriefActResult.decode(Data(#"{"ok":true,"state":"drafted","result":{"url":"https://mail.google.com/x"}}"#.utf8))
+        expectEqual(bare.state, "drafted", "a bare state too")
+        // A drafted item read again keeps its draft (the bridge keeps the action's result on the item).
+        let drafted = DockBriefItem.from(["id": "d", "title": "T", "state": "drafted", "url": "https://mail.google.com/thread",
+                                          "result": ["draftId": "r-1", "url": "https://mail.google.com/draft"]], section: .doFirst)
+        expectEqual(drafted?.draftUrl, "https://mail.google.com/draft")
+        let tasked = DockBriefItem.from(["id": "t", "title": "T", "state": "tasked", "result": ["url": "https://x.y/z"]], section: .doFirst)
+        expectEqual(tasked?.draftUrl, nil, "only a draft")
         expectEqual(DockBriefActResult.decode(Data(#"{"ok":true,"state":"tasked","result":{"itemId":"t3:th_new"}}"#.utf8)).itemId, "t3:th_new")
         expectEqual(DockBriefActResult.decode(Data("nonsense".utf8)), DockBriefActResult())
     }

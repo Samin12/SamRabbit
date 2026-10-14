@@ -5,8 +5,8 @@
 // in the item's own Google account. The rules are briefing.js's (the same as the dock's Morning section).
 
 import {
-  actResult, findItem, isHandled, isMorning, isWebLink, isoLocal, openCount, primaryActions, remindChoices, resultingState,
-  shownSections, skippedLine, stateLine, verbIcon, withAccount, withItemState,
+  actResult, findItem, isHandled, isMorning, isWebLink, isoLocal, itemStateLine, joinAction, openCount, primaryActions,
+  remindChoices, remindWhen, resultingState, shownSections, skippedLine, verbIcon, withAccount, withItemState,
 } from './briefing.js';
 import { h } from './dom.js';
 import { timeLabel } from './format.js';
@@ -18,8 +18,9 @@ const KIND_ICONS = { email: 'mail', conflict: 'alert', event: 'calendar', agent:
 
 export function createMorning(ctx, { onChange } = {}) {
   const { briefing } = ctx;
-  /** Item id → the state an action gave it (until the next read says so), and → the action on its way. */
+  /** Item id → the state an action gave it (until the next read says so), what came with it, the action on its way. */
   const overrides = new Map();
+  const patches = new Map();
   const busy = new Map();
   /** Item id → the Gmail draft it opened. */
   const drafts = new Map();
@@ -29,7 +30,7 @@ export function createMorning(ctx, { onChange } = {}) {
 
   function brief() {
     let value = briefing.value;
-    for (const [id, state] of overrides) value = withItemState(value, id, state);
+    for (const [id, state] of overrides) value = withItemState(value, id, state, patches.get(id));
     return value;
   }
 
@@ -39,7 +40,10 @@ export function createMorning(ctx, { onChange } = {}) {
 
   briefing.on(() => {
     // A fresh read is the truth: what the actions changed is in it.
-    if (!briefing.loading) overrides.clear();
+    if (!briefing.loading) {
+      overrides.clear();
+      patches.clear();
+    }
     changed();
   });
 
@@ -63,12 +67,15 @@ export function createMorning(ctx, { onChange } = {}) {
     }
     const state = resultingState(type);
     const before = overrides.has(item.id) ? overrides.get(item.id) : null;
+    const patchBefore = patches.get(item.id) || null;
     if (state) overrides.set(item.id, state);
+    if (type === 'remind' && at) patches.set(item.id, { remindAt: at });
     busy.set(item.id, type);
     changed();
     try {
       const answer = actResult(await ctx.api.briefingAct(item.id, { action: type, ...(at ? { at: isoLocal(at) } : {}) }));
       if (answer.state) overrides.set(item.id, answer.state);
+      if (answer.until) patches.set(item.id, { remindAt: answer.until });
       if (type === 'draft_reply') {
         if (answer.url) {
           drafts.set(item.id, answer.url);
@@ -82,7 +89,8 @@ export function createMorning(ctx, { onChange } = {}) {
       } else if (type === 'block_time') {
         toast('Blocked on your calendar', { tone: 'ok' });
       } else if (type === 'remind') {
-        toast('I’ll bring it back then', { tone: 'ok' });
+        // The bridge puts a 15-minute "Reminder: …" on the calendar at that time.
+        toast(answer.until ? `Reminder on your calendar for ${remindWhen(answer.until)}` : 'Reminder on your calendar', { tone: 'ok' });
       } else if (type === 'open' && answer.url) {
         open(answer.url, item);
       }
@@ -93,6 +101,8 @@ export function createMorning(ctx, { onChange } = {}) {
       busy.delete(item.id);
       if (before) overrides.set(item.id, before);
       else overrides.delete(item.id);
+      if (patchBefore) patches.set(item.id, patchBefore);
+      else patches.delete(item.id);
       changed();
       toast(failure && failure.status === 0 ? 'The Mac bridge isn’t answering.'
         : `That didn’t work${failure && failure.detail ? `: ${failure.detail}` : '.'}`, { tone: 'error' });
@@ -102,7 +112,7 @@ export function createMorning(ctx, { onChange } = {}) {
   function remind(item, anchor) {
     const node = popover(anchor, [
       h('div', { class: 'popover-title' }, icon('bell', { size: 15 }), h('span', { text: 'Remind me' })),
-      h('div', { class: 'popover-sub', text: 'It comes back at the top of your brief then.' }),
+      h('div', { class: 'popover-sub', text: 'A short reminder goes on your calendar then.' }),
       h('div', { class: 'block-chips' }, remindChoices().map((choice) => h('button', {
         class: 'chip-btn', type: 'button', onclick: () => act(item, 'remind', { at: choice.at }),
       }, choice.label))),
@@ -118,8 +128,10 @@ export function createMorning(ctx, { onChange } = {}) {
       await ctx.api.briefingRefresh();
       toast('Reading your mail again…');
       setTimeout(() => briefing.refresh(), 4000);
-    } catch {
-      toast('The bridge couldn’t read the mail again right now.', { tone: 'error' });
+    } catch (failure) {
+      // At most one build every 5 minutes on the bridge (429 refresh_too_soon).
+      toast(failure && failure.status === 429 ? 'It was read a moment ago. Try again in a few minutes.'
+        : 'The bridge couldn’t read the mail again right now.', { tone: failure && failure.status === 429 ? undefined : 'error' });
     } finally {
       setTimeout(() => {
         refreshing = false;
@@ -148,9 +160,10 @@ export function createMorning(ctx, { onChange } = {}) {
     const tag = item.account ? h('span', { class: 'brief-tag', text: item.account === 'personal' ? 'Personal' : 'Work' }) : null;
     let foot;
     if (handled) {
-      const draft = drafts.get(item.id) || (item.state === 'drafted' ? item.url : null);
+      const draft = drafts.get(item.id) || item.draftUrl || (item.state === 'drafted' ? item.url : null);
       foot = h('div', { class: 'brief-actions' },
-        h('span', { class: 'brief-state' }, icon('check', { size: 13 }), h('span', { text: stateLine(item.state) })),
+        h('span', { class: 'brief-state' }, icon(item.state === 'reminded' ? 'bell' : 'check', { size: 13 }),
+          h('span', { text: itemStateLine(item) })),
         h('span', { class: 'brief-spacer' }),
         draft ? h('button', { class: 'chip-btn', type: 'button', onclick: () => open(draft, item) }, icon('external', { size: 13 }),
           h('span', { text: 'Open draft' })) : null,
@@ -172,10 +185,14 @@ export function createMorning(ctx, { onChange } = {}) {
 
   function eventRow(event, now) {
     const started = event.startsAt && event.startsAt <= now;
-    return h('div', { class: `brief-event${started ? ' now' : ''}${event.conflict ? ' conflict' : ''}` },
+    const join = joinAction(event);
+    return h('div', { class: `brief-event${started ? ' now' : ''}${event.conflict ? ' conflict' : ''}${join ? ' joinable' : ''}` },
       h('span', { class: 'brief-event-time', text: event.startsAt ? timeLabel(event.startsAt) : 'All day' }),
       h('span', { class: 'brief-event-title', text: event.title }),
       event.conflict ? h('span', { class: 'brief-clash', text: 'Clash' }) : null,
+      // A meeting's link (the bridge's "Join"), opened in the browser.
+      join ? h('button', { class: 'chip-btn small brief-join', type: 'button', onclick: () => act(event, 'open') },
+        icon('video', { size: 12 }), h('span', { text: join.label })) : null,
       event.why ? h('span', { class: 'brief-event-why', text: event.why }) : null);
   }
 
@@ -233,7 +250,7 @@ export function createMorning(ctx, { onChange } = {}) {
   /** What the panel shows, to know when to draw it again. */
   function key(now = Date.now()) {
     const value = briefing.value;
-    return JSON.stringify([value && value.revision, value && value.date, [...overrides], [...busy], refreshing,
+    return JSON.stringify([value && value.revision, value && value.date, [...overrides], [...patches], [...busy], refreshing,
       isMorning(brief(), now, { force }), Math.floor(now / 60_000)]);
   }
 

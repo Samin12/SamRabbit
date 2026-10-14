@@ -204,7 +204,7 @@ struct CaptureSuggestion: Equatable {
 /// (`{state, heard, outcome, suggestion?}`). Read forgivingly: a missing or odd field takes its default.
 struct CaptureStatus: Equatable {
     var captureId: String
-    /// received | transcribing | transcribed | routing | acting | done | needs_you | queued | no_speech | failed
+    /// The bridge's received | transcribed | done | failed (needs_you and no_speech from the research draft are read too)
     var state: String
     var heard: String?
     var outcome: CaptureOutcome?
@@ -260,33 +260,41 @@ enum VoiceNoteText {
         return flat.count > max ? String(flat.prefix(max - 1)) + "…" : flat
     }
 
-    /// (line, detail): "Added to your journal" / "“finished the release notes”".
+    /// (line, detail): "Added to your journal" / "“Put this in my journal: finished the release notes”". The bridge's
+    /// outcomes (samrabbit_capture): journal `{title: "Journal", detail: "Added to your journal."}`, task `{title,
+    /// detail: "Started “…” in SamRabbit."}`, event `{title, detail: "Added “…” for Thu 9:00 AM."}`, note `{title,
+    /// detail: "Saved as a note."}` with a suggestion, nothing `{title: "Nothing heard"}`, failed `{detail}`.
     static func outcome(_ status: CaptureStatus) -> (line: String, detail: String) {
         let outcome = status.outcome
         let heard = status.heard.map { "“\(clip($0, 90))”" } ?? ""
         let title = outcome?.title ?? ""
         let detail = outcome?.detail ?? ""
+        let kind = (outcome?.kind ?? "").lowercased()
         switch status.state {
         case "no_speech":
-            return ("Didn’t catch anything", "Nothing was sent.")
+            return ("Didn’t catch anything", "Nothing was saved.")
         case "failed":
             return ("The bridge couldn’t finish it", clip(detail.isEmpty ? (status.say ?? status.error.map(errorText) ?? "It keeps the note to try again.") : detail, 110))
         default:
             break
         }
-        let kind = (outcome?.kind ?? "").lowercased()
         let named = { (fallback: String) -> String in title.isEmpty ? fallback : "“\(clip(title, 70))”" }
         switch kind {
         case "journal":
-            return ("Added to your journal", detail.isEmpty ? heard : "“\(clip(detail, 90))”")
+            // The bridge's detail only says it was added: the words are what he said.
+            return ("Added to your journal", heard.isEmpty ? clip(detail, 110) : heard)
         case "t3_task", "task", "t3":
-            return ("Started a T3 task", named(heard))
+            return ("Started a T3 task", detail.isEmpty ? named(heard) : clip(detail, 110))
         case "calendar_event", "calendar_block", "calendar", "reminder", "event", "block":
             let what = title.isEmpty ? heard : clip(title, 70)
-            return ("On your calendar", detail.isEmpty ? what : clip("\(what) · \(detail)", 110))
+            return ("On your calendar", detail.isEmpty ? what : clip(detail, 110))
         case "note":
             if let suggestion = status.suggestion { return ("Saved as a note", clip(suggestion.label, 90)) }
             return ("Saved as a note", heard)
+        case "nothing":
+            return ("Didn’t catch anything", "Nothing was saved.")
+        case "failed":
+            return ("The bridge couldn’t finish it", clip(detail.isEmpty ? "It keeps the note to try again." : detail, 110))
         default:
             if !status.settled && outcome == nil { return ("Sent", "Working on it…") }
             if !title.isEmpty { return (clip(title, 60), clip(detail.isEmpty ? heard : detail, 110)) }
@@ -295,14 +303,24 @@ enum VoiceNoteText {
     }
 
     /// The button for what the bridge suggests: "Start as task", "Add to journal", "Put on calendar" (nil: no action
-    /// to take, the suggestion is only words).
+    /// to take). Only what `POST …/captures/<id>/act` takes (`task`, `journal`, `event`): a "block" suggestion has no
+    /// act of its own on the bridge, so it stays words.
     static func offer(_ suggestion: CaptureSuggestion?) -> String? {
-        guard let suggestion, !suggestion.action.isEmpty else { return nil }
-        switch suggestion.action.lowercased() {
-        case "task", "t3_task", "make_task": return "Start as task"
+        guard let suggestion, let action = actAction(suggestion.action) else { return nil }
+        switch action {
+        case "task": return "Start as task"
         case "journal": return "Add to journal"
-        case "calendar", "calendar_event", "remind", "reminder": return "Put on calendar"
-        default: return clip(suggestion.label.replacingOccurrences(of: "?", with: ""), 24)
+        default: return "Put on calendar"
+        }
+    }
+
+    /// The bridge's act for a suggestion (`task` | `journal` | `event`), nil for one it can't do.
+    static func actAction(_ action: String) -> String? {
+        switch action.lowercased() {
+        case "task", "t3_task", "make_task": return "task"
+        case "journal": return "journal"
+        case "event", "calendar", "calendar_event", "remind", "reminder": return "event"
+        default: return nil
         }
     }
 

@@ -83,13 +83,14 @@ struct DockBriefAction: Equatable, Hashable {
         }
     }
 
-    /// The item's state once the bridge said yes (shown at once, rolled back on a failure).
+    /// The item's state once the bridge said yes (shown at once, rolled back on a failure): the bridge's own names
+    /// (samrabbit_briefing `STATES`).
     static func resultingState(_ type: String) -> String? {
         switch type {
         case "draft_reply": return "drafted"
         case "make_task": return "tasked"
         case "block_time": return "blocked"
-        case "remind": return "snoozed"
+        case "remind": return "reminded"
         case "done": return "done"
         case "dismiss": return "dismissed"
         default: return nil
@@ -110,9 +111,13 @@ struct DockBriefItem: Equatable, Identifiable {
     var why: String
     var suggestion: String?
     var actions: [DockBriefAction]
-    /// open | drafted | tasked | blocked | snoozed | done | dismissed
+    /// open | drafted | tasked | blocked | reminded | done | dismissed ("snoozed": the research draft's "reminded")
     var state: String
     var url: String?
+    /// The Gmail draft a Draft reply made (the bridge keeps the action's `result` on the item), to open it again.
+    var draftUrl: String?
+    /// When a Remind me's reminder is (`result.until`; or the choice tapped, until the bridge says).
+    var remindAt: Date?
     var startsAt: Date?
     var endsAt: Date?
     var conflict: Bool
@@ -120,23 +125,30 @@ struct DockBriefItem: Equatable, Identifiable {
     var inboxItemId: String?
 
     /// Still waiting for Samin (not done, dismissed or put off).
-    var isOpen: Bool { !["done", "dismissed", "snoozed"].contains(state) }
+    var isOpen: Bool { !["done", "dismissed", "reminded", "snoozed"].contains(state) }
 
-    /// Handled one way or another (drafted, a task made, time blocked): shown quieter, with what happened.
-    var isHandled: Bool { ["drafted", "tasked", "blocked"].contains(state) }
+    /// Handled one way or another (drafted, a task made, time blocked, put off with a reminder): shown quieter, with
+    /// what happened.
+    var isHandled: Bool { ["drafted", "tasked", "blocked", "reminded", "snoozed"].contains(state) }
 
     /// The verbs shown as buttons: the item's own (at most two, Done and Dismiss aside), then Done and Dismiss.
     var primaryActions: [DockBriefAction] {
         Array(actions.filter { $0.type != "done" && $0.type != "dismiss" }.prefix(2))
     }
 
-    /// "Drafted in Gmail", "Task started", …: what the state says, for a handled item.
+    /// A meeting's "Join" (Open with a web link): today's rows offer it.
+    var joinAction: DockBriefAction? {
+        guard let url, DockBriefLinks.isWebLink(url) else { return nil }
+        return actions.first { $0.type == "open" }
+    }
+
+    /// "Drafted in Gmail", "Task started", "Reminder set for 4:40 PM", …: what the state says, for a handled item.
     var stateLine: String? {
         switch state {
         case "drafted": return "Draft saved in Gmail · not sent"
         case "tasked": return "T3 task started"
         case "blocked": return "Time blocked"
-        case "snoozed": return "Reminder set"
+        case "reminded", "snoozed": return remindAt.map { "Reminder set for \(DockBriefRemind.when($0))" } ?? "Reminder set"
         case "done": return "Done"
         case "dismissed": return "Dismissed"
         default: return nil
@@ -172,23 +184,30 @@ struct DockBriefItem: Equatable, Identifiable {
         let accountIsEmail = account?.contains("@") ?? false
         let title = DockText.oneLine(text("title") ?? "Untitled")
         let why = DockText.oneLine(text("why") ?? text("detail") ?? text("subtitle") ?? "")
+        let state = (text("state") ?? "open").lowercased()
+        let result = raw["result"] as? [String: Any]
+        let resultUrl = (result?["url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let reminded = state == "reminded" || state == "snoozed"
         return DockBriefItem(
             id: id, section: section, kind: kind,
             account: accountIsEmail ? nil : account?.lowercased(),
             accountEmail: text("accountEmail") ?? (accountIsEmail ? account : nil),
             title: title, why: why, suggestion: text("suggestion").map(DockText.oneLine),
-            actions: unique, state: (text("state") ?? "open").lowercased(),
+            actions: unique, state: state,
             url: text("url") ?? text("openUrl") ?? text("link"),
+            draftUrl: state == "drafted" ? resultUrl ?? text("draftUrl") : nil,
+            remindAt: reminded ? (result?["until"] as? String).flatMap(DockDate.parse) : nil,
             startsAt: text("startsAt").flatMap(DockDate.parse) ?? text("start").flatMap(DockDate.parse),
             endsAt: text("endsAt").flatMap(DockDate.parse) ?? text("end").flatMap(DockDate.parse),
             conflict: (raw["conflict"] as? Bool) ?? (kind == "conflict"),
             inboxItemId: text("inboxItemId") ?? text("itemId"))
     }
 
-    /// The same item after `type` went through.
-    func acted(_ type: String) -> DockBriefItem {
+    /// The same item after `type` went through (`at`: the Remind me choice).
+    func acted(_ type: String, at: Date? = nil) -> DockBriefItem {
         var next = self
         if let state = DockBriefAction.resultingState(type) { next.state = state }
+        if type == "remind", let at { next.remindAt = at }
         return next
     }
 }
@@ -202,7 +221,7 @@ struct DockBriefSection: Equatable, Identifiable {
 /// One answer of `GET /v1/desktop/briefing`.
 struct DockBrief: Equatable {
     var available: Bool
-    /// ready | building | stale | failed | off
+    /// ready | building | waiting (not built yet today) | failed | off
     var status: String
     /// The day it is for (YYYY-MM-DD, the bridge's own day: the Mac's).
     var date: String?
@@ -263,7 +282,8 @@ struct DockBrief: Equatable {
         let status = (text("status") ?? (sections.isEmpty ? "off" : "ready")).lowercased()
         let available = (object["available"] as? Bool) ?? (status != "off" && !sections.isEmpty)
         let revision = (object["revision"] as? Int) ?? (object["revision"] as? Double).map { Int($0) } ?? 0
-        let updated = text("updatedAt").flatMap(DockDate.parse) ?? text("builtAt").flatMap(DockDate.parse)
+        let updated = text("generatedAt").flatMap(DockDate.parse) ?? text("updatedAt").flatMap(DockDate.parse)
+            ?? text("builtAt").flatMap(DockDate.parse)
         return DockBrief(available: available, status: status, date: text("date"), revision: revision, updatedAt: updated,
                          headline: DockText.oneLine(text("headline") ?? ""), spoken: text("spoken") ?? "",
                          sections: sections, reason: text("reason"))
@@ -312,12 +332,15 @@ struct DockBrief: Equatable {
     }
 }
 
-/// What an item action answered: `{ok, state, result: {draftId?, url?, itemId?, eventId?, until?}}`.
+/// What an item action answered: `{ok, item: {…, state}, result: {draftId?, url?, itemId?, eventId?, until?},
+/// revision}` (a bare `state` is read too).
 struct DockBriefActResult: Equatable {
     var state: String?
     var url: String?
     var itemId: String?
     var draftId: String?
+    /// Remind me: when the reminder is.
+    var until: Date?
 
     static func decode(_ data: Data) -> DockBriefActResult {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return DockBriefActResult() }
@@ -326,7 +349,7 @@ struct DockBriefActResult: Equatable {
         return DockBriefActResult(state: text(object["state"]) ?? text((object["item"] as? [String: Any])?["state"]),
                                   url: text(result["url"]) ?? text(object["url"]),
                                   itemId: text(result["itemId"]) ?? text(object["itemId"]),
-                                  draftId: text(result["draftId"]))
+                                  draftId: text(result["draftId"]), until: text(result["until"]).flatMap(DockDate.parse))
     }
 }
 
@@ -355,11 +378,20 @@ enum DockBriefLinks {
 }
 
 /// "Remind me" (the brief's own verb): in an hour, at 2 PM, tonight at 6, tomorrow at 9 (each only while it is still
-/// ahead). The bridge puts the reminder on the calendar and brings the item back then.
+/// ahead). The bridge puts a 15-minute "Reminder: …" on the calendar then; the item shows "Reminder set for …".
 enum DockBriefRemind {
     struct Choice: Equatable {
         let label: String
         let at: Date
+    }
+
+    /// "4:40 PM" today, "Thu 9:00 AM" another day.
+    static func when(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = calendar.isDate(date, inSameDayAs: now) ? "h:mm a" : "EEE h:mm a"
+        return formatter.string(from: date)
     }
 
     static func choices(now: Date, calendar: Calendar = .current) -> [Choice] {

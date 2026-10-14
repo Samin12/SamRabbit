@@ -120,7 +120,7 @@ final class DockBriefingStore: ObservableObject {
         }
         guard let brief else { return }
         let before = item
-        if DockBriefAction.resultingState(type) != nil { self.brief = brief.replacing(item.acted(type)) }
+        if DockBriefAction.resultingState(type) != nil { self.brief = brief.replacing(item.acted(type, at: at)) }
         busy[item.id] = type
         guard live else {
             busy[item.id] = nil
@@ -139,9 +139,11 @@ final class DockBriefingStore: ObservableObject {
             }
             Log.write("dock: briefing \(type) ok")
             let result = DockBriefActResult.decode(answer.data)
-            if let state = result.state, let current = self.brief, let now = current.item(item.id), now.state != state {
+            if let current = self.brief, let now = current.item(item.id),
+               result.state.map({ $0 != now.state }) ?? false || result.until.map({ $0 != now.remindAt }) ?? false {
                 var updated = now
-                updated.state = state
+                if let state = result.state { updated.state = state }
+                if let until = result.until { updated.remindAt = until }
                 self.brief = current.replacing(updated)
             }
             switch type {
@@ -164,7 +166,7 @@ final class DockBriefingStore: ObservableObject {
 
     /// Opens a draft again (a drafted item's "Open draft").
     func openDraft(_ item: DockBriefItem) {
-        guard let url = drafts[item.id] ?? item.url else { return }
+        guard let url = drafts[item.id] ?? item.draftUrl ?? item.url else { return }
         open(url, account: item.accountEmail)
     }
 
@@ -304,6 +306,13 @@ struct DockMorningSection: View {
                             .background(Capsule().fill(DockPalette.error.opacity(0.14)))
                     }
                     Spacer(minLength: 0)
+                    // A meeting's link (the bridge's "Join"), opened in the browser.
+                    if let join = event.joinAction {
+                        DockCapsuleButton(title: join.label, symbol: "video.fill", style: .plain, scale: p * 0.82) {
+                            morning.act(event, "open")
+                        }
+                        .fixedSize()
+                    }
                 }
             }
         }
@@ -386,15 +395,16 @@ struct DockMorningRow: View {
         .padding(.horizontal, 4 * p)
     }
 
-    /// Drafted, made a task, time blocked: what happened, the draft to open, and Done to clear it.
+    /// Drafted, made a task, time blocked, put off with a reminder: what happened, the draft to open, and Done to clear
+    /// it.
     private func handled(_ p: CGFloat) -> some View {
         HStack(spacing: 6 * p) {
-            Label(item.stateLine ?? "", systemImage: "checkmark")
+            Label(item.stateLine ?? "", systemImage: item.state == "reminded" || item.state == "snoozed" ? "bell" : "checkmark")
                 .font(.system(size: 11.5 * p, weight: .medium))
                 .foregroundStyle(DockNoteBar.green)
                 .lineLimit(1)
             Spacer(minLength: 4 * p)
-            if item.state == "drafted", morning.drafts[item.id] != nil || item.url != nil {
+            if item.state == "drafted", morning.drafts[item.id] != nil || item.draftUrl != nil || item.url != nil {
                 DockCapsuleButton(title: "Open draft", symbol: "arrow.up.forward.app", style: .plain, scale: p * 0.92) {
                     morning.openDraft(item)
                 }

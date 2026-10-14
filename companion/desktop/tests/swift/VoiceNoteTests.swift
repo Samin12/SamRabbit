@@ -116,23 +116,44 @@ enum VoiceNoteTests {
         }
         expectEqual(VoiceNoteText.outcome(status("received")).line, "Sent")
         expectEqual(VoiceNoteText.outcome(status("received")).detail, "Working on it…")
-        let journal = VoiceNoteText.outcome(status("done", "journal", detail: "shipped the dock", heard: "journal: shipped the dock"))
+        expectEqual(VoiceNoteText.outcome(status("transcribed")).line, "Sent", "heard, not done yet")
+        // The bridge's own outcomes (samrabbit_capture: _journal_outcome, _task_outcome, _event_outcome, _as_note).
+        let journal = VoiceNoteText.outcome(status("done", "journal", title: "Journal", detail: "Added to your journal.",
+                                                   heard: "Put this in my journal: shipped the dock"))
         expectEqual(journal.line, "Added to your journal")
-        expectEqual(journal.detail, "“shipped the dock”", "the words that went in")
+        expectEqual(journal.detail, "“Put this in my journal: shipped the dock”", "what he said, not the bridge's line again")
+        let task = VoiceNoteText.outcome(status("done", "task", title: "Fix the login redirect",
+                                                detail: "Started “Fix the login redirect” in SamRabbit."))
+        expectEqual(task.line, "Started a T3 task")
+        expectEqual(task.detail, "Started “Fix the login redirect” in SamRabbit.")
         expectEqual(VoiceNoteText.outcome(status("done", "t3_task", title: "Fix the login redirect")).detail, "“Fix the login redirect”")
         expectEqual(VoiceNoteText.outcome(status("done", "t3_task")).line, "Started a T3 task")
-        let calendar = VoiceNoteText.outcome(status("done", "calendar_event", title: "Call the dentist", detail: "Thu 2:00 PM"))
+        let calendar = VoiceNoteText.outcome(status("done", "event", title: "Call the dentist",
+                                                    detail: "Added “Call the dentist” for Thu 2:00 PM."))
         expectEqual(calendar.line, "On your calendar")
-        expectEqual(calendar.detail, "Call the dentist · Thu 2:00 PM")
-        let kept = VoiceNoteText.outcome(status("needs_you", "note", heard: "the bank",
+        expectEqual(calendar.detail, "Added “Call the dentist” for Thu 2:00 PM.")
+        expectEqual(VoiceNoteText.outcome(status("done", "calendar_event", title: "Call the dentist")).detail, "Call the dentist")
+        let kept = VoiceNoteText.outcome(status("done", "note", title: "the bank", detail: "Saved as a note.", heard: "the bank",
                                                 suggestion: CaptureSuggestion(label: "Start it as a T3 task?", action: "task")))
         expectEqual(kept.line, "Saved as a note")
         expectEqual(kept.detail, "Start it as a T3 task?")
+        expectEqual(VoiceNoteText.outcome(status("done", "nothing", title: "Nothing heard", detail: "I didn't catch anything.")).line,
+                    "Didn’t catch anything")
         expectEqual(VoiceNoteText.outcome(status("no_speech")).line, "Didn’t catch anything")
         expectEqual(VoiceNoteText.outcome(status("failed", nil)).line, "The bridge couldn’t finish it")
+        let failed = VoiceNoteText.outcome(status("failed", "failed", title: "Voice note", detail: "Couldn't save it: T3 Code isn't connected."))
+        expectEqual(failed.detail, "Couldn't save it: T3 Code isn't connected.")
+        // Buttons only for what POST …/captures/<id>/act takes: task, journal, event.
         expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Start it as a T3 task?", action: "task")), "Start as task")
-        expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Add to your journal?", action: "journal")), "Add to journal")
+        expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Add it to your journal?", action: "journal")), "Add to journal")
+        expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Put it on your calendar for Thu 9:00 AM?", action: "event")),
+                    "Put on calendar")
+        expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Block the time?", action: "block")), nil,
+                    "the bridge has no act for a block")
         expectEqual(VoiceNoteText.offer(CaptureSuggestion(label: "Only words", action: "")), nil, "no action, no button")
+        expectEqual(VoiceNoteText.actAction("t3_task"), "task")
+        expectEqual(VoiceNoteText.actAction("calendar_event"), "event")
+        expectEqual(VoiceNoteText.actAction("block"), nil)
         let long = VoiceNoteText.outcome(status("done", "journal", heard: String(repeating: "word ", count: 60)))
         expect(long.detail.count <= 92, "a long transcript is clipped (\(long.detail.count))")
     }

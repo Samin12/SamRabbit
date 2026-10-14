@@ -265,8 +265,8 @@ final class VoiceNotes: ObservableObject {
         if shown, shownId == status.captureId, snapshot.phase == .sent {
             // A note the bridge kept with a suggestion offers it as a button, a little longer.
             let offer = VoiceNoteText.offer(status.suggestion)
-            suggestion = offer.flatMap { _ in status.suggestion.map { (status.captureId, $0.action) } }
-            show(.sent, lines.line, lines.detail, for: status.captureId,
+            suggestion = status.suggestion.flatMap { VoiceNoteText.actAction($0.action) }.map { (status.captureId, $0) }
+            show(status.state == "failed" ? .failed : .sent, lines.line, lines.detail, for: status.captureId,
                  hideAfter: offer == nil ? VoiceNoteRules.outcomeSeconds : VoiceNoteRules.outcomeSeconds * 2, offer: offer ?? "")
         } else if !shown {
             var note = VoiceNoteSnapshot()
@@ -289,7 +289,8 @@ final class VoiceNotes: ObservableObject {
                 return
             }
             let lines = VoiceNoteText.outcome(status)
-            show(.sent, lines.line, lines.detail, for: taken.id, hideAfter: VoiceNoteRules.outcomeSeconds)
+            show(status.state == "failed" ? .failed : .sent, lines.line, lines.detail, for: taken.id,
+                 hideAfter: VoiceNoteRules.outcomeSeconds)
         }
     }
 
