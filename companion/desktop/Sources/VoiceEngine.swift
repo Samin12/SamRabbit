@@ -38,6 +38,9 @@ final class MacVoice: ObservableObject {
     @Published private(set) var caption = ""
     /// 0...1: the microphone while listening, the reply while speaking.
     @Published private(set) var level: Float = 0
+    /// The conversation's microphone is muted: it hears nothing, and its quiet end waits four times as long. Mute is
+    /// the conversation's own: the next conversation and "Hey Rabbit" hear again. (Muted while no conversation runs,
+    /// "Hey Rabbit" waits until it is unmuted or a conversation starts.)
     @Published var micMuted = false {
         didSet { if micMuted != oldValue { mutedChanged() } }
     }
@@ -57,13 +60,19 @@ final class MacVoice: ObservableObject {
     /// "realtime" or "claude", once the bridge said.
     @Published private(set) var brain: String?
     @Published private(set) var conversationId: String?
-    let shortcutDescription = VoiceHotKey.shortcutDescription
+    /// "⌃⌥Space", or "" when another app has that shortcut (then `shortcutProblem` says so).
+    @Published private(set) var shortcutDescription = VoiceHotKey.shortcutDescription
+    @Published private(set) var shortcutProblem: String?
 
     static let wakeEnabledKey = "VoiceWakeEnabled"
     static let wakePhrasesKey = "WakePhrases"
     static let bargeInKey = "VoiceBargeIn"
+    static let mutedProblem = "Paused while the microphone is muted"
 
     private var machine: ConversationMachine
+    /// The quiet end (seconds without speech), four times as long while muted.
+    private let idleTimeout: TimeInterval
+    private var resettingMute = false
     private let audio: VoiceAudio
     private let wake: VoiceWake
     private var detector = SamRabbitKit.SpeechDetector()
@@ -91,6 +100,7 @@ final class MacVoice: ObservableObject {
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let idle = Double(environment["SAMRABBIT_VOICE_IDLE"] ?? "").map { max(5, $0) } ?? 90
+        idleTimeout = idle
         machine = ConversationMachine(idleTimeout: idle, device: .mac)
         let fixture = FixtureMicrophone.shared
         noMicrophone = fixture == nil && environment["SAMRABBIT_NO_MIC"] == "1"
@@ -117,7 +127,14 @@ final class MacVoice: ObservableObject {
     func activate(shortcut: Bool = true) {
         guard !activated else { return }
         activated = true
-        if shortcut { hotKey = VoiceHotKey { [weak self] in self?.toggle(reason: "shortcut") } }
+        if shortcut {
+            hotKey = VoiceHotKey { [weak self] in self?.toggle(reason: "shortcut") }
+            if hotKey == nil {
+                // Another app has it: say so rather than advertise a shortcut that does nothing.
+                shortcutProblem = "\(VoiceHotKey.shortcutDescription) is used by another app"
+                shortcutDescription = ""
+            }
+        }
         updateWake()
     }
 
@@ -134,6 +151,8 @@ final class MacVoice: ObservableObject {
             show(.error("The microphone is off in this build"))
             return
         }
+        // Asking to talk unmutes (a mute left from before isn't this conversation's).
+        resetMute()
         // After the wake phrase the listener keeps listening until the conversation's microphone runs, then hands
         // over what followed it; otherwise it gives the microphone to the conversation now.
         carry = nil
@@ -202,20 +221,21 @@ final class MacVoice: ObservableObject {
             audio.stop()
             stopTimers()
             setLevel(0)
+            resetMute()
             updateWake(after: 0.6)
         case .warmUp(let conversationId):
             warmUp(conversationId)
         case .openMic:
             micOpen = true
             if let carry {
-                // What was said right after "Hey Rabbit": the first utterance has begun already.
+                // What was said right after "Hey Rabbit" (or over the reply): the utterance has begun already.
                 self.carry = nil
                 detector.reset()
                 feed(carry)
             } else {
                 detector.reset(ignoring: 0.3) // the reply's echo, the chime
-                audio.input.opened()
             }
+            audio.input.opened()
         case .closeMic:
             micOpen = false
             detector.reset()
@@ -342,12 +362,24 @@ final class MacVoice: ObservableObject {
 
     private func mutedChanged() {
         audio.setMuted(micMuted)
+        // Muted on purpose: the quiet end waits longer, but a forgotten mute can't hold the microphone (and other
+        // apps' ducked sound) for good.
+        machine.idleTimeout = micMuted ? idleTimeout * 4 : idleTimeout
         Log.write("voice: microphone " + (micMuted ? "muted" : "unmuted"))
         if micMuted {
             detector.reset()
             setLevel(0)
         }
-        updateWake()
+        if !resettingMute { updateWake() }
+    }
+
+    /// Unmutes without touching the wake listener (the caller decides when it listens again).
+    private func resetMute() {
+        if wakeProblem == Self.mutedProblem { wakeProblem = nil }
+        guard micMuted else { return }
+        resettingMute = true
+        micMuted = false
+        resettingMute = false
     }
 
     private func setLevel(_ value: Double) {
@@ -461,12 +493,22 @@ final class MacVoice: ObservableObject {
     private func updateWake(after delay: TimeInterval = 0) {
         wakeTask?.cancel()
         wakeTask = nil
-        let wanted = activated && wakeEnabled && !micMuted && !noMicrophone && !machine.phase.inConversation
+        let inConversation = machine.phase.inConversation
+        let wanted = activated && wakeEnabled && !micMuted && !noMicrophone && !inConversation
         guard wanted else {
             wake.stop()
-            if !wakeEnabled || noMicrophone { wakeProblem = noMicrophone && wakeEnabled ? "The microphone is off in this build" : nil }
+            if !wakeEnabled {
+                wakeProblem = nil
+            } else if noMicrophone {
+                wakeProblem = "The microphone is off in this build"
+            } else if micMuted, !inConversation {
+                wakeProblem = Self.mutedProblem
+            } else if wakeProblem == Self.mutedProblem {
+                wakeProblem = nil
+            }
             return
         }
+        if wakeProblem == Self.mutedProblem { wakeProblem = nil }
         guard delay > 0 else {
             wake.start()
             return
@@ -515,8 +557,6 @@ final class MacVoice: ObservableObject {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self else { return }
                 self.audio.checkStalled()
-                // Muted on purpose: the quiet end waits.
-                if self.micMuted, self.machine.phase == .listening { continue }
                 self.handle(.tick)
             }
         }

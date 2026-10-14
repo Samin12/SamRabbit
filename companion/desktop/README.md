@@ -127,17 +127,33 @@ with the dock's mic button, **⌃⌥Space** from any app (Carbon `RegisterEventH
   was said over it is the start of the next question.
 - **Audio** (`VoiceAudio.swift`): one `AVAudioEngine` per conversation with voice processing on the microphone (echo
   cancellation: the assistant's voice through the speakers never counts as you speaking; other apps are ducked as
-  little as macOS allows). Muting the microphone uses voice processing's own mute and pauses the quiet end.
+  little as macOS allows). Muting the microphone uses voice processing's own mute; mute belongs to the conversation
+  (the next one, and "Hey Rabbit", hear again), and a muted conversation still ends by itself, after four times the
+  quiet end (6 minutes).
 - **"Hey Rabbit"** (`VoiceWake.swift`, `VoiceWakeMatcher.swift`) listens whenever no conversation does, entirely on
   this Mac: `SpeechAnalyzer` + `SpeechTranscriber` (macOS 26, on device; no Speech Recognition permission, no
   network), fed only while the room is loud enough for speech (an energy gate, so a quiet room costs about nothing).
-  Partial results are matched for "hey rabbit", "hey sam rabbit" and "okay rabbit" (normalized, with common
-  mishearings); the final words' times say where the phrase ended, and what you said after it ("Hey Rabbit, what's
-  on my calendar?") becomes the conversation's first question. Nothing heard is sent anywhere before the phrase, and
-  transcripts are never logged. It pauses for conversations and while the microphone is muted. Turn it off in the
-  menu bar extra (or the dock); other phrases: `defaults write com.samrabbit.desktop WakePhrases -array "hey rabbit"
-  "computer"`. When it can't listen (no on-device speech, the microphone refused), the menu says why.
-- The app asks for the microphone the first time it listens (`NSMicrophoneUsageDescription`).
+  Each stretch of sound is its own recognizer run: fed from 0.6 s before the sound in 100 ms pieces on an unbroken
+  clock, then 0.25 s of the quiet after it, then finished, so its final words (with their times) come at once. (One
+  analyzer fed the stretches with gaps between them lost the first word of every later stretch and gave its final
+  words only when more sound came, so "Hey Rabbit" failed after any earlier sound and when said on its own.) Results
+  are matched for "hey rabbit", "hey sam rabbit" and "okay rabbit" (normalized, with common mishearings): a partial
+  match asks for the final words at once, the final words' times say where the phrase ended, and what you said after
+  it ("Hey Rabbit, what's on my calendar?") becomes the conversation's first question. Said on its own, it wakes
+  about a second after you stop. Nothing heard is sent anywhere before the phrase, and transcripts are never logged.
+  It pauses for conversations and while the microphone is muted. Turn it off in the menu bar extra (or the dock);
+  other phrases: `defaults write com.samrabbit.desktop WakePhrases -array "hey rabbit" "computer"`. When it can't
+  listen (no on-device speech, the microphone refused, muted), the menu says why. A recognizer that keeps failing
+  pauses it a few seconds, then once a minute (the menu says so); it never gives up for good.
+- **Its microphone** is the default input unless that is a Bluetooth headset or an iPhone (Continuity): holding
+  AirPods' microphone open all day would put everything they play in call quality. Then it listens with the Mac's
+  built-in microphone; a Mac without one (Mac Studio, Mac mini) waits ("Paused while “AirPods” is the microphone") and
+  starts again when the inputs change. A conversation uses the default input.
+- **The shortcut**: when another app already has ⌃⌥Space, the menu says "Shortcut unavailable" instead of showing it
+  (`MacVoice.shortcutDescription` is then empty and `shortcutProblem` says why).
+- The app asks for the microphone the first time it listens (`NSMicrophoneUsageDescription`). If the "Apple
+  Development" identity can't sign (a locked keychain in a non-GUI session, a denied key prompt), `build.sh` says
+  why and signs ad-hoc; the SamRabbitKit library is rebuilt when the compiler or its file list changes.
 
 Development: `SAMRABBIT_VOICE_FIXTURE=/tmp/a.wav,/tmp/b.wav` makes the microphone "say" those files (one each time it
 opens; `SAMRABBIT_VOICE_FIXTURE_WAKE=1` plays the first to the wake listener) and renders all playback silently into
@@ -182,14 +198,19 @@ at most once a second; anything else, including a UI navigating its own frame, o
 node --test companion/desktop/tests/*.mjs                   # timeline/store logic, API paging
 python3 -m unittest discover -s companion/desktop/tests     # install.sh / uninstall.sh in a throwaway home
 python3 -m unittest discover -s companion/mac-bridge/tests  # includes the /app/ route (test_desktop_app.py)
-companion/desktop/tests/voice/run.sh                        # the wake phrase matcher, energy gate, sample ring
+companion/desktop/tests/voice/run.sh                        # the wake phrase matcher and runs, gate, ring, mic choice
 companion/desktop/tests/voice/headless.sh                   # the voice end to end against the fake, silently
 companion/desktop/tests/voice/headless.sh listen 60         # the wake listener's CPU in a quiet room
 ```
 
 `headless.sh` builds a harness from `Sources/Voice*.swift` and SamRabbitKit and runs it in fixture mode against
 its own fake server (a free port, a temp token): `turns` (⌃⌥Space, two turns, the assistant ends it), `wake` ("Hey
-Rabbit, what's on my calendar this afternoon?" in one breath: the first utterance sent is transcribed again by the
-bridge's on-device transcriber and must be the question without the phrase), `bargein` (barge-in, an announcement,
-`end()`), `talkover` (the next question said over the reply, voice barge-in forced on: it must arrive whole).
-Fixture voices come from `say -o` (written to a file, never played).
+Rabbit, what's on my calendar this afternoon?" in one breath), `wake-alone` ("Hey Rabbit." on its own, the question
+once it listens), `wake-pause` ("Hey Rabbit.", 3 s, the question), `wake-later` (a sentence, 2 s, "So, hey Rabbit,
+what's on my calendar…"), `wake-noise` (20 bursts of noise a second apart, then the phrase; the listener must never
+stop or pause) — in each the first utterance sent is transcribed again by the bridge's on-device transcriber and must
+be the question without the phrase —, `bargein` (barge-in, an announcement, `end()`), `talkover` (the next question
+said over the reply, voice barge-in forced on: it must arrive whole), `mute` (mute ends with the conversation; muted,
+"Hey Rabbit" waits and says why; a muted conversation still ends by itself) and `devices` (this Mac's audio inputs
+and the listener's choice, read only). Fixture voices come from `say -o` (written to a file, never played).
+`tests/test_install.py` also checks `build.sh`'s ad-hoc fallback and the SamRabbitKit cache.

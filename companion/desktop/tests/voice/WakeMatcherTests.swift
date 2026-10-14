@@ -24,7 +24,12 @@ struct WakeMatcherTests {
         findsWhereThePhraseIs()
         takesOtherPhrases()
         theGateOpensForSpeechOnly()
+        theGateOpensAgainSoonAfterItClosed()
         theRingKeepsTheLastSeconds()
+        aRunHearsThePhraseInItsFinalWords()
+        aRunTrustsPartialsTheFinalPassDropped()
+        theMicrophoneIsNeverABluetoothHeadset()
+        failuresPauseAndNeverStopForGood()
         bargeInNeedsSustainedLoudSpeech()
         print(failures == 0 ? "OK \(checks) checks" : "FAILED \(failures) of \(checks) checks")
         exit(failures == 0 ? 0 : 1)
@@ -134,6 +139,136 @@ struct WakeMatcherTests {
         expect(ring.samples(from: 20).isEmpty, "nothing after the end")
         ring.append((15..<40).map { Int16($0) })
         expect(ring.samples(from: 0) == (30..<40).map { Int16($0) }, "more than it holds at once")
+    }
+}
+
+extension WakeMatcherTests {
+    /// Sound a second after the last (a cough, dishes): each stretch opens it again, from its own pre-roll. The
+    /// listener gives each stretch its own recognizer run, so a pre-roll that reaches back before the last close (the
+    /// 0.25 s tail, the 0.7 s hangover) never feeds audio twice.
+    static func theGateOpensAgainSoonAfterItClosed() {
+        var gate = WakeGate()
+        var end: Int64 = 0
+        var actions: [WakeGate.Action] = []
+        func feed(_ power: Double, seconds: Double) {
+            for _ in 0..<Int((seconds / 0.02).rounded()) {
+                end += 320
+                if let action = gate.window(power: power, end: end) { actions.append(action) }
+            }
+        }
+        feed(-60, seconds: 2)
+        for _ in 0..<5 {
+            feed(-29, seconds: 0.16)
+            feed(-60, seconds: 1)
+        }
+        let opens = actions.filter { if case .open = $0 { true } else { false } }.count
+        let closes = actions.filter { if case .close = $0 { true } else { false } }.count
+        expect(opens == 5 && closes == 5, "each burst opens and closes it: \(actions)")
+        var lastClose: Int64 = -1
+        var reachedBack = false
+        for action in actions {
+            switch action {
+            case .open(let from): if lastClose >= 0, from < lastClose { reachedBack = true }
+            case .close(let through): lastClose = through
+            case .finalize: break
+            }
+        }
+        expect(reachedBack, "a burst a second later opens it from before the last close (a run of its own)")
+        expect(WakeGate.Settings().tail == 0.25, "the tail")
+        expect(WakeGate.Settings().samples(0.25) == 4_000, "the tail in samples")
+    }
+
+    static func aRunHearsThePhraseInItsFinalWords() {
+        typealias Word = WakeRunWords.Word
+        var run = WakeRunWords(matcher: WakePhraseMatcher())
+        // Partial results: the first match asks for the final words, once until a final comes.
+        expect(run.partial(words("Hey")) == .none, "no phrase yet")
+        expect(run.partial(words("Hey Rabbit")) == .finalizeNow, "a partial match asks for the final words")
+        expect(run.partial(words("Hey Rabbit, what's")) == .none, "asked once")
+        // The final: where "Rabbit," ended.
+        let final = [Word(text: "Hey,", end: 1.42), Word(text: "Rabbit,", end: 1.90), Word(text: "what's", end: 2.3)]
+        expect(run.final(final) == .heard(end: 1.90), "heard, ending with “Rabbit,”")
+
+        // Earlier speech in the same run doesn't matter; the phrase anywhere in a final does.
+        var later = WakeRunWords(matcher: WakePhraseMatcher())
+        expect(later.final([Word(text: "I", end: 0.8), Word(text: "was", end: 1.0), Word(text: "testing.", end: 1.6)])
+               == .none, "no phrase")
+        expect(later.final([Word(text: "So,", end: 4.68), Word(text: "hey,", end: 5.04), Word(text: "rabbit,", end: 5.58),
+                            Word(text: "what's", end: 6.0)]) == .heard(end: 5.58), "after a filler")
+
+        // A phrase finalized in two pieces.
+        var split = WakeRunWords(matcher: WakePhraseMatcher())
+        expect(split.final([Word(text: "music", end: 11.5), Word(text: "hey", end: 11.9)]) == .none, "half of it")
+        expect(split.final([Word(text: "rabbit", end: 12.3), Word(text: "stop", end: 12.6)]) == .heard(end: 12.3),
+               "the rest in the next final")
+        // A final with no times says nothing about where; the listener takes where the sound ended.
+        var untimed = WakeRunWords(matcher: WakePhraseMatcher())
+        expect(untimed.final([Word(text: "Okay", end: nil), Word(text: "rabbit.", end: nil)]) == .heard(end: nil), "untimed")
+        // A final without it lets a later partial match ask again.
+        var again = WakeRunWords(matcher: WakePhraseMatcher())
+        expect(again.partial(words("Hey Rabbit")) == .finalizeNow, "asked")
+        expect(again.final([Word(text: "Hey", end: 1), Word(text: "Robert.", end: 1.4)]) == .none, "the final disagrees")
+        expect(again.partial(words("hey rabbit")) == .finalizeNow, "asked again")
+        var once = WakeRunWords(matcher: WakePhraseMatcher())
+        _ = once.partial(words("hey rabbit"))
+        expect(once.finished() == .none, "one partial isn't enough at the end")
+    }
+
+    static func aRunTrustsPartialsTheFinalPassDropped() {
+        // "Hey Rabbit." alone: the partials kept it, the final pass dropped the first words.
+        var run = WakeRunWords(matcher: WakePhraseMatcher())
+        _ = run.partial(words("Hey"))
+        _ = run.partial(words("Hey Rabbit"))
+        _ = run.partial(words("Hey Rabbit."))
+        expect(run.final([WakeRunWords.Word(text: ",..,", end: 1.2)]) == .none, "the final lost it")
+        expect(run.finished() == .heard(end: nil), "the run ends: heard, where the sound ended")
+        // Later partials without it (the run went on to other words): not heard.
+        var moved = WakeRunWords(matcher: WakePhraseMatcher())
+        _ = moved.partial(words("hey rabbit"))
+        _ = moved.partial(words("hey rabbit what"))
+        _ = moved.final([WakeRunWords.Word(text: "you.", end: 1)])
+        _ = moved.partial(words("on my calendar"))
+        expect(moved.finished() == .none, "the partials moved on")
+        var nothing = WakeRunWords(matcher: WakePhraseMatcher())
+        _ = nothing.partial(words("I was testing"))
+        expect(nothing.finished() == .none, "no phrase at all")
+    }
+
+    static func theMicrophoneIsNeverABluetoothHeadset() {
+        typealias Device = WakeMicrophoneChoice.Device
+        let builtIn = Device(id: 10, name: "MacBook Pro Microphone", transport: .builtIn, hasInput: true)
+        let speakers = Device(id: 11, name: "MacBook Pro Speakers", transport: .builtIn, hasInput: false)
+        let airPods = Device(id: 20, name: "AirPods Pro", transport: .bluetooth, hasInput: true)
+        let usb = Device(id: 30, name: "USB Microphone", transport: .other, hasInput: true)
+        let all = [speakers, builtIn, airPods, usb]
+        expect(WakeMicrophoneChoice.choose(all, defaultInput: 10) == .systemDefault, "the built-in one is the default")
+        expect(WakeMicrophoneChoice.choose(all, defaultInput: 30) == .systemDefault, "a USB microphone he chose")
+        expect(WakeMicrophoneChoice.choose(all, defaultInput: 20) == .device(10), "AirPods are the input: the built-in one")
+        expect(WakeMicrophoneChoice.choose([airPods, usb], defaultInput: 20) == .waiting("Paused while “AirPods Pro” is the microphone"),
+               "only another non-built-in one: waits (it doesn't pick a microphone he didn't choose)")
+        expect(WakeMicrophoneChoice.choose([airPods], defaultInput: 20) == .waiting("Paused while “AirPods Pro” is the microphone"),
+               "a Mac without a microphone of its own and AirPods: waits")
+        let iPhone = Device(id: 40, name: "iPhone Microphone", transport: .continuity, hasInput: true)
+        expect(WakeMicrophoneChoice.choose([builtIn, iPhone], defaultInput: 40) == .device(10),
+               "an iPhone as the microphone (Continuity): the built-in one")
+        expect(WakeMicrophoneChoice.choose([iPhone, usb], defaultInput: 40) == .waiting("Paused while “iPhone Microphone” is the microphone"),
+               "an iPhone and no microphone of its own: waits")
+        expect(WakeMicrophoneChoice.choose([iPhone, usb], defaultInput: 30) == .systemDefault, "the USB one is the default")
+        expect(WakeMicrophoneChoice.choose([speakers], defaultInput: nil) == .waiting("No microphone is connected"), "none")
+        expect(WakeMicrophoneChoice.choose(all, defaultInput: nil) == .systemDefault, "the default unknown")
+        expect(WakeMicrophoneChoice.choose(all, defaultInput: 11) == .systemDefault, "the default not an input")
+        expect(WakeMicrophoneChoice.device(10).device(defaultInput: 20) == 10, "the device it listens with")
+        expect(WakeMicrophoneChoice.systemDefault.device(defaultInput: 30) == 30, "the default")
+        expect(WakeMicrophoneChoice.waiting("x").device(defaultInput: 30) == nil, "none while waiting")
+    }
+
+    static func failuresPauseAndNeverStopForGood() {
+        expect(WakeRetry.pause(afterFailures: 1) == nil && WakeRetry.pause(afterFailures: 2) == nil,
+               "the first failures: the next sound starts a new run")
+        expect(WakeRetry.pause(afterFailures: 3) == 5 && WakeRetry.pause(afterFailures: 4) == 15, "then short pauses")
+        expect((5...500).allSatisfy { WakeRetry.pause(afterFailures: $0) == 60 }, "then once a minute, for ever")
+        expect(WakeRetry.problem(afterFailures: 4) == nil, "a short pause says nothing")
+        expect(WakeRetry.problem(afterFailures: 9) == WakeRetry.slowProblem, "the slow retry says why")
     }
 }
 

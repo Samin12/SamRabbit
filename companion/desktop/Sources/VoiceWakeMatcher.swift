@@ -1,8 +1,9 @@
 import Foundation
 
-// The pure parts of the Mac voice: for the "Hey Rabbit" listener (`VoiceWake`) which words count as the phrase, when
-// the room is loud enough to be worth transcribing and the last seconds of sound kept for what followed the phrase;
-// for the conversation when talking over a reply counts as barging in. Foundation only, so
+// The pure parts of the Mac voice: for the "Hey Rabbit" listener (`VoiceWake`) which words count as the phrase, what
+// one recognizer run's results say about it, when the room is loud enough to be worth transcribing, the last seconds
+// of sound kept for what followed the phrase, which microphone to listen with and how to come back after the
+// recognizer failed; for the conversation when talking over a reply counts as barging in. Foundation only, so
 // `companion/desktop/tests/voice/run.sh` tests them without a microphone.
 
 /// Finds a wake phrase ("hey rabbit", "hey sam rabbit", "okay rabbit") in the words of an on-device transcript.
@@ -80,6 +81,68 @@ struct WakePhraseMatcher: Equatable {
     }
 }
 
+/// What one recognizer run (one stretch of sound the gate let through, `VoiceWake`) says about the wake phrase.
+///
+/// * A final result with the phrase is the phrase: its words' times say where it ended. The last words of the run's
+///   previous final count too, so a phrase the recognizer finalized in two pieces is still found.
+/// * A partial (volatile) result with the phrase asks for the final words at once (`finalizeNow`, once until the
+///   next final): partial results carry no times of their own words, so they can't say where the phrase ended.
+/// * A run that ends with the phrase in its last partial results (two in a row) and in no final heard it too (the
+///   recognizer's final pass can drop the first words of a stretch): the phrase ended where the sound did.
+struct WakeRunWords: Equatable {
+    struct Word: Equatable {
+        var text: String
+        /// Where the word ended, seconds into the run (nil: the recognizer didn't say).
+        var end: Double?
+    }
+
+    enum Verdict: Equatable {
+        case none
+        /// Ask the recognizer for its final words now.
+        case finalizeNow
+        /// The phrase, ending here (seconds into the run; nil: where the sound ended).
+        case heard(end: Double?)
+    }
+
+    let matcher: WakePhraseMatcher
+    /// The last words of the previous final.
+    private var previous: [Word] = []
+    /// Partial results in a row with the phrase.
+    private var partialHits = 0
+    private var finalizeAsked = false
+
+    init(matcher: WakePhraseMatcher) {
+        self.matcher = matcher
+    }
+
+    mutating func partial(_ words: [String]) -> Verdict {
+        guard matcher.match(words: words) != nil else {
+            partialHits = 0
+            return .none
+        }
+        partialHits += 1
+        guard !finalizeAsked else { return .none }
+        finalizeAsked = true
+        return .finalizeNow
+    }
+
+    mutating func final(_ words: [Word]) -> Verdict {
+        finalizeAsked = false
+        let joined = previous + words
+        if !words.isEmpty { previous = Array(joined.suffix(3)) }
+        // Only a phrase that ends in these words is new (one that ended in the previous final was heard then).
+        guard let match = matcher.match(words: joined.map(\.text)), match.upperBound > joined.count - words.count else {
+            return .none
+        }
+        return .heard(end: joined[match.upperBound - 1].end)
+    }
+
+    /// The run ended: all its finals are in.
+    func finished() -> Verdict {
+        partialHits >= 2 ? .heard(end: nil) : .none
+    }
+}
+
 /// Decides when the room's sound is worth transcribing, so the on-device recognizer only runs while someone may be
 /// speaking (in a quiet room it gets nothing at all). Fed the level of each 20 ms window of the microphone.
 ///
@@ -87,8 +150,9 @@ struct WakePhraseMatcher: Equatable {
 ///   SamRabbitKit's `NoiseFloor`; digital silence at or below -100 dBFS is ignored, the floor stays above -80).
 /// * Sound `margin` dB above the floor (and above `quietest`) for `attack` opens the gate: transcribing starts with
 ///   the `preRoll` before it (the first syllable).
-/// * `hangover` of quiet closes it, and what was sent is finalized (the recognizer gives its final words with their
-///   times). Sound that never stops (music, a TV) is finalized every `maxOpen` seconds while it goes on.
+/// * `hangover` of quiet closes it. The listener then feeds the `tail` after it (the recognizer gives its final words
+///   only for sound it has heard past) and asks for the final words with their times. Sound that never stops (music,
+///   a TV) is finalized every `maxOpen` seconds while it goes on.
 struct WakeGate: Equatable {
     struct Settings: Equatable {
         var sampleRate = 16_000
@@ -97,6 +161,7 @@ struct WakeGate: Equatable {
         var attack: TimeInterval = 0.06
         var hangover: TimeInterval = 0.7
         var preRoll: TimeInterval = 0.6
+        var tail: TimeInterval = 0.25
         var maxOpen: TimeInterval = 12
 
         func samples(_ seconds: TimeInterval) -> Int64 { Int64(Double(sampleRate) * seconds) }
@@ -207,6 +272,74 @@ struct SampleRing: Equatable {
             out.append(storage[(head - back + capacity * 2) % capacity])
         }
         return out
+    }
+}
+
+/// Which microphone "Hey Rabbit" listens with. The listener holds its microphone open all day, and a Bluetooth headset
+/// (AirPods) whose microphone is open switches everything it plays to call quality (mono, narrowband); an iPhone used
+/// as the Mac's microphone (Continuity) keeps its microphone on. So it listens with the default input unless that is
+/// one of those; then with the built-in microphone; with neither it waits (and says why) until the inputs change. A
+/// conversation itself uses the default input (call quality during a call is fine).
+enum WakeMicrophoneChoice: Equatable {
+    struct Device: Equatable {
+        var id: UInt32
+        var name: String
+        var transport: Transport
+        var hasInput: Bool
+    }
+
+    enum Transport: Equatable {
+        case builtIn, bluetooth, continuity, other
+
+        /// Not to be held open all day.
+        var isBorrowed: Bool { self == .bluetooth || self == .continuity }
+    }
+
+    /// The system's default input.
+    case systemDefault
+    /// This device rather than the default input.
+    case device(UInt32)
+    /// Not now, because of this (shown in the menu).
+    case waiting(String)
+
+    static func choose(_ devices: [Device], defaultInput: UInt32?) -> WakeMicrophoneChoice {
+        let inputs = devices.filter(\.hasInput)
+        guard !inputs.isEmpty else { return .waiting("No microphone is connected") }
+        guard let current = inputs.first(where: { $0.id == defaultInput }) else { return .systemDefault }
+        guard current.transport.isBorrowed else { return .systemDefault }
+        if let builtIn = inputs.first(where: { $0.transport == .builtIn }) { return .device(builtIn.id) }
+        return .waiting("Paused while “\(current.name)” is the microphone")
+    }
+
+    /// The device it listens with (`defaultInput` for the default), or nil while it waits.
+    func device(defaultInput: UInt32?) -> UInt32? {
+        switch self {
+        case .systemDefault: defaultInput
+        case .device(let id): id
+        case .waiting: nil
+        }
+    }
+}
+
+/// How the listener comes back after its recognizer failed `failures` times in a row (a run that gave words or
+/// finished resets the count): at first the next sound just starts a new run, then it pauses a few seconds, then it
+/// tries again once a minute and says so. It never gives up for good.
+enum WakeRetry {
+    static let slowProblem = "On-device speech recognition keeps stopping; trying again in a minute"
+
+    /// Seconds to pause the listener before it starts again, or nil to go on listening.
+    static func pause(afterFailures failures: Int) -> TimeInterval? {
+        switch failures {
+        case ..<3: nil
+        case 3: 5
+        case 4: 15
+        default: 60
+        }
+    }
+
+    /// What the menu says meanwhile (nil for a short pause).
+    static func problem(afterFailures failures: Int) -> String? {
+        (pause(afterFailures: failures) ?? 0) >= 60 ? slowProblem : nil
     }
 }
 

@@ -2,8 +2,18 @@
 # The Mac voice end to end, headless and silent: MacVoice (Sources/Voice*.swift, with SamRabbitKit) in fixture mode
 # against the fake sync server's canned /v1/desktop/assistant/* routes, one scenario at a time.
 #
-#   companion/desktop/tests/voice/headless.sh [turns] [wake] [bargein] [talkover] [listen <seconds>]
-#                                             [listen-speech <seconds>]          (default: the first four)
+#   companion/desktop/tests/voice/headless.sh [turns] [wake] [wake-alone] [wake-pause] [wake-later] [wake-noise]
+#                                             [bargein] [talkover] [mute] [devices]
+#                                             [listen <seconds>] [listen-speech <seconds>]   (default: all but listen*)
+#
+# * The "Hey Rabbit" scenarios: `wake` (the phrase and the question in one breath, the first sound the listener
+#   hears), `wake-alone` ("Hey Rabbit." on its own; the question comes once it listens), `wake-pause` ("Hey Rabbit.",
+#   3 s, the question), `wake-later` (a sentence, 2 s, "So, hey Rabbit, what's on my calendar…"), `wake-noise` (20
+#   bursts of noise a second apart, then the phrase: the listener must never stop or pause). Each must wake, and the
+#   first utterance sent must be the question without the phrase (transcribed again on device).
+# * `mute`: mute is the conversation's; a muted conversation still ends by itself; muted while idle, "Hey Rabbit"
+#   waits and says why. `devices`: reads this Mac's audio inputs (CoreAudio, no microphone opened) and the wake
+#   listener's choice.
 #
 # * No microphone: the fixture microphone "says" WAV files rendered with `say -o` (to a file, never out loud) and
 #   converted to 16 kHz with afconvert. No speaker: the conversation's audio is rendered into memory.
@@ -29,7 +39,7 @@ cleanup() {
 trap cleanup EXIT
 
 SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake bargein talkover)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(turns wake wake-alone wake-pause wake-later wake-noise bargein talkover mute devices)
 
 # 1. Build: SamRabbitKit (cached next to build.sh's default output) and the harness.
 KIT=${SAMRABBIT_KIT_CACHE:-$DESKTOP/build/SamRabbitKit}
@@ -51,6 +61,26 @@ voice() {
 voice ask "What's on my calendar this afternoon?"
 voice hey "Hey Rabbit, what's on my calendar this afternoon?"
 voice bye "Thanks, that's all."
+voice alone "Hey Rabbit."
+voice pause "Hey Rabbit. [[slnc 3000]] What's on my calendar this afternoon?"
+voice later "I was testing the new build this morning. [[slnc 2000]] So, hey Rabbit, what's on my calendar this afternoon?"
+# 20 bursts of noise (0.15 s at about -29 dBFS, a second apart: dishes, a cough, a door), then the phrase; and a
+# moment of digital quiet (the fixture's room noise is added to it).
+/usr/bin/python3 -I - "$WORK/hey.wav" "$WORK/noise.wav" "$WORK/quiet.wav" <<'EOF'
+import random, struct, sys, wave
+def write(path, samples):
+    with wave.open(path, "wb") as out:
+        out.setnchannels(1); out.setsampwidth(2); out.setframerate(16000)
+        out.writeframes(struct.pack("<%dh" % len(samples), *samples))
+with wave.open(sys.argv[1], "rb") as source:
+    hey = list(struct.unpack("<%dh" % source.getnframes(), source.readframes(source.getnframes())))
+noise = random.Random(17)
+samples = [0] * 16000
+for _ in range(20):
+    samples += [int(noise.uniform(-2015, 2015)) for _ in range(2400)] + [0] * 16000
+write(sys.argv[2], samples + hey)
+write(sys.argv[3], [0] * 1600)
+EOF
 case " $* " in *" listen-speech "*)
   voice talk "So the plan for this week is to finish the release notes, then move the calendar client over to the \
 new API, and after that we review the onboarding flow with the design team. I think the biggest risk is the \
@@ -94,26 +124,32 @@ turns, sessions, cancels, ends = log["turns"], log["sessions"], log["cancels"], 
 def ok(condition, what):
     print(("  ok: " if condition else "  FAILED: ") + what)
     return condition
-good = ok(len(sessions) == 1, "one warm-up (%d)" % len(sessions))
+conversations = 2 if scenario == "mute" else 1
+good = ok(len(sessions) == conversations, "one warm-up per conversation (%d)" % len(sessions))
 good &= ok(all(t["stream"] and t["accept"] == "application/x-samrabbit-stream" for t in turns), "every turn streamed")
-good &= ok(len({t["conversationId"] for t in turns}) == 1 and turns[0]["conversationId"] == sessions[0]["conversationId"],
-           "one conversation, named by the warm-up")
+if turns:
+    good &= ok(len({t["conversationId"] for t in turns}) == 1 and turns[0]["conversationId"] == sessions[0]["conversationId"],
+               "one conversation, named by the warm-up")
 audio = [t for t in turns if t["kind"] == "audio"]
 good &= ok(all(t["bytes"] > 10000 and t["deviceTime"] for t in audio), "utterances went up as WAV")
 if scenario == "turns":
     good &= ok([t["kind"] for t in turns] == ["audio", "audio"], "two utterances: %s" % [t["kind"] for t in turns])
     good &= ok(not cancels and not ends, "ended by the assistant (no cancel, no /end)")
     print("  utterances: %s s" % [t["seconds"] for t in audio])
-elif scenario == "wake":
+elif scenario.startswith("wake"):
     good &= ok([t["kind"] for t in turns] == ["audio", "audio"], "two utterances: %s" % [t["kind"] for t in turns])
     first = audio[0]["seconds"] if audio else 0
-    # "Hey Rabbit, what's on my calendar this afternoon?" is about 3 s; what followed the phrase about 2 s.
-    good &= ok(1.2 <= first <= 2.8, "the first utterance is what followed the phrase (%.2f s)" % first)
+    # "What's on my calendar this afternoon?" is about 2 s: in one breath with the phrase, it is all that was sent
+    # (the phrase is about 1 s more); said after it, what was sent is it and the quiet before it.
+    longest = 4.5 if scenario in ("wake-alone", "wake-pause") else 2.8
+    good &= ok(1.2 <= first <= longest, "the first utterance is what followed the phrase (%.2f s)" % first)
 elif scenario == "talkover":
     good &= ok([t["kind"] for t in turns] == ["audio", "audio"], "two utterances: %s" % [t["kind"] for t in turns])
     good &= ok(any(c["cancelled"] for c in cancels) and turns[0].get("interrupted") is True,
                "talking over the reply cancelled it on the bridge")
     print("  utterances: %s s" % [t["seconds"] for t in audio])
+elif scenario == "mute":
+    good &= ok(len(ends) >= 2 and all(e["ended"] for e in ends), "both conversations told the bridge they ended")
 elif scenario == "bargein":
     good &= ok([t["kind"] for t in turns] == ["audio", "announce"], "an utterance, then the announcement: %s"
                % [t["kind"] for t in turns])
@@ -149,25 +185,31 @@ EOF
 }
 
 run() {
-  local scenario=$1 fixture wake=0
+  local scenario=$1 fixture wake=0 idle=45
   case "$scenario" in
     turns|bargein|talkover) fixture="$WORK/ask.wav,$WORK/bye.wav" ;;
     wake) fixture="$WORK/hey.wav,$WORK/bye.wav"; wake=1 ;;
+    wake-alone) fixture="$WORK/alone.wav,$WORK/ask.wav,$WORK/bye.wav"; wake=1 ;;
+    wake-pause) fixture="$WORK/pause.wav,$WORK/bye.wav"; wake=1 ;;
+    wake-later) fixture="$WORK/later.wav,$WORK/bye.wav"; wake=1 ;;
+    wake-noise) fixture="$WORK/noise.wav,$WORK/bye.wav"; wake=1 ;;
+    mute|devices) fixture="$WORK/quiet.wav"; idle=5 ;;
     listen) fixture="$WORK/bye.wav" ;;
     listen-speech) fixture="$WORK/talk.wav"; wake=1 ;;
     *) echo "unknown scenario $scenario" >&2; exit 64 ;;
   esac
   [ "$scenario" = bargein ] && fixture="$WORK/ask.wav"
   local enabled=NO harness=$scenario
-  [ "$wake" = 1 ] || [ "$scenario" = listen ] && enabled=YES
+  [ "$wake" = 1 ] || [ "$scenario" = listen ] || [ "$scenario" = mute ] && enabled=YES
   [ "$scenario" = listen-speech ] && harness=listen
+  case "$scenario" in wake-*) harness=wake ;; esac
   echo "== $scenario"
   start_server
   local status=0 pid sampler
   speech_pids > "$WORK/speech-before.txt"
   : > "$WORK/speech-samples.txt"
   SAMRABBIT_APP_URL="http://127.0.0.1:$PORT/app/" SAMRABBIT_DESKTOP_TOKEN_FILE="$WORK/token" \
-    SAMRABBIT_VOICE_FIXTURE="$fixture" SAMRABBIT_VOICE_FIXTURE_WAKE=$wake SAMRABBIT_VOICE_IDLE=45 \
+    SAMRABBIT_VOICE_FIXTURE="$fixture" SAMRABBIT_VOICE_FIXTURE_WAKE=$wake SAMRABBIT_VOICE_IDLE=$idle \
     SAMRABBIT_VOICE_BARGE_IN=$([ "$scenario" = talkover ] && echo 1 || echo 0) \
     "$WORK/voice-harness" "$harness" "${@:2}" -VoiceWakeEnabled "$enabled" > "$WORK/out.txt" 2> "$WORK/harness.log" &
   pid=$!
@@ -175,13 +217,41 @@ run() {
   sampler=$!
   wait "$pid" || status=$?
   wait "$sampler" || true
-  grep -E "harness: (state|heard|ok|FAILED)|voice: (fixture|wake|audio started|turn)" "$WORK/harness.log" | sed 's/^/  /'
+  grep -E "harness: (state|heard|ok|FAILED)|voice: (fixture|wake|a wake|the wake|audio started|turn|microphone)" \
+    "$WORK/harness.log" | sed 's/^/  /'
   cat "$WORK/out.txt" | sed 's/^/  /'
+  if [ "$harness" = wake ]; then
+    # When the listener woke, from when the first file began (after its 0.6 s lead). "Hey Rabbit." (0.8 s) said
+    # on its own must wake it within a moment of the quiet after it, not when the next sound comes.
+    local within=0
+    case "$scenario" in wake-alone|wake-pause) within=2.8 ;; esac
+    /usr/bin/python3 -I - "$WORK/harness.log" "$within" <<'EOF' || status=1
+import re, sys
+log = open(sys.argv[1]).read()
+within = float(sys.argv[2])
+said = re.search(r"^\s*([0-9.]+) voice: fixture says file 1 \((\d+) ms\)", log, re.M)
+woke = re.search(r"^\s*([0-9.]+) voice: wake phrase heard", log, re.M)
+if said and woke:
+    at = float(woke.group(1)) - float(said.group(1)) - 0.6
+    print("  woke %.2f s into the first file (it lasts %.2f s)" % (at, int(said.group(2)) / 1000))
+    if within:
+        print(("  ok: " if at <= within else "  FAILED: ") + "the phrase alone woke it within %.1f s" % within)
+        sys.exit(0 if at <= within else 1)
+EOF
+  fi
+  if [ "$scenario" = wake-noise ]; then
+    if grep -qE "run stopped|listener pauses|keeps stopping|wake phrase off" "$WORK/harness.log"; then
+      echo "  FAILED: the wake listener stopped or paused during the noise"
+      status=1
+    else
+      echo "  ok: the wake listener never stopped or paused during the noise"
+    fi
+  fi
   if [ "$harness" = listen ]; then
     echo "  localspeechrecognition CPU meanwhile: $(speech_cpu)"
-  elif [ "$status" = 0 ]; then
+  elif [ "$status" = 0 ] && [ "$scenario" != devices ]; then
     check_log "$scenario" || status=1
-    if [ -x "$WORK/transcribe" ] && { [ "$scenario" = wake ] || [ "$scenario" = talkover ]; }; then
+    if [ -x "$WORK/transcribe" ] && { [ "$harness" = wake ] || [ "$scenario" = talkover ]; }; then
       # wake: what went up first is the question that followed "Hey Rabbit", without the phrase.
       # talkover: what was said over the reply went up whole, from its first word.
       local turn=1 expect="what's" refuse="rabbit"

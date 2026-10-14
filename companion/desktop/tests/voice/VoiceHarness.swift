@@ -9,6 +9,8 @@ import Foundation
 ///     voice-harness wake      "Hey Rabbit, what's on my calendar this afternoon?" in one breath, then a second turn
 ///     voice-harness bargein   a turn, barge-in while it speaks, an announcement, then end()
 ///     voice-harness talkover  a turn, then the next question said over the reply (SAMRABBIT_VOICE_BARGE_IN=1)
+///     voice-harness mute      mute ends with the conversation; muted, "Hey Rabbit" waits; a muted one ends by itself
+///     voice-harness devices   this Mac's audio inputs and the wake listener's choice (read only)
 ///     voice-harness listen N  only the wake listener, for N seconds (for its CPU use)
 ///
 /// The wake phrase setting comes from the arguments (`-VoiceWakeEnabled YES|NO`, the argument domain), so nothing is
@@ -79,6 +81,47 @@ struct VoiceHarness {
             ok = ok && check(voice.state == .listening, "talking over the reply stopped it")
             ok = await waitForEnd(voice, within: 30) && ok
             ok = ok && check(heard == ["What's on my calendar this afternoon?", "Thanks, that's all."], "the second turn heard")
+        case "mute":
+            // Mute is the conversation's: it ends with it and "Hey Rabbit" listens again; muted while no conversation
+            // runs, "Hey Rabbit" waits and says why, and asking to talk unmutes; a muted conversation still ends by
+            // itself (after four times the quiet end: SAMRABBIT_VOICE_IDLE=5, so 20 s).
+            voice.activate(shortcut: false)
+            ok = check(await waitUntil(within: 20) { voice.wakeArmed }, "listening for the wake phrase")
+            voice.start(reason: "button")
+            ok = await waitUntil(within: 10) { voice.state == .listening } && ok
+            voice.micMuted = true
+            ok = check(!voice.wakeArmed && voice.wakeProblem == nil, "muted in a conversation: no listener, nothing to explain") && ok
+            voice.end()
+            ok = await waitUntil(within: 10) { voice.wakeArmed } && ok
+            ok = check(!voice.micMuted && voice.wakeArmed && voice.wakeProblem == nil,
+                       "the end unmuted it and the wake listener is back") && ok
+            voice.micMuted = true
+            ok = check(!voice.wakeArmed && voice.wakeProblem == MacVoice.mutedProblem, "muted while idle: paused, and says why") && ok
+            voice.start(reason: "shortcut")
+            ok = check(!voice.micMuted && voice.wakeProblem == nil, "asking to talk unmutes") && ok
+            ok = await waitUntil(within: 10) { voice.state == .listening } && ok
+            voice.micMuted = true
+            let mutedAt = Date()
+            _ = await waitUntil(within: 40) { voice.state == .idle }
+            let after = Date().timeIntervalSince(mutedAt)
+            ok = check(voice.state == .idle && after >= 12,
+                       String(format: "a muted conversation ended by itself (after %.0f s, not 5)", after)) && ok
+            ok = check(!voice.micMuted, "…and unmuted") && ok
+            ok = check(await waitUntil(within: 10) { voice.wakeArmed }, "the wake listener is back") && ok
+        case "devices":
+            // This Mac's audio inputs and the wake listener's choice (CoreAudio, read only: no microphone opened).
+            let devices = AudioInputs.devices()
+            let defaultInput = AudioInputs.defaultInput()
+            for device in devices where device.hasInput {
+                print("HARNESS_INPUT \(device.transport)" + (device.id == defaultInput ? " (the default)" : ""))
+            }
+            let choice = WakeMicrophoneChoice.choose(devices, defaultInput: defaultInput)
+            switch choice {
+            case .systemDefault: print("HARNESS_CHOICE the default input")
+            case .device: print("HARNESS_CHOICE the built-in microphone rather than the default input")
+            case .waiting: print("HARNESS_CHOICE wait")
+            }
+            ok = check(!devices.isEmpty, "the audio devices were read")
         case "listen":
             let seconds = Double(arguments.dropFirst().first ?? "60") ?? 60
             voice.activate(shortcut: false)

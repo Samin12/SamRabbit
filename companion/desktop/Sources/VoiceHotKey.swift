@@ -11,7 +11,7 @@ import Foundation
 final class VoiceHotKey {
     /// "SRvc"
     static let signature: OSType = 0x5352_7663
-    static let shortcutDescription = "⌃⌥Space"
+    nonisolated static let shortcutDescription = "⌃⌥Space"
 
     private let id: UInt32
     private let action: @MainActor () -> Void
@@ -19,9 +19,10 @@ final class VoiceHotKey {
     private var handler: EventHandlerRef?
     private var lastPress = Date.distantPast
 
-    /// Registers `keyCode` + `modifiers` (Carbon values); nil when the system refused it (another app has it).
+    /// Registers `keyCode` + `modifiers` (Carbon values; `description` names them in the log); nil when the system
+    /// refused it (another app has it).
     init?(keyCode: UInt32 = UInt32(kVK_Space), modifiers: UInt32 = UInt32(controlKey | optionKey), id: UInt32 = 1,
-          action: @escaping @MainActor () -> Void) {
+          description: String = VoiceHotKey.shortcutDescription, action: @escaping @MainActor () -> Void) {
         self.id = id
         self.action = action
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -43,10 +44,10 @@ final class VoiceHotKey {
         let registered = RegisterEventHotKey(keyCode, modifiers, hotKeyId, GetApplicationEventTarget(), 0, &hotKey)
         guard registered == noErr else {
             if let handler { RemoveEventHandler(handler) }
-            Log.write("voice: the shortcut \(Self.shortcutDescription) is taken (\(registered))")
+            Log.write("voice: the shortcut \(description) is taken (\(registered))")
             return nil
         }
-        Log.write("voice: shortcut \(Self.shortcutDescription) registered")
+        Log.write("voice: shortcut \(description) registered")
     }
 
     deinit {

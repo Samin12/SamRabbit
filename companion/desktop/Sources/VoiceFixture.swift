@@ -64,8 +64,10 @@ final class FixtureMicrophone {
     }
 
     /// The microphone opened for the next utterance: the next file is said after the lead (nothing when none is left).
+    /// While a file is still being said nothing changes: the rest of it is that utterance (speech carried over from
+    /// the wake listener, the end of a file that had a pause in it).
     func opened() {
-        guard !segments.isEmpty else { return }
+        guard current.isEmpty, !segments.isEmpty else { return }
         current = segments.removeFirst()
         position = 0
         startsAt = Int(lead * 16_000)
