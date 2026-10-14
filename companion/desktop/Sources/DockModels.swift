@@ -155,16 +155,18 @@ struct DockItem: Identifiable, Equatable, Decodable {
     var live: Bool
     var progress: Double?
     var phase: String?
+    /// Samin dismissed it and it has not changed since (only with `?include=dismissed`, which the dock never asks for).
+    var dismissed: Bool
 
     private enum CodingKeys: String, CodingKey {
         case id, source, agent, title, project, cwd, status, statusLabel, summary, updatedAt, unread, pending, can, live,
-             progress, phase
+             progress, phase, dismissed
     }
 
     init(id: String, source: String, agent: String? = nil, title: String, project: String? = nil, cwd: String? = nil,
          status: DockStatus, statusLabel: String = "", summary: String = "", updatedAt: Date? = nil, unread: Bool = false,
          pending: DockPending = DockPending(), can: [String] = [], live: Bool = false, progress: Double? = nil,
-         phase: String? = nil) {
+         phase: String? = nil, dismissed: Bool = false) {
         self.id = id
         self.source = source
         self.agent = agent
@@ -181,6 +183,7 @@ struct DockItem: Identifiable, Equatable, Decodable {
         self.live = live
         self.progress = progress
         self.phase = phase
+        self.dismissed = dismissed
     }
 
     init(from decoder: Decoder) throws {
@@ -209,9 +212,13 @@ struct DockItem: Identifiable, Equatable, Decodable {
         live = (try? c.decodeIfPresent(Bool.self, forKey: .live)) ?? false
         progress = (try? c.decodeIfPresent(Double.self, forKey: .progress))
         phase = text(.phase)
+        dismissed = (try? c.decodeIfPresent(Bool.self, forKey: .dismissed)) ?? false
     }
 
     func supports(_ capability: String) -> Bool { can.contains(capability) }
+
+    /// Every item of a bridge that knows dismissing (W8): hidden until it changes.
+    var canDismiss: Bool { supports("dismiss") }
 
     /// "Needs you": waiting on an approval or an answer, failed, or finished and not yet seen.
     var needsYou: Bool {
@@ -253,6 +260,21 @@ struct DockCounts: Equatable, Decodable {
     var needsYou = 0
     var working = 0
     var total = 0
+    /// What Samin dismissed that has not changed since (left out of the other counts and of the list).
+    var dismissed = 0
+}
+
+extension DockCounts {
+    private enum CodingKeys: String, CodingKey { case needsYou, working, total, dismissed }
+
+    /// In an extension, so the memberwise initialiser stays. `dismissed` is new (a bridge before W8 has none).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        needsYou = try c.decode(Int.self, forKey: .needsYou)
+        working = try c.decode(Int.self, forKey: .working)
+        total = try c.decode(Int.self, forKey: .total)
+        dismissed = (try? c.decodeIfPresent(Int.self, forKey: .dismissed)) ?? 0
+    }
 }
 
 struct DockSourceState: Equatable, Decodable {
@@ -279,7 +301,8 @@ struct DockInbox: Equatable {
 
     static func decode(_ data: Data) throws -> DockInbox {
         let wire = try JSONDecoder().decode(Wire.self, from: data)
-        let items = DockOrder.sorted(Array((wire.items ?? []).compactMap(\.value).prefix(itemCap)))
+        // A dismissed item is the bridge's to bring back: never a row, even from a bridge that sends it anyway.
+        let items = DockOrder.sorted(Array((wire.items ?? []).compactMap(\.value).filter { !$0.dismissed }.prefix(itemCap)))
         let computed = DockCounts(needsYou: items.filter(\.needsYou).count,
                                   working: items.filter { $0.status == .working && !$0.isChat }.count,
                                   total: items.count)
@@ -490,6 +513,125 @@ struct DockSection: Equatable, Identifiable {
         sections.flatMap { section -> [String] in
             section.kind == .earlier && !earlierOpen ? [] : section.items.map(\.id)
         }
+    }
+}
+
+// MARK: dismissing
+
+/// Dismissing rows (W8: `POST …/items/<id>/dismiss`, and `…/undismiss` for the undo). A dismissed row leaves at once
+/// with a short "Dismissed · Undo" toast; the bridge then leaves it out of its list (and its counts) until it changes.
+/// Here it stays hidden until an inbox answer at least as new as the one the bridge gave with its yes (from then on the
+/// bridge's own list decides: an item that changed meanwhile is back by itself). A call that fails puts the row back
+/// and the toast says why. Undo shows the row again at once, from the copy kept here, until the inbox has it again.
+/// Pure: DockStore makes the calls and feeds the answers in.
+struct DockDismissals: Equatable {
+    struct Entry: Equatable {
+        var item: DockItem
+        var at: Date
+        /// The inbox revision from which the bridge's list says the same; nil while the call is on its way.
+        var settles: Int?
+    }
+
+    struct Toast: Equatable {
+        enum Kind: Equatable {
+            case dismissed  // "Dismissed · Undo"
+            case failed(String)  // why a dismissal or an undo didn't happen
+        }
+
+        var item: DockItem
+        var kind: Kind
+        var until: Date
+
+        var offersUndo: Bool { kind == .dismissed }
+    }
+
+    private(set) var hidden: [String: Entry] = [:]
+    private(set) var restored: [String: Entry] = [:]
+    private(set) var toast: Toast?
+
+    static let toastSeconds: TimeInterval = 5
+    static let failedToastSeconds: TimeInterval = 6
+    /// An entry nothing settled (an answer that never came, a bridge without revisions in its yes) goes after this.
+    static let staleSeconds: TimeInterval = 30
+
+    func isHidden(_ id: String) -> Bool { hidden[id] != nil }
+
+    var hasWork: Bool { toast != nil || !hidden.isEmpty || !restored.isEmpty }
+
+    /// The rows the dock draws: the inbox's, less the ones dismissed here, plus the ones undone here that the inbox
+    /// does not carry yet (the inbox's own copy wins once it does).
+    func shown(_ items: [DockItem]) -> [DockItem] {
+        let ids = Set(items.map(\.id))
+        let back = restored.values.map(\.item).filter { !ids.contains($0.id) }.sorted { $0.id < $1.id }
+        return items.filter { hidden[$0.id] == nil } + back
+    }
+
+    mutating func dismiss(_ item: DockItem, now: Date) {
+        restored[item.id] = nil
+        hidden[item.id] = Entry(item: item, at: now, settles: nil)
+        toast = Toast(item: item, kind: .dismissed, until: now.addingTimeInterval(Self.toastSeconds))
+    }
+
+    /// The bridge said yes: its list leaves the item out from `revision` on. `current` is the revision the dock has.
+    mutating func confirmed(_ id: String, revision: Int, current: Int) {
+        guard hidden[id] != nil else { return }
+        if current >= revision {
+            hidden[id] = nil
+        } else {
+            hidden[id]?.settles = revision
+        }
+    }
+
+    /// The dismissal failed: the row is back, and the toast says why.
+    mutating func failed(_ id: String, reason: String, now: Date) {
+        let item = hidden.removeValue(forKey: id)?.item ?? (toast?.item.id == id ? toast?.item : nil)
+        guard let item else { return }
+        toast = Toast(item: item, kind: .failed(reason), until: now.addingTimeInterval(Self.failedToastSeconds))
+    }
+
+    /// Undo for the toast's dismissal: the row is back at once. The item to undismiss, or nil (nothing to undo).
+    mutating func undo(now: Date) -> DockItem? {
+        guard let toast, toast.offersUndo else { return nil }
+        self.toast = nil
+        let item = hidden.removeValue(forKey: toast.item.id)?.item ?? toast.item
+        restored[item.id] = Entry(item: item, at: now, settles: nil)
+        return item
+    }
+
+    /// The dismissal an undo was waiting for failed, so there is nothing to undo: the inbox's own row stays.
+    mutating func undoNotNeeded(_ id: String) {
+        restored[id] = nil
+    }
+
+    /// The bridge took the undo back: its list carries the item again from `revision` on.
+    mutating func undoConfirmed(_ id: String, revision: Int, current: Int) {
+        guard restored[id] != nil else { return }
+        if current >= revision {
+            restored[id] = nil
+        } else {
+            restored[id]?.settles = revision
+        }
+    }
+
+    /// The undo failed: the bridge still keeps it dismissed, so it goes again, and the toast says so.
+    mutating func undoFailed(_ id: String, reason: String, now: Date) {
+        guard let entry = restored.removeValue(forKey: id) else { return }
+        hidden[id] = Entry(item: entry.item, at: now, settles: nil)
+        toast = Toast(item: entry.item, kind: .failed(reason), until: now.addingTimeInterval(Self.failedToastSeconds))
+    }
+
+    /// A new inbox answer: what it settles is the bridge's from now on.
+    mutating func apply(_ inbox: DockInbox) {
+        let present = Set(inbox.items.map(\.id))
+        hidden = hidden.filter { _, entry in entry.settles.map { inbox.revision < $0 } ?? true }
+        restored = restored.filter { id, entry in !present.contains(id) && (entry.settles.map { inbox.revision < $0 } ?? true) }
+    }
+
+    /// The toast's time is up; entries nothing settled are let go.
+    mutating func tick(now: Date) {
+        if let toast, toast.until <= now { self.toast = nil }
+        hidden = hidden.filter { now.timeIntervalSince($0.value.at) < Self.staleSeconds }
+        restored = restored.filter { now.timeIntervalSince($0.value.at) < Self.staleSeconds }
     }
 }
 

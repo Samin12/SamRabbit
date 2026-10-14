@@ -44,6 +44,8 @@ final class DockStore: ObservableObject {
     @Published var replyDrafts: [String: String] = [:]
     @Published var selections: [String: [String: [String]]] = [:]
     @Published var customAnswers: [String: [String: String]] = [:]
+    /// Rows dismissed or brought back from here, and the "Dismissed · Undo" toast (DockDismissals).
+    @Published private(set) var dismissals = DockDismissals()
     /// Bumps when the counts change, so the orb can move once.
     @Published private(set) var beat = 0
     @Published private(set) var now = Date()
@@ -65,6 +67,9 @@ final class DockStore: ObservableObject {
 
     private var overlays: [String: Overlay] = [:]
     private var placeholders: [(item: DockItem, until: Date)] = []
+    /// A dismissal on its way (an undo waits for it: the bridge must never get the undo first). true = it worked.
+    private var dismissCalls: [String: Task<Bool, Never>] = [:]
+    private var toastTimer: Timer?
     private var attention = DockAttention()
     private var pollTask: Task<Void, Never>?
     private var clock: Timer?
@@ -87,6 +92,14 @@ final class DockStore: ObservableObject {
         self.now = now
         self.connection = connection
         if let targets { choice = targets.resolve(DockTargets.Choice()) }
+        rebuild()
+    }
+
+    /// The snapshot renderer: rows dismissed (or failing to be) as they would be live.
+    func fixtureDismiss(_ id: String, failure: String? = nil) {
+        guard !live, let item = item(id) else { return }
+        dismissals.dismiss(item, now: now)
+        if let failure { dismissals.failed(id, reason: failure, now: now) }
         rebuild()
     }
 
@@ -155,7 +168,9 @@ final class DockStore: ObservableObject {
         let before = placeholders.count
         placeholders.removeAll { $0.until < now }
         overlays = overlays.filter { now.timeIntervalSince($0.value.started) < 20 }
-        if placeholders.count != before { rebuild() }
+        let dismissed = dismissals
+        dismissals.tick(now: now)
+        if placeholders.count != before || dismissals != dismissed { rebuild() }
     }
 
     private func pollLoop() async {
@@ -212,6 +227,7 @@ final class DockStore: ObservableObject {
         }
         let present = Set(answer.items.map(\.id))
         placeholders.removeAll { present.contains($0.item.id) }
+        dismissals.apply(answer)
         rebuild()
         if !firstAnswer && (needsYouCount, workingCount) != countsBefore { beat += 1 }
         firstAnswer = false
@@ -228,7 +244,7 @@ final class DockStore: ObservableObject {
         let base = inbox.items.map { overlays[$0.id]?.item ?? $0 }
         let ids = Set(base.map(\.id))
         let extra = placeholders.map(\.item).filter { !ids.contains($0.id) }
-        items = DockOrder.sorted(base + extra)
+        items = DockOrder.sorted(dismissals.shown(base + extra))
         sections = DockSection.build(items)
     }
 
@@ -361,6 +377,93 @@ final class DockStore: ObservableObject {
 
     func open(_ item: DockItem) {
         perform(item, "open", optimistic: nil) { await DockAPI.open(item.id) }
+    }
+
+    /// The row leaves at once, with "Dismissed · Undo"; the bridge keeps it out of the list until it changes. A failure
+    /// puts it back and the toast says why. Nothing reaches T3, Claude Code or Codex.
+    func dismiss(_ item: DockItem) {
+        guard item.canDismiss, !item.id.hasPrefix("pending:"), !dismissals.isHidden(item.id) else { return }
+        dismissals.dismiss(item, now: Date())
+        notes[item.id] = nil
+        if watched == item.id { watched = nil }
+        rebuild()
+        armToastTimer()
+        guard live else { return }
+        let call = Task { @MainActor [weak self] () -> Bool in
+            let result = await DockAPI.dismiss(item.id)
+            guard let self else { return false }
+            self.dismissCalls[item.id] = nil
+            switch result {
+            case .success(let reply):
+                Log.write("dock: dismiss ok")
+                self.dismissals.confirmed(item.id, revision: reply.revision ?? self.inbox.revision + 1, current: self.inbox.revision)
+                self.rebuild()
+                return true
+            case .failure(let failure):
+                Log.write("dock: dismiss failed (HTTP \(failure.status)\(failure.code.map { " \($0)" } ?? ""))")
+                self.dismissals.failed(item.id, reason: Self.dismissProblem(failure, undo: false), now: Date())
+                self.rebuild()
+                self.armToastTimer()
+                return false
+            }
+        }
+        dismissCalls[item.id] = call
+    }
+
+    /// The toast's Undo (or ⌘Z): the row is back at once, then `undismiss` (after the dismissal's own call, if it is
+    /// still on its way). Returns the row brought back.
+    @discardableResult
+    func undoDismiss() -> DockItem? {
+        guard let item = dismissals.undo(now: Date()) else { return nil }
+        rebuild()
+        armToastTimer()
+        guard live else { return item }
+        let pending = dismissCalls[item.id]
+        Task { @MainActor [weak self] in
+            if let pending, await pending.value == false {
+                self?.dismissals.undoNotNeeded(item.id)  // it never was dismissed
+                self?.rebuild()
+                return
+            }
+            let result = await DockAPI.undismiss(item.id)
+            guard let self else { return }
+            switch result {
+            case .success(let reply):
+                Log.write("dock: undismiss ok")
+                self.dismissals.undoConfirmed(item.id, revision: reply.revision ?? self.inbox.revision + 1, current: self.inbox.revision)
+            case .failure(let failure):
+                Log.write("dock: undismiss failed (HTTP \(failure.status)\(failure.code.map { " \($0)" } ?? ""))")
+                self.dismissals.undoFailed(item.id, reason: Self.dismissProblem(failure, undo: true), now: Date())
+                self.armToastTimer()
+            }
+            self.rebuild()
+        }
+        return item
+    }
+
+    /// The toast goes when its time is up (the 30 s clock is too slow for it).
+    private func armToastTimer() {
+        toastTimer?.invalidate()
+        guard let until = dismissals.toast?.until else { return }
+        toastTimer = Timer.scheduledTimer(withTimeInterval: max(0.1, until.timeIntervalSinceNow + 0.05), repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.dismissals.tick(now: Date())
+                self.rebuild()
+                self.armToastTimer()
+            }
+        }
+    }
+
+    static func dismissProblem(_ failure: DockAPI.Failure, undo: Bool) -> String {
+        let lead = undo ? "Couldn’t bring it back" : "Couldn’t dismiss it"
+        switch (failure.status, failure.code) {
+        case (0, _): return "\(lead): the Mac bridge isn’t answering."
+        case (404, "item_not_found"): return "\(lead): it’s gone from the inbox."
+        case (404, _), (405, _): return "\(lead): update the bridge (companion/mac-bridge/install.sh)."
+        case (-1, _), (401, _), (403, _): return "\(lead): the bridge didn’t accept SamRabbit."
+        default: return "\(lead): " + (failure.message.map { DockText.clip($0, 90) } ?? "HTTP \(failure.status)")
+        }
     }
 
     func sendCompose() {
