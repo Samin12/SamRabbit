@@ -46,6 +46,9 @@ final class VoiceWake {
     private var inputWatcher: AudioInputWatcher?
     /// The device it listens with (nil: the default input, or a fixture).
     private var listeningDevice: UInt32?
+    /// The input format when the microphone started, and when its setup changed lately (`WakeDeviceChanges`).
+    private var startedFormat: AVAudioFormat?
+    private var deviceChanges: [Double] = []
     private var waitingForDevice = false
     private var recognizer: Recognizer?
     private var format: AVAudioFormat?
@@ -287,6 +290,7 @@ final class VoiceWake {
         engine.prepare()
         try engine.start()
         self.engine = engine
+        startedFormat = engine.inputNode.outputFormat(forBus: 0)
         // The microphone's device changed or went away: the engine stopped; start afresh.
         engineObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
                                                                 object: engine, queue: .main) { [weak self] _ in
@@ -295,9 +299,19 @@ final class VoiceWake {
     }
 
     private func deviceChanged() {
-        guard phase == .listening else { return }
-        Log.write("voice: the microphone changed; the wake listener starts again")
-        restart(after: 1)
+        guard phase == .listening, let engine else { return }
+        let now = engine.inputNode.outputFormat(forBus: 0)
+        let was = startedFormat
+        let shape = "\(Int(was?.sampleRate ?? 0))→\(Int(now.sampleRate)) Hz, \(was?.channelCount ?? 0)→\(now.channelCount) ch"
+        if engine.isRunning {  // only the other side of the device changed: the tap still gets the microphone
+            Log.write("voice: the microphone's setup changed (\(shape)); still listening")
+            return
+        }
+        deviceChanges = WakeDeviceChanges.record(deviceChanges, now: Date().timeIntervalSince1970)
+        let pause = WakeDeviceChanges.pause(changes: deviceChanges.count)
+        Log.write("voice: the microphone changed (\(shape)); the wake listener starts again in \(Int(pause)) s"
+                  + " (\(deviceChanges.count) changes in 5 min)")
+        restart(after: pause, problem: WakeDeviceChanges.problem(changes: deviceChanges.count))
     }
 
     private func stopMicrophone() {

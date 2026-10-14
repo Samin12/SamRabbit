@@ -31,6 +31,7 @@ struct WakeMatcherTests {
         theMicrophoneIsNeverABluetoothHeadset()
         failuresPauseAndNeverStopForGood()
         bargeInNeedsSustainedLoudSpeech()
+        microphoneChangesBackOff()
         print(failures == 0 ? "OK \(checks) checks" : "FAILED \(failures) of \(checks) checks")
         exit(failures == 0 ? 0 : 1)
     }
@@ -270,9 +271,27 @@ extension WakeMatcherTests {
         expect(WakeRetry.problem(afterFailures: 4) == nil, "a short pause says nothing")
         expect(WakeRetry.problem(afterFailures: 9) == WakeRetry.slowProblem, "the slow retry says why")
     }
+
+    static func microphoneChangesBackOff() {
+        // One change: back at once; changes every second (Samin's Mac): longer and longer pauses, said in the menu.
+        expect(WakeDeviceChanges.pause(changes: 1) == 1 && WakeDeviceChanges.problem(changes: 1) == nil, "one change")
+        var times: [Double] = []
+        var pauses: [TimeInterval] = []
+        var clock = 1_000.0
+        for _ in 0..<6 {
+            times = WakeDeviceChanges.record(times, now: clock)
+            let pause = WakeDeviceChanges.pause(changes: times.count)
+            pauses.append(pause)
+            clock += pause + 1  // it comes back, and the device changes again a second later
+        }
+        expect(pauses == [1, 3, 10, 30, 120, 120], "changes that keep coming wait longer: \(pauses)")
+        expect(WakeDeviceChanges.problem(changes: 4) == WakeDeviceChanges.busyProblem, "a long pause is explained")
+        // A quiet five minutes forgets them.
+        times = WakeDeviceChanges.record(times, now: clock + WakeDeviceChanges.window + 1)
+        expect(times.count == 1 && WakeDeviceChanges.pause(changes: times.count) == 1, "old changes are forgotten")
+    }
 }
 
-/// A voice-like buzz at `dbfs` (about), 16 kHz.
 func tone(_ seconds: Double, dbfs: Double) -> [Int16] {
     let amplitude = pow(10, dbfs / 20) * 1.414 * 32767
     return (0..<Int(seconds * 16_000)).map { Int16(clamping: Int(amplitude * sin(2 * .pi * 170 * Double($0) / 16_000))) }

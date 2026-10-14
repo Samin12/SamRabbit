@@ -343,6 +343,36 @@ enum WakeRetry {
     }
 }
 
+/// How the listener comes back after the microphone's setup changed under it (`AVAudioEngineConfigurationChange`:
+/// another app reopened the device at another rate, an output device came or went). One change is answered at once;
+/// changes that keep coming (on Samin's Mac it came back within a second, every second, and the listener restarted
+/// forever) wait longer and longer, so it never fights another app for the microphone. `changes` are those of the last
+/// `window` seconds, the one just seen included.
+enum WakeDeviceChanges {
+    static let window: TimeInterval = 300
+    static let busyProblem = "The microphone keeps changing (another app may be using it); listening again soon"
+
+    static func pause(changes: Int) -> TimeInterval {
+        switch changes {
+        case ..<2: 1
+        case 2: 3
+        case 3: 10
+        case 4: 30
+        default: 120
+        }
+    }
+
+    /// What the menu says meanwhile (nil for a short pause).
+    static func problem(changes: Int) -> String? {
+        pause(changes: changes) >= 30 ? busyProblem : nil
+    }
+
+    /// The changes still in the window at `now`, `now` added.
+    static func record(_ times: [Double], now: Double) -> [Double] {
+        times.filter { now - $0 < window && now >= $0 } + [now]
+    }
+}
+
 /// Hears Samin talk over a reply (opt-in, `VoiceBargeIn`): with voice processing the reply's own voice is taken out of
 /// the microphone, so what is left is the room and him. Stricter than the speech detector: sustained speech
 /// (`sustain`, short dips between syllables allowed) well above the room and loud in itself, so a cough, a laugh,
