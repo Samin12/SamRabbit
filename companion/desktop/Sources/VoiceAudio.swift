@@ -2,18 +2,19 @@ import AVFoundation
 import Foundation
 import SamRabbitKit
 
-/// Where a conversation hears from: the Mac's microphone (voice processing on), or WAV files (`FixtureInput`).
-/// Delivers 16 kHz mono 16-bit samples on the main actor.
+/// Where a conversation hears from: the Mac's microphone (plain, or with voice processing when echo cancellation is
+/// on), or WAV files (`FixtureInput`). Delivers 16 kHz mono 16-bit samples on the main actor.
 @MainActor
 protocol VoiceInput: AnyObject {
     /// Whether the microphone may be used (asks the first time; a fixture never asks).
     func allowed() async -> Bool
-    /// Starts delivering samples (the engine is built; voice processing is already on for the microphone).
+    /// Starts delivering samples (the engine is built; voice processing, when it is used, is already on).
     func start(engine: AVAudioEngine, deliver: @escaping @MainActor ([Int16]) -> Void) throws
     func stop(engine: AVAudioEngine)
     /// The microphone opened again for the next utterance (a fixture says its next file).
     func opened()
-    /// Mutes the microphone (voice processing's own mute, so the echo canceller keeps its state).
+    /// Mutes the microphone where it can: voice processing's own mute when it is on (the echo canceller keeps its
+    /// state), else nothing (the conversation drops what a muted microphone hears: `MacVoice.heardSamples`).
     func setMuted(_ muted: Bool, engine: AVAudioEngine)
     /// No microphone, no voice processing, nothing out loud.
     var isFixture: Bool { get }
@@ -23,15 +24,16 @@ protocol VoiceInput: AnyObject {
 /// 16 kHz, and a player node for the replies (streamed PCM, clips, the Mac's own voice), plus a quieter one for the
 /// chime.
 ///
-///     microphone (voice processing: echo cancellation) --tap--> 16 kHz Int16 --> SpeechDetector
-///     replies --> AVAudioPlayerNode (16 kHz float) --> main mixer --> voice processing output --> speakers
+///     microphone (plain; or voice processing: echo cancellation) --tap--> 16 kHz Int16 --> SpeechDetector
+///     replies --> AVAudioPlayerNode (16 kHz float) --> main mixer --> speakers (through voice processing when on)
 ///
-/// Voice processing (`setVoiceProcessingEnabled(true)` on the input node) cancels the assistant's own voice from the
-/// microphone, so it never counts as Samin speaking; other apps' sound is ducked as little as macOS allows. It is
-/// opt-in (`defaults write com.samrabbit.desktop VoiceEchoCancellation -bool true`): on Samin's Mac (a USB microphone,
-/// speakers on a DisplayPort monitor) it took about 12 s to fail (-10875) and then left the device unable to start for
-/// the next try, so "Talk" seemed to do nothing. Without it the conversation is half duplex (the microphone is closed
-/// while a reply plays), which works with speakers too. Once it fails it is not tried again until the app restarts.
+/// The plain microphone is the default: the conversation is half duplex (the microphone is closed while a reply
+/// plays), which works with speakers too. Voice processing (`setVoiceProcessingEnabled(true)` on the input node) is
+/// opt-in (`defaults write com.samrabbit.desktop VoiceEchoCancellation -bool true`): it cancels the assistant's own
+/// voice from the microphone, so it never counts as Samin speaking (talking over a reply needs it), and ducks other
+/// apps' sound as little as macOS allows. On Samin's Mac (a USB microphone, speakers on a DisplayPort monitor) it took
+/// about 12 s to fail (-10875) and then left the device unable to start for the next try, so "Talk" seemed to do
+/// nothing. How the microphone starts, with its retries, is `MicrophoneStart` (VoiceStart.swift).
 ///
 /// In fixture mode the engine renders into memory (manual rendering, paced in real time): every buffer still plays,
 /// drains and reports like the real thing, but no sound reaches any device.
@@ -125,37 +127,31 @@ final class VoiceAudio {
     }
 
     static let echoCancellationKey = "VoiceEchoCancellation"
-    /// Voice processing failed once: not tried again until the app restarts (its failure is slow and leaves the
-    /// device busy for a moment).
-    private static var voiceProcessingFailed = false
+    /// How the real microphone starts; what it learns (voice processing that failed slowly on an input) lasts until
+    /// the app restarts.
+    private static let microphoneStart = MicrophoneStart()
 
-    /// The real microphone: voice processing first when it is on, then plain, tried three times 0.3 s apart (a
-    /// microphone the "Hey Rabbit" listener just handed over, or a failed voice-processing unit, can be busy briefly).
+    /// The real microphone: echo cancellation first when it is on (and hasn't failed slowly on this input), then
+    /// plain, tried three times 0.3 s apart (`MicrophoneStart`).
     private func startDevice(token: Int) async throws {
-        if UserDefaults.standard.bool(forKey: Self.echoCancellationKey), !Self.voiceProcessingFailed {
-            do {
-                try buildAndStart(voiceProcessing: true)
-                return
-            } catch {
-                teardown()
-                Self.voiceProcessingFailed = true
-                Log.write("voice: voice processing did not start (\(Self.describe(error))); going on without it")
-            }
+        do {
+            _ = try await Self.microphoneStart.run(
+                echoCancellation: UserDefaults.standard.bool(forKey: Self.echoCancellationKey),
+                input: AudioInputs.defaultInput(),
+                start: { echoCancellation in
+                    do {
+                        try buildAndStart(voiceProcessing: echoCancellation)
+                    } catch {
+                        teardown()
+                        throw error
+                    }
+                },
+                wait: { try await Task.sleep(for: MicrophoneStart.pause) },
+                current: { token == startToken },
+                log: { Log.write("voice: " + $0) })
+        } catch is MicrophoneStart.GaveUp {
+            throw StartFailure.engine("start")
         }
-        for attempt in 0..<3 {
-            if attempt > 0 {
-                try await Task.sleep(for: .milliseconds(300))
-                guard token == startToken else { throw CancellationError() }
-            }
-            do {
-                try buildAndStart(voiceProcessing: false)
-                return
-            } catch {
-                teardown()
-                Log.write("voice: audio did not start (try \(attempt + 1): \(Self.describe(error)))")
-            }
-        }
-        throw StartFailure.engine("start")
     }
 
     private func buildAndStart(voiceProcessing wanted: Bool) throws {
@@ -219,7 +215,8 @@ final class VoiceAudio {
         voiceProcessing = false
     }
 
-    /// Mutes the microphone (the engine keeps running, the echo canceller keeps its state).
+    /// Mutes the microphone (the engine keeps running): voice processing's own mute when it is on, so the echo
+    /// canceller keeps its state; the conversation drops what a muted microphone hears either way.
     func setMuted(_ muted: Bool) {
         self.muted = muted
         if let engine { input.setMuted(muted, engine: engine) }
@@ -531,14 +528,11 @@ final class VoiceAudio {
         return out
     }
 
-    static func describe(_ error: Error) -> String {
-        let ns = error as NSError
-        return "\(ns.domain)#\(ns.code)"
-    }
+    static func describe(_ error: Error) -> String { MicrophoneStart.describe(error) }
 }
 
-/// The Mac's microphone: a tap on the engine's input node (voice processing already on) in its own format,
-/// converted to 16 kHz mono 16-bit.
+/// The Mac's microphone: a tap on the engine's input node (with voice processing already on when it is used) in its
+/// own format, converted to 16 kHz mono 16-bit.
 @MainActor
 final class MacMicrophone: VoiceInput {
     var isFixture: Bool { false }
