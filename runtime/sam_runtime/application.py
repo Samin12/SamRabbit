@@ -100,6 +100,11 @@ from .domains.heptabase_journal import JOURNAL_TOOL_SET, HeptabaseJournalService
 from .api.heptabase_routes import HeptabaseRoutes
 from .domains.conversation_sync import ConversationSyncObserver, ConversationSyncService
 from .api.conversation_sync_routes import ConversationSyncRoutes
+from .domains.capture import CaptureBridgeClient, CaptureService
+from .api.capture_routes import CaptureRoutes
+from .domains.briefing import (BRIEFING_TOOL_SET, BriefingBridgeClient, BriefingService, BriefingVoiceContext,
+                               register_briefing_tools)
+from .api.briefing_routes import BriefingRoutes
 
 
 class RuntimeApplication:
@@ -232,6 +237,17 @@ class RuntimeApplication:
         self._generated_ui_routes = GeneratedUiRoutes(self._generated_ui)
         register_generated_ui_tools(self._tools, self._generated_ui, self._generated_ui_watcher,
                                     conversation_lookup=self._conversation_sync.conversation_for)
+        # Voice notes (side button): the R1's transcript goes to the same Mac bridge, which routes it.
+        self._capture = CaptureService(CaptureBridgeClient(self._heptabase_journal.bridge_store), self._database,
+                                       self._announcements)
+        self._capture_routes = CaptureRoutes(self._capture)
+        # Morning briefing: built on the Mac from email/calendar/agents, cached here for the Cards board and Voice.
+        self._briefing = BriefingService(BriefingBridgeClient(self._heptabase_journal.bridge_store), self._database,
+                                         self._announcements,
+                                         timezone_name=lambda: self._heptabase_journal.settings().timezone,
+                                         open_on_mac=lambda url: self._mac.open(url=url))
+        self._briefing_routes = BriefingRoutes(self._briefing)
+        register_briefing_tools(self._tools, self._briefing)
         self._background_agent_runs = AgentRunRepository(self._database)
         self._background_agent_settings = BackgroundAgentSettingsRepository(self._database)
         self._run_workspaces = RunWorkspaceRegistry(config.background_runs_path)
@@ -353,7 +369,8 @@ class RuntimeApplication:
             voice_skill_instructions=self._instruction_documents.voice_instructions,
             voice_modes=self._voice_modes,
             t3_voice_context=_joined(T3VoiceContext(self._t3).render, MacVoiceContext(self._mac).render,
-                                     GeneratedUiVoiceContext(self._generated_ui).render),
+                                     GeneratedUiVoiceContext(self._generated_ui).render,
+                                     BriefingVoiceContext(self._briefing).render),
         )
         self._text_runner = AgentsSdkTextRunner(
             credentials=credentials,
@@ -479,6 +496,13 @@ class RuntimeApplication:
                 changed_by="runtime-bootstrap",
                 reason="enable generated visuals for Voice (shown only when the Mac bridge is configured)",
             )
+        if self._audience_router.binding_for(BRIEFING_TOOL_SET) is None:
+            self._audience_router.set_audience(
+                BRIEFING_TOOL_SET,
+                AgentAudience.VOICE,
+                changed_by="runtime-bootstrap",
+                reason="enable the morning brief for Voice (read only when asked; shown only when the Mac bridge is configured)",
+            )
         if self._audience_router.binding_for(JOURNAL_TOOL_SET) is None:
             self._audience_router.set_audience(
                 JOURNAL_TOOL_SET,
@@ -533,6 +557,8 @@ class RuntimeApplication:
             mac=self._mac_routes,
             conversation_sync=self._conversation_sync_routes,
             generated_ui=self._generated_ui_routes,
+            capture=self._capture_routes,
+            briefing=self._briefing_routes,
         )
         self._server.start()
         self._background_agent.start()
@@ -542,6 +568,8 @@ class RuntimeApplication:
         self._heptabase_journal.start()
         self._conversation_sync.start()
         self._generated_ui_watcher.start()
+        self._capture.start()
+        self._briefing.start()
         self._events.publish(
             "runtime.ready",
             {"status": "ready", "startCount": int(record.value)},
@@ -557,6 +585,8 @@ class RuntimeApplication:
         self._heptabase_journal.stop()
         self._conversation_sync.stop()
         self._generated_ui_watcher.stop()
+        self._capture.stop()
+        self._briefing.stop()
         if self._server is not None:
             self._server.stop()
             self._server = None
