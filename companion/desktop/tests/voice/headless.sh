@@ -154,6 +154,8 @@ elif scenario == "bargein":
     good &= ok([t["kind"] for t in turns] == ["audio", "announce"], "an utterance, then the announcement: %s"
                % [t["kind"] for t in turns])
     good &= ok(any(c["cancelled"] for c in cancels), "the barge-in cancelled the reply on the bridge")
+    good &= ok(bool(cancels) and all(c.get("turnId") == turns[0]["turnId"] for c in cancels if c["cancelled"]),
+               "the cancel named the turn it meant (turnId)")
     good &= ok(turns[0].get("interrupted") is True, "its stream ended interrupted")
     good &= ok(len(ends) == 1 and ends[0]["ended"], "end() told the bridge")
 sys.exit(0 if good else 1)

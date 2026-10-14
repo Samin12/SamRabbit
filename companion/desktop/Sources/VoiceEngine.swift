@@ -278,7 +278,8 @@ final class MacVoice: ObservableObject {
             turnTask = nil
             if let conversationId, let client {
                 Task {
-                    _ = try? await client.assistantCancel(conversationId: conversationId, timeout: 3)
+                    // The turn it means: a cancel that arrives after that reply ended must not stop the next one.
+                    _ = try? await client.assistantCancel(conversationId: conversationId, turnId: turnId, timeout: 3)
                     task?.cancel()
                 }
             } else {

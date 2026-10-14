@@ -176,10 +176,13 @@ extension BridgeClient {
         return try await json(.post(api.assistantPath("session"), body: body, timeout: timeout).repeatable)
     }
 
-    /// `POST /v1/mobile/assistant/cancel {conversationId}`: stop the reply being said (barge-in).
-    public func assistantCancel(conversationId: String, timeout: TimeInterval = 5) async throws {
-        try await send(.post(api.assistantPath("cancel"), body: ["conversationId": .string(conversationId)],
-                             timeout: timeout).repeatable)
+    /// `POST /v1/mobile/assistant/cancel {conversationId, turnId?}`: stop the reply being said (barge-in). `turnId`
+    /// names the turn meant: a tap on a reply that ended meanwhile must not stop the next one (the bridge then stops
+    /// nothing).
+    public func assistantCancel(conversationId: String, turnId: String? = nil, timeout: TimeInterval = 5) async throws {
+        var body: [String: JSONValue] = ["conversationId": .string(conversationId)]
+        if let turnId, !turnId.isEmpty { body["turnId"] = .string(turnId) }
+        try await send(.post(api.assistantPath("cancel"), body: body, timeout: timeout).repeatable)
     }
 
     /// `POST /v1/mobile/assistant/end {conversationId}`: the watch (or the Mac) stopped listening.
