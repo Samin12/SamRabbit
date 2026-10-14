@@ -187,14 +187,16 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key === 'Escape') {
     if (closePopover() || closeOverlay()) return;
+    // The voice panel says "Esc ends it": a conversation comes before the view's own Esc (a field keeps its Esc).
+    if (!typing && talk.visible()) {
+      event.preventDefault();
+      talk.escape();
+      return;
+    }
   }
   if (overlayOpen()) return;
   if (views[current] && views[current].handleKey && views[current].handleKey(event)) return;
   if (typing || meta || event.altKey) return;
-  if (event.key === 'Escape' && talk.visible()) {
-    talk.escape();
-    return;
-  }
   // N anywhere (not typing): a new task, as in the dock.
   if (keyName(event) === 'compose') {
     event.preventDefault();

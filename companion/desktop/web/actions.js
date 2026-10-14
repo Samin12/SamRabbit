@@ -83,7 +83,7 @@ export function openJournalNote(api) {
   const cancel = h('button', { class: 'btn-ghost big', type: 'button' }, 'Cancel');
   const { close } = sheet({
     title: 'Journal note',
-    text: 'Goes into today’s Heptabase journal word for word, with the time.',
+    text: 'Goes into today’s Heptabase journal word for word, with the time. ⌘↩ adds it.',
     body: h('div', { class: 'dialog-body' }, area, error),
     buttons: [cancel, add],
     className: 'journal',

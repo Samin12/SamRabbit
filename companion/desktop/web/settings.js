@@ -8,7 +8,7 @@ import { hasShell, nativeState, onNative, postNative } from './native.js';
 import { Resource } from './resource.js';
 import { assistantLine, chatgptStatus, deviceLine, groupDevices, platformLabel, r1Status } from './status.js';
 import { keycap, reportDragExclusions, sheet, spinner, toast, toggle } from './ui.js';
-import { normalizeVoice } from './voice.js';
+import { isActive, normalizeVoice } from './voice.js';
 
 export function createSettings(ctx, el) {
   const { summary } = ctx;
@@ -68,7 +68,7 @@ export function createSettings(ctx, el) {
     const { close } = sheet({
       title: `Unpair ${device.name}?`,
       text: (watches.length ? `${watches.join(' and ')} ${watches.length === 1 ? 'is' : 'are'} unpaired with it. ` : '')
-        + 'It stops reaching this Mac at once; pairing again takes a new code from Pair iPhone….',
+        + 'It stops reaching this Mac at once. To use it again, pair it with a new code.',
       buttons: [cancel, go],
       className: 'confirm',
     });
@@ -144,7 +144,8 @@ export function createSettings(ctx, el) {
     const shell = hasShell();
     const shortcut = voice.shortcut || (shell && voice.shortcutProblem ? '' : '⌃⌥Space');
     const wake = !shell ? 'Works in the SamRabbit app.' : !voice.wakeEnabled ? 'Off: only the shortcut, the Talk button and the dock start a conversation.'
-      : voice.wakeArmed ? 'Listening on this Mac. Nothing leaves it before the phrase.' : voice.wakeProblem || 'Starting…';
+      : voice.wakeArmed ? 'Listening on this Mac. Nothing leaves it before the phrase.'
+        : voice.wakeProblem || (isActive(voice) ? 'Paused while you talk.' : 'Getting ready…');
     return group('Voice', 'Say “Hey Rabbit, …” or press the shortcut from any app. The conversation shows here and in the dock; it is saved in Chats.',
       row({
         glyph: 'keyboard', title: 'Talk to SamRabbit',
@@ -207,7 +208,7 @@ export function createSettings(ctx, el) {
     if (!visible) return;
     const now = Date.now();
     const native = nativeState();
-    const voice = native.voice ? { ...normalizeVoice(native.voice), level: 0, caption: '', heard: '', state: '' } : null;
+    const voice = native.voice ? { ...normalizeVoice(native.voice), level: 0, caption: '', heard: '', state: isActive(normalizeVoice(native.voice)) } : null;
     const key = JSON.stringify([summary.loadedAt, Boolean(summary.error), devices.loadedAt, Boolean(devices.error), chatgpt.loadedAt,
       Boolean(chatgpt.error), voice, native.dock, native.shortcuts, native.app, [...unpairing], Math.floor(now / 60_000)]);
     if (!force && key === drawn) return;
@@ -220,6 +221,12 @@ export function createSettings(ctx, el) {
   }
 
   for (const resource of [summary, devices, chatgpt]) resource.on(() => render());
+  // Pairing and the ChatGPT login finish in their own windows: read again when this one is back in front.
+  window.addEventListener('focus', () => {
+    if (!visible) return;
+    devices.fresh(5_000);
+    chatgpt.fresh(5_000);
+  });
   onNative((_state, changed) => {
     if (changed.some((key) => key !== 'voice') || visible) render();
   });

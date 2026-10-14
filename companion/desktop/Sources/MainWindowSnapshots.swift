@@ -16,6 +16,9 @@ enum MainWindowSnapshots {
         guard !Config.isDefaultBase, Config.baseURL.port != 3780 else {
             return quit(2, "window snapshots: refusing the real bridge (pass --base-url of the fake sync server)")
         }
+        guard Bundle.main.bundleIdentifier != "com.samrabbit.desktop" else {
+            return quit(2, "window snapshots: build a copy with --bundle-id (the installed app's settings stay untouched)")
+        }
         guard FixtureMicrophone.shared != nil else {
             return quit(2, "window snapshots: refusing without SAMRABBIT_VOICE_FIXTURE (the microphone is never opened)")
         }
@@ -52,6 +55,7 @@ enum MainWindowSnapshots {
             // can see as occluded and pause the page's animations and drawing: not here.
             controller.webView.setValue(false, forKey: "windowOcclusionDetectionEnabled")
             (window as? MainAppWindow)?.keepsOffscreen = true
+            window.setFrameAutosaveName("")  // the off-screen frame is not remembered
             window.setFrame(NSRect(x: -30_000, y: -30_000, width: 1280, height: 800), display: false)
             window.orderFrontRegardless()
             guard !NSScreen.screens.contains(where: { $0.frame.intersects(window.frame) }) else {
