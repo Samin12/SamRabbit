@@ -47,7 +47,7 @@ enum BlockLength: Int, AppEnum {
 /// "Ask SamRabbit …": a new T3 Code task with automatic placement.
 struct AskSamRabbitIntent: AppIntent {
     static let title: LocalizedStringResource = "Ask SamRabbit"
-    static let description = IntentDescription("Starts a T3 Code task on your Mac. SamRabbit picks the project.",
+    static let description = IntentDescription("Starts a T3 Code task on your computer. SamRabbit picks the project.",
                                                categoryName: "Tasks")
 
     @Parameter(title: "Request", requestValueDialog: "What should SamRabbit do?")
@@ -137,7 +137,7 @@ struct WhatNeedsMeIntent: AppIntent {
 /// Opens an app (or a link) on the Mac.
 struct OpenOnMacIntent: AppIntent {
     static let title: LocalizedStringResource = "Open on Mac"
-    static let description = IntentDescription("Opens an app or a link on your Mac.", categoryName: "Mac")
+    static let description = IntentDescription("Opens an app or a link on your computer.", categoryName: "Computer")
 
     @Parameter(title: "App or link", requestValueDialog: "What should I open on your Mac?")
     var target: String
@@ -162,7 +162,7 @@ struct OpenOnMacIntent: AppIntent {
 /// Opens SamRabbit on the Mac tab and takes a screenshot.
 struct ScreenshotMacIntent: AppIntent {
     static let title: LocalizedStringResource = "Screenshot My Mac"
-    static let description = IntentDescription("Shows what is on your Mac's screen right now.", categoryName: "Mac")
+    static let description = IntentDescription("Shows what is on your computer's screen right now.", categoryName: "Computer")
     static let supportedModes: IntentModes = .foreground(.immediate)
 
     @MainActor

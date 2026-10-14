@@ -24,6 +24,11 @@ case "${1:-}" in
 esac
 mkdir -p "$OUT"
 
+# App Store Connect rejects a build whose App Intent descriptions contain Apple trademarks such as "Mac" (ITMS 90626).
+if grep -rniE 'IntentDescription\(.*\b(mac|iphone|ipad|siri|apple)\b' --include='*.swift' "$HERE" >&2; then
+  echo "testflight.sh: reword the App Intent descriptions above (Apple refuses these words in them)" >&2; exit 65
+fi
+
 if [ "$mode" != upload ]; then
   build=$(date -u +%Y%m%d%H%M)
   archive="$OUT/SamRabbit-$build.xcarchive"
