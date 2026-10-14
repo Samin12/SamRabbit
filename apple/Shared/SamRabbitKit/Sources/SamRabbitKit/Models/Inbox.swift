@@ -340,13 +340,13 @@ public struct InboxItem: Codable, Sendable, Equatable, Identifiable {
         return "\(id)@\(Self.stamp(updatedAt))"
     }
 
-    /// The item once seen, as the bridge says it next: not unread, no `seen`, and a Claude Code or Codex failure
-    /// settled (idle; nothing else settles it). A T3 thread that failed stays an error until T3 settles it.
+    /// The item once seen, as the bridge says it next: not unread, no `seen`, and a failure settled (idle, its label
+    /// still saying it failed; out of Needs you until it fails again), whoever runs it.
     public var markedSeen: InboxItem {
         var seen = self
         seen.unread = false
         seen.can.removeAll { $0 == InboxCapability.seen.rawValue }
-        if seen.status == .error, source != .t3 { seen.status = .idle }
+        if seen.status == .error { seen.status = .idle }
         return seen
     }
 

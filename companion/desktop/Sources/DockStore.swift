@@ -377,9 +377,7 @@ final class DockStore: ObservableObject {
     }
 
     func markSeen(_ item: DockItem) {
-        var optimistic = item
-        optimistic.unread = false
-        perform(item, "seen", optimistic: optimistic) { await DockAPI.seen(item.id) }
+        perform(item, "seen", optimistic: item.markedSeen) { await DockAPI.seen(item.id) }
     }
 
     func open(_ item: DockItem) {

@@ -219,6 +219,15 @@ struct DockItem: Identifiable, Equatable, Decodable {
 
     /// Every item of a bridge that knows dismissing (W8): hidden until it changes.
     var canDismiss: Bool { supports("dismiss") }
+    /// The item once seen, as the bridge says it next (Mark seen's instant result): not unread, no `seen`, and a
+    /// failure settled (idle, its label still saying it failed; out of Needs you until it fails again), whoever runs it.
+    var markedSeen: DockItem {
+        var seen = self
+        seen.unread = false
+        seen.can.removeAll { $0 == "seen" }
+        if seen.status == .error { seen.status = .idle }
+        return seen
+    }
 
     /// "Needs you": waiting on an approval or an answer, failed, or finished and not yet seen.
     var needsYou: Bool {

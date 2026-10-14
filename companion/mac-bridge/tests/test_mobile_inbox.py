@@ -235,7 +235,12 @@ class PhoneSeenTest(PhoneInboxBase):
 class PhoneDismissTest(PhoneInboxBase):
     def test_what_the_phone_dismisses_is_dismissed_in_the_dock_and_back(self) -> None:
         self.build_world()
-        dock = self.get_inbox()
+        self.get_inbox()  # the first look: what is there is seen (a seen failure settles) ...
+        with self.fake_t3.lock:  # ... so the deploy preview fails again: news, in Needs you
+            thread = self.fake_t3.get_thread("t-error")
+            thread["latestTurn"]["completedAt"] = thread["updatedAt"] = "2026-10-08T18:20:00.000Z"
+        self.hub.invalidate()
+        dock = self.fresh()
         start = self.phone_inbox()
         self.assertTrue(all("dismiss" in item["can"] for item in start["items"]), "every item, on the phone too")
         answers: List[Dict[str, Any]] = []

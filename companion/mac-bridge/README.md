@@ -668,7 +668,7 @@ or mtime changed, a session that is not a terminal one never past its head; a re
 | `POST /v1/desktop/inbox/items/<id>/answer {requestId, answers: {questionId: answer \| [answers]}}` | T3: `thread.user-input.respond` (option labels become the values T3 expects) |
 | `POST /v1/desktop/inbox/items/<id>/reply {text}` | `202 {ok, how}`: T3 `thread.turn.start` (`how: "t3"`); a Claude or Codex CLI session nobody owns: a new Terminal window running `claude --resume <id> -- <text>` / `codex resume <id> -- <text>` in its folder (`--`: a reply that starts with `-` is the prompt, never an option), so the CLI's own permission prompts stay (`how: "terminal"`). A live session, or one resumed from here in the last 15 s (its CLI not in `ps` yet): 409 `session_live` ("open it to answer there"); when `ps` fails (a CLI may own it, nobody can tell): 503 `session_check_failed` (retryable), never a second CLI on the same session; Codex Desktop's threads and chats: 409 `unsupported_action` |
 | `POST /v1/desktop/inbox/items/<id>/stop` | T3: `thread.turn.interrupt` (with the active turn), nothing when it is not working |
-| `POST /v1/desktop/inbox/items/<id>/seen` | `{ok}`: unread clears. T3 uses the R1's seen markers (a thread is unread when it finished or started needing him after he last looked); the others the time of what he saw |
+| `POST /v1/desktop/inbox/items/<id>/seen` | `{ok}`: unread clears. T3 uses the R1's seen markers (a thread is unread when it finished or started needing him after he last looked; a failure when it failed after that: its turn's time, or its provider session's when the session went to error later, never T3's own touches of the thread); the others the time of what he saw |
 | `POST /v1/desktop/inbox/items/<id>/dismiss` | `{ok, dismissed: true, revision}` (every item): marked seen, and out of the list and its counts until it changes (see below); the answer comes once the list shows it. Only the bridge's own state: nothing reaches T3, Claude Code or Codex. 404 `item_not_found` for something the inbox does not have |
 | `POST /v1/desktop/inbox/items/<id>/undismiss` | `{ok, dismissed: false, revision}`: the undo. Back at once, as unread as it was before (unless it was marked seen since); fine for something that is not dismissed |
 | `POST /v1/desktop/inbox/items/<id>/open` | `{opened: true, how}`: T3 → activates T3 Code (`how: "app"`; its `t3code://` scheme opens only sign-in and settings pages in 0.0.45, no thread); a live Claude / Codex CLI → the app its terminal runs in, found by walking the process's parents (Terminal, iTerm, Ghostty, T3 Code, an editor; Terminal itself when there is none, e.g. tmux); one resumed from here in the last 15 s, or any while `ps` fails → Terminal; one nobody owns → a Terminal window running `claude --resume <id>` / `codex resume <id>` (`how: "terminal"`); Codex Desktop → `codex://threads/<id>`, the ChatGPT app's own deep link (`how: "deeplink"`); a chat → `{how: "desktop", conversationId}` (the app shows it itself) |
@@ -684,9 +684,10 @@ questions: [{id, header, question, options, allowCustom, multiSelect}]}]}, can, 
 the item supports now: `approve` / `answer` / `stop` only for T3; `reply` for T3 and for CLI sessions known to be
 owned by nobody (not while `ps` fails); `seen` only while it is unread; `dismiss` always; a Claude or Codex prompt
 waiting in a terminal can only be opened (or dismissed). "Needs you" =
-needs-approval, needs-input, error, and done-and-unread. A Claude or Codex session that failed is `error` until Samin
-marks it seen (nothing else can settle it, unlike a T3 thread); then it is `idle`, its label still "Hit an error", until
-a new error. Order: needs-approval, needs-input, error, done and unread,
+needs-approval, needs-input, error, and done-and-unread. Anything that failed (a T3 thread, a Claude or Codex session)
+is `error` until Samin marks it seen (or opens it on the phone: opening is seeing); then it is `idle`, its label still
+"Failed" / "Hit an error", until it fails again. A seen failure that is snoozed in T3 is left out like T3's other
+snoozed threads; one he hasn't seen stays. Order: needs-approval, needs-input, error, done and unread,
 working, then the rest, newest first in each; at most 60 items (`counts` are over all of them).
 
 **Dismissed** items (Samin's ✕ in the dock, the window or the phone) are left out of `items` and of `needsYou`,

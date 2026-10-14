@@ -138,6 +138,12 @@ class BriefingBase(MobileBase):
         self.server.inbox = inbox.InboxService(home=str(home), clock=self.clock.time, monotonic=self.clock.monotonic)
         self.server.inbox.attach(self.server)
         self.addCleanup(self.server.inbox.close)
+        self.server.inbox.refresh(force=True)  # the first look: what is there is seen (a seen failure settles) ...
+        with self.fake_t3.lock:  # ... so the deploy preview fails again: news, the third agent waiting
+            self.fake_t3.get_thread("t-error")["session"]["updatedAt"] = (
+                datetime.fromtimestamp(NOW - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+        self.server.mobile.t3.invalidate()
+        self.server.inbox.refresh_soon()
         self.brief_log = io.StringIO()
         handler = logging.StreamHandler(self.brief_log)
         for logger in (briefing._LOG, composio._LOG):  # noqa: SLF001

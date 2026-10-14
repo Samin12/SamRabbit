@@ -160,6 +160,12 @@ class FakeInboxTest(unittest.TestCase):
         self.assertEqual(detail["messages"][-1], {"role": "user", "text": "Ship it", "at": detail["messages"][-1]["at"]})
         status, _ = self.call("POST", "/v1/desktop/inbox/items/t3:th_snapshot_cache/stop", {})
         self.assertEqual((status, self.item("t3:th_snapshot_cache")["status"]), (200, "idle"))
+        # As the real bridge: a T3 failure he has seen is settled (out of Needs you), its label kept.
+        self.assertEqual(self.item("t3:th_watch_previews")["status"], "error")
+        status, _ = self.call("POST", "/v1/desktop/inbox/items/t3:th_watch_previews/seen", {})
+        seen = self.item("t3:th_watch_previews")
+        self.assertEqual((status, seen["status"], seen["unread"], seen["statusLabel"]),
+                         (200, "idle", False, "Failed · xcodebuild exited 65"))
 
     def test_dismiss_hides_until_it_changes_and_undo_brings_it_back(self) -> None:
         before = self.inbox()

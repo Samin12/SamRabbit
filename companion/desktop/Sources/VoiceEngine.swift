@@ -7,13 +7,16 @@ import SamRabbitKit
 /// (`ConversationMachine`, SamRabbitKit, unit-tested), the same speech detector and the same streaming turns, to the
 /// bridge's desktop routes (`/v1/desktop/assistant/*`, the desktop token, loopback only).
 ///
-/// * Listens (`VoiceAudio`: voice processing, so the assistant's own voice through the speakers doesn't count as
-///   Samin speaking), sends each utterance as a 16 kHz WAV, plays the reply as it streams in (`say.delta` is the live
-///   caption), and listens again. A reply without audio is said with the Mac's own voice.
+/// * Listens (`VoiceAudio`: the plain microphone, closed while a reply plays; with `VoiceEchoCancellation` on, voice
+///   processing, so the assistant's own voice through the speakers doesn't count as Samin speaking), sends each
+///   utterance as a 16 kHz WAV, plays the reply as it streams in (`say.delta` is the live caption), and listens
+///   again. A reply without audio is said with the Mac's own voice.
 /// * `stopSpeaking()` barges in (the reply stops on the Mac and here, and it listens), `end()` ends it; it also ends
 ///   when the assistant says so ("bye", "that's all") or after 90 s without anything said. Talking over a reply
-///   barges in too when `VoiceBargeIn` is on (off by default: `defaults write com.samrabbit.desktop VoiceBargeIn
-///   -bool true`), and only while echo cancellation runs (`BargeInDetector`).
+///   barges in too when `VoiceBargeIn` is on, and only while echo cancellation runs (`BargeInDetector`), so it needs
+///   both: `defaults write com.samrabbit.desktop VoiceBargeIn -bool true` and `… VoiceEchoCancellation -bool true`
+///   (both off by default; the log says when the first is on without echo cancellation running).
+/// * Mute drops what the microphone hears (and uses voice processing's own mute when it runs).
 /// * T3 announcements (a task finished or needs Samin) are polled about every 20 s and said between turns.
 /// * The "Hey Rabbit" listener (`VoiceWake`, on device) runs whenever no conversation does, unless it is turned off
 ///   or the microphone is muted.
@@ -238,6 +241,9 @@ final class MacVoice: ObservableObject {
                     carry = samples.isEmpty ? nil : samples
                 }
                 audio.setMuted(micMuted)
+                if !forceBargeIn, !audio.voiceProcessing, UserDefaults.standard.bool(forKey: Self.bargeInKey) {
+                    Log.write("voice: talking over a reply is off: it needs echo cancellation (VoiceEchoCancellation)")
+                }
                 startTimers()
                 handle(.audioReady)
             }

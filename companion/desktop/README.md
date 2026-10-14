@@ -180,15 +180,23 @@ with the dock's mic button, **⌃⌥Space** from any app (Carbon `RegisterEventH
   barge-in (`stopSpeaking()`), `/end` on `end()`, and `/announcements` about every 20 s (T3 tasks that finished or
   need you, said between turns as `{"announce": id}` turns). Loopback, the desktop token. It listens again after
   each reply and ends when the assistant says so ("bye", "that's all"), on ⌃⌥Space or after 90 s without speech.
-- **Talking over a reply** stops it too when turned on (`defaults write com.samrabbit.desktop VoiceBargeIn -bool
-  true`; off by default until it has been tried with real speakers): with echo cancellation running, sustained speech
-  well above the room (`BargeInDetector`: 0.35 s, 15 dB over the room and above -40 dBFS) cancels the reply, and what
-  was said over it is the start of the next question.
-- **Audio** (`VoiceAudio.swift`): one `AVAudioEngine` per conversation with voice processing on the microphone (echo
-  cancellation: the assistant's voice through the speakers never counts as you speaking; other apps are ducked as
-  little as macOS allows). Muting the microphone uses voice processing's own mute; mute belongs to the conversation
-  (the next one, and "Hey Rabbit", hear again), and a muted conversation still ends by itself, after four times the
-  quiet end (6 minutes).
+- **Talking over a reply** stops it too when turned on, and it needs echo cancellation on as well (both off by
+  default, until they have been tried with real speakers: `defaults write com.samrabbit.desktop VoiceBargeIn -bool
+  true` and `defaults write com.samrabbit.desktop VoiceEchoCancellation -bool true`; with only the first, the log says
+  "talking over a reply is off: it needs echo cancellation"). With echo cancellation running, sustained speech well
+  above the room (`BargeInDetector`: 0.35 s, 15 dB over the room and above -40 dBFS) cancels the reply, and what was
+  said over it is the start of the next question.
+- **Audio** (`VoiceAudio.swift`, `VoiceStart.swift`): one `AVAudioEngine` per conversation on the plain microphone,
+  which is closed while a reply plays (half duplex, fine with speakers). Echo cancellation (voice processing on the
+  microphone: the assistant's voice through the speakers never counts as you speaking; other apps are ducked as little
+  as macOS allows) is opt-in with `VoiceEchoCancellation`: on Samin's Mac (a USB microphone, speakers on a DisplayPort
+  monitor) it took about 12 s to fail (-10875) and left the microphone unable to start for the next try. When it is
+  on it is tried first; a failure that slow is not tried again on that microphone until SamRabbit restarts (another
+  microphone is; a quick failure is tried again next time). Then the plain microphone, tried three times 0.3 s apart
+  (the "Hey Rabbit" listener may have just handed it over); a stop or a new start while it waits gives up cleanly.
+  Muting the microphone drops what it hears (and uses voice processing's own mute when that runs); mute belongs to the
+  conversation (the next one, and "Hey Rabbit", hear again), and a muted conversation still ends by itself, after
+  four times the quiet end (6 minutes).
 - **"Hey Rabbit"** (`VoiceWake.swift`, `VoiceWakeMatcher.swift`) listens whenever no conversation does, entirely on
   this Mac: `SpeechAnalyzer` + `SpeechTranscriber` (macOS 26, on device; no Speech Recognition permission, no
   network), fed only while the room is loud enough for speech (an energy gate, so a quiet room costs about nothing).
@@ -406,7 +414,8 @@ companion/desktop/tests/window/clicks.sh                    # the page under a r
                                                             # off screen, silent; its own fake server)
 companion/desktop/tests/swift/run.sh                        # Agent Dock logic: inbox, placement, visibility, keys
 python3 -m unittest discover -s companion/mac-bridge/tests  # includes the /app/ route (test_desktop_app.py)
-companion/desktop/tests/voice/run.sh                        # the wake phrase matcher and runs, gate, ring, mic choice
+companion/desktop/tests/voice/run.sh                        # the wake phrase matcher and runs, gate, ring, mic choice;
+                                                            # how a conversation's microphone starts (MicrophoneStart)
 companion/desktop/tests/voice/headless.sh                   # the voice end to end against the fake, silently
 companion/desktop/tests/voice/headless.sh listen 60         # the wake listener's CPU in a quiet room
 ```

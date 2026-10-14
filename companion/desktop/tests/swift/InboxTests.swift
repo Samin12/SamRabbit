@@ -9,6 +9,7 @@ enum InboxTests {
         ("capsTheList", capsTheList),
         ("computesCountsWhenMissing", computesCountsWhenMissing),
         ("showsCountsLikeTheSections", showsCountsLikeTheSections),
+        ("settlesAFailureOnceSeen", settlesAFailureOnceSeen),
         ("recommendsAnOption", recommendsAnOption),
         ("buildsAnswers", buildsAnswers),
         ("resolvesTargets", resolvesTargets),
@@ -166,6 +167,26 @@ enum InboxTests {
          "items": [{"id": "chat:c", "source": "samrabbit", "status": "working"}]}
         """.utf8))
         expectEqual(chat.shownCounts(items: chat.items).working, 0, "an R1 reply streaming is not an agent at work")
+    }
+
+    /// Mark seen's instant result is what the bridge says next: a failure (a T3 thread's too) leaves Needs you at
+    /// once, the badge with it, its label still saying it failed; a finished one only stops being unread.
+    static func settlesAFailureOnceSeen() throws {
+        let inbox = try fixture()
+        for source in ["t3", "claude", "codex"] {
+            let failed = DockItem(id: "\(source):f", source: source, title: "Deploy preview", status: .error,
+                                  statusLabel: "Failed", unread: true, can: ["reply", "seen", "open"])
+            expect(failed.needsYou, "\(source): a failure needs you")
+            let seen = failed.markedSeen
+            expectEqual(seen.status, .idle, "\(source): seen, it is settled")
+            expect(!seen.needsYou && !seen.unread && !seen.supports("seen") && seen.supports("reply"), source)
+            expectEqual(seen.statusLabel, "Failed")
+            expectEqual(inbox.shownCounts(items: [failed]).needsYou, 1)
+            expectEqual(inbox.shownCounts(items: [seen]).needsYou, 0, "\(source): the badge drops at once")
+        }
+        let finished = DockItem(id: "t3:d", source: "t3", title: "Done", status: .done, unread: true, can: ["seen"])
+        expectEqual(finished.markedSeen.status, .done)
+        expect(!finished.markedSeen.needsYou && !finished.markedSeen.unread)
     }
 
     static func recommendsAnOption() throws {

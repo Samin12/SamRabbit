@@ -132,7 +132,7 @@ Approve on a T3 card exactly as before; a finished Claude Code session takes a r
 window on the Mac, then shows live there with no reply field, then its answer), one waiting for a permission in its
 terminal says so with what it asks and offers no reply, a Codex Desktop thread says the app runs it; opening a
 finished task is seeing it (a Claude Code session, again when it finishes while open; a T3 thread that finished
-leaves Needs you and the badge drops; a T3 failure is marked seen and stays); a session the Mac couldn't check says
+leaves Needs you and the badge drops; so does a T3 failure, settled until it fails again); a session the Mac couldn't check says
 "Can't tell if it's open on your Mac" and offers no reply; T3 Code down keeps the Claude Code and
 Codex rows with "T3 not connected", T3's last rows at the end, read-only and out of the badge; an older bridge without
 the inbox gets T3's thread list as before; New task goes with Codex and its model to `/inbox/new`; a swiped card goes
@@ -432,8 +432,8 @@ count every agent.
 - **Seen**: "Needs you" is the dock's (approvals, questions, failures, finished and unseen). Opening a finished or
   failed item (either screen) is seeing it: it is marked seen quietly, once per state (`seenMark`: a session that
   finishes again while its screen is open is marked again), here and on the dock; Mark seen on the cards and screens
-  does the same. A Claude Code or Codex failure then settles; a T3 one stays an error (and in Needs you) until T3
-  settles it, as on the Mac.
+  does the same. A failure then settles, whoever runs it (a T3 thread, Claude Code, Codex): out of Needs you, its
+  label still saying it failed, until it fails again, as on the Mac.
 - **Dismiss** (W8; any item of a bridge that lists `dismiss` in `can`): swipe a card or a row left (or long press →
   Dismiss, or VoiceOver's action), or Dismiss on its screen (back to the list). It leaves Tasks, Home and the counts at
   once, "Dismissed · <title> · Undo" shows above the tab bar for five seconds, and `POST /inbox/items/<id>/dismiss`

@@ -364,7 +364,7 @@ struct InboxTests {
     }
 
     /// Opening a finished or failed item marks it seen once per state; what it looks like then is what the bridge
-    /// says next (a Claude Code or Codex failure settles, a T3 one stays an error until T3 settles it).
+    /// says next (a failure settles, a T3 one too, until it fails again).
     @Test func seeingAnItem() throws {
         let inbox = try snapshot()
         let changelog = try item("claude:changelog", in: inbox)
@@ -386,10 +386,13 @@ struct InboxTests {
         failed.status = .error
         #expect(failed.needsYou)
         #expect(failed.markedSeen.status == .idle && !failed.markedSeen.needsYou)
+        // A T3 failure too: seen, it is settled (the bridge says so from then on, until it fails again).
         var t3Failed = try item("t3:t_deploy", in: inbox)
         t3Failed.status = .error
-        #expect(t3Failed.markedSeen.status == .error && t3Failed.markedSeen.needsYou)
-        #expect(!t3Failed.markedSeen.supports(.seen))
+        t3Failed.statusLabel = "Failed"
+        #expect(t3Failed.needsYou)
+        #expect(t3Failed.markedSeen.status == .idle && !t3Failed.markedSeen.needsYou)
+        #expect(t3Failed.markedSeen.statusLabel == "Failed" && !t3Failed.markedSeen.supports(.seen))
     }
 
     /// A screen reads its item again when that item moved on: not for every line a working agent writes (its time),

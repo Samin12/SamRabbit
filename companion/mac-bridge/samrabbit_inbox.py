@@ -1759,18 +1759,21 @@ class InboxService:
         except t3.T3Error as error:
             return [], {"connected": False, "reason": error.code}
         moment = datetime.fromtimestamp(now, timezone.utc)
+        if not self.seen.baselined("t3"):
+            self.seen.baseline("t3", {"t3:" + str(thread.get("id")): _t3_seen_mark(thread)
+                                      for thread in snapshot.threads.values()})
         rows: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         for thread_id, thread in snapshot.threads.items():
             base = hub.item(thread, snapshot.titles)
             status = _MOBILE.get(str(base.get("status")), IDLE)
             if status in (DONE, IDLE) and (t3.is_settled(thread) or t3.is_snoozed(thread, moment)):
                 continue  # T3's own "settled" and "snoozed" shelves
+            if status == ERROR and t3.is_snoozed(thread, moment) and \
+                    not t3.is_unread(_t3_marker(thread, status), self.seen.get("t3:" + str(thread_id))):
+                continue  # a failure he has seen is settled: snoozed, it is shelved like the rest
             rows.append((thread, base))
         with self._lock:
             self._t3_threads = {str(thread.get("id")): thread for thread, _base in rows}
-        if not self.seen.baselined("t3"):
-            self.seen.baseline("t3", {"t3:" + str(thread.get("id")): t3.seen_marker(thread)
-                                      for thread in snapshot.threads.values()})
         self._read_t3_details(hub, rows)
         workspace = {record["id"]: record.get("workspaceRoot") or None for record in snapshot.records}
         drivers = self._drivers(hub)
@@ -1823,7 +1826,9 @@ class InboxService:
             detail = self._t3_details.get(thread_id)
         pending = detail[1] if detail is not None and status in (NEEDS_APPROVAL, NEEDS_INPUT) else None
         answer = detail[2] if detail is not None else ""
-        marker = None if status == WORKING else t3.unread_marker(thread, t3.thread_status(thread))
+        # A failure is news until Samin has seen it: from then on it is settled (Earlier, not Needs you) until it
+        # fails again (see `_t3_failed_at`).
+        marker = _t3_marker(thread, status)
         unread = t3.is_unread(marker, self.seen.get(item_id))
         label = _t3_label(thread, status, base, pending)
         if pending is not None and pending.approvals:
@@ -1845,8 +1850,13 @@ class InboxService:
             can = ["reply", "stop", "open"]
         else:
             can = ["reply", "open"]
+        updated = base.get("updatedAt") or t3.normal_time(thread.get("updatedAt"))
+        if status == ERROR:
+            updated = t3.normal_time(marker) or updated  # when it failed
         if unread:
             can.append("seen")
+        elif status == ERROR:
+            status = IDLE  # seen: settled (the label still says it failed)
         can.append("dismiss")  # every item: hidden until it changes (never a T3 call)
         project_id = str(thread.get("projectId") or "")
         return {
@@ -1855,7 +1865,7 @@ class InboxService:
             "title": _clip(base.get("title") or "Untitled task", MAX_TITLE_CHARS),
             "project": base.get("projectName"), "cwd": thread.get("worktreePath") or workspace.get(project_id),
             "status": status, "statusLabel": label, "summary": _clip(summary, MAX_SUMMARY_CHARS),
-            "updatedAt": base.get("updatedAt") or t3.normal_time(thread.get("updatedAt")), "unread": unread,
+            "updatedAt": updated, "unread": unread,
             "pending": _pending_view(pending), "can": can, "live": False,
             "progress": base.get("progress") if status == WORKING else None,
             "phase": base.get("phase") if status == WORKING else None,
@@ -2318,7 +2328,7 @@ class InboxService:
                 raise InboxError(404, "item_not_found", "That is not in the inbox.")
             if source == "t3":
                 thread = self._t3_thread(key)
-                seen = (t3.seen_marker(thread) if thread is not None else "") or str(item.get("updatedAt") or "")
+                seen = (_t3_seen_mark(thread) if thread is not None else "") or str(item.get("updatedAt") or "")
             else:
                 seen = str(item.get("updatedAt") or "")
             self.seen.dismiss(item_id, _change_marker(_after_seen(item)), seen or iso_utc(self._clock()))
@@ -2348,7 +2358,7 @@ class InboxService:
             thread = self._t3_thread(thread_id)
             if thread is None:
                 raise InboxError(404, "item_not_found", "That T3 thread was not found.")
-            self.seen.mark("t3:" + thread_id, t3.seen_marker(thread) or iso_utc(self._clock()))
+            self.seen.mark("t3:" + thread_id, _t3_seen_mark(thread) or iso_utc(self._clock()))
             self._changed_now()
             return 200, {"ok": True}
         if action == "open":
@@ -2653,9 +2663,42 @@ def _needs_you(item: Dict[str, Any]) -> bool:
 
 
 def _settled(status: str, unread: bool) -> str:
-    """A Claude Code or Codex session that failed needs Samin until he saw it (nothing else can settle it, unlike a
-    T3 thread): then it is idle, its label still saying it hit an error. A new error makes it unread again."""
+    """A Claude Code or Codex session that failed needs Samin until he saw it (as a T3 thread's failure): then it is
+    idle, its label still saying it hit an error. A new error makes it unread again."""
     return IDLE if status == ERROR and not unread else status
+
+
+def _t3_failed_at(thread: Dict[str, Any]) -> str:
+    """When a failed T3 thread last failed: its turn's time, or its provider session's own time when the session
+    went to error after the turn (a provider that crashed, a session T3 found orphaned when it started again): T3
+    stamps a session only when the session changes. Never the thread's ``updatedAt``: T3's own bookkeeping touches
+    failed threads, and that is no news."""
+    stamp = t3.activity_time(thread)
+    session = _dict(thread.get("session"))
+    if session.get("status") == "error" and _epoch(session.get("updatedAt")) > _epoch(stamp):
+        stamp = str(session["updatedAt"])
+    return stamp
+
+
+def _t3_marker(thread: Dict[str, Any], status: str) -> Optional[str]:
+    """What says a T3 item is unread (newer than what Samin saw): None while it works; a failure's time
+    (`_t3_failed_at`); else the R1's marker (finished, or started needing him)."""
+    if status == WORKING:
+        return None
+    if status == ERROR:
+        return _t3_failed_at(thread) or t3.unread_marker(thread, t3.thread_status(thread))
+    return t3.unread_marker(thread, t3.thread_status(thread))
+
+
+def _t3_seen_mark(thread: Dict[str, Any]) -> str:
+    """What seeing a T3 thread stores: the R1's seen marker (the later of its turn's end and ``updatedAt``), or
+    when it failed if that is later still."""
+    mark = t3.seen_marker(thread)
+    if t3.thread_status(thread) == t3.ERROR:
+        failed = _t3_failed_at(thread)
+        if _epoch(failed) > _epoch(mark):
+            mark = failed
+    return mark
 
 
 # --------------------------------------------------------------------------- dismissing
@@ -2668,10 +2711,10 @@ def _request_ids(item: Dict[str, Any]) -> List[str]:
 
 
 def _after_seen(item: Dict[str, Any]) -> Dict[str, Any]:
-    """The item as it reads once marked seen (dismissing marks it seen): not unread, and a Claude Code or Codex
-    session that failed is settled (``_settled``), so seeing it is never mistaken for a change."""
+    """The item as it reads once marked seen (dismissing marks it seen): not unread, and a T3 thread, Claude Code or
+    Codex session that failed is settled (``_settled``), so seeing it is never mistaken for a change."""
     status = str(item.get("status") or IDLE)
-    if item.get("source") in ("claude", "codex"):
+    if item.get("source") in ("t3", "claude", "codex"):
         status = _settled(status, False)
     return dict(item, status=status, unread=False)
 

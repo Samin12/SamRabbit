@@ -93,6 +93,23 @@ test('optimistic results: approve and answer continue the work, reply sends, see
   assert.equal(optimisticItem(item, 'open'), null);
 });
 
+test('seen settles a failure at once, a T3 thread\'s too: out of Needs you, its label kept', () => {
+  for (const source of ['t3', 'claude', 'codex']) {
+    const failed = { ...byId('t3:th_pairing_redirect'), id: `${source}:f`, source, status: 'error',
+      statusLabel: 'Failed', unread: true, can: ['reply', 'seen', 'open'],
+      pending: { approvals: [], inputs: [] } };
+    assert.equal(needsYou(failed), true, source);
+    const seen = optimisticItem(failed, 'seen');
+    assert.equal(seen.status, 'idle', `${source}: settled`);
+    assert.equal(seen.statusLabel, 'Failed');
+    assert.equal(seen.unread, false);
+    assert.deepEqual(seen.can, ['reply', 'open']);
+    assert.equal(needsYou(seen), false, `${source}: out of Needs you`);
+  }
+  const finished = { ...byId('t3:th_pairing_redirect'), status: 'done', unread: true };
+  assert.equal(optimisticItem(finished, 'seen').status, 'done', 'a finished one only stops being unread');
+});
+
 test('the store shows an optimistic item until a newer inbox, rolls back on failure, keeps new tasks on their way', () => {
   const store = new InboxStore();
   store.apply(fixture.inbox, 1000);
