@@ -1,39 +1,63 @@
 import SamRabbitKit
 import SwiftUI
 
-/// Tasks: T3 Code threads in three sections - Needs you, Working, Recent.
+/// Tasks: every agent on the Mac — T3 Code threads, Claude Code and Codex sessions (the inbox) — in three
+/// sections: Needs you, Working, Recent; filtered by source when there are several. While T3 Code isn't answering
+/// its last rows sit apart at the end, read-only.
 struct TasksView: View {
     @Environment(AppModel.self) private var model
+    @State private var filter: InboxSource?
 
     var body: some View {
-        let needs = model.threads.filter(\.status.needsYou)
-        let working = model.threads.filter { $0.status == .working }
-        let recent = model.threads.filter { !$0.status.needsYou && $0.status != .working }
+        let rows = model.liveTasks.filter { filter == nil || $0.source == filter }
+        let stale = model.staleTasks.filter { filter == nil || $0.source == filter }
+        let needs = rows.filter(\.needsYou)
+        let working = rows.filter { !$0.needsYou && $0.status == .working }
+        let recent = rows.filter { !$0.needsYou && $0.status != .working }
             .sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
         ScrollView {
             VStack(spacing: 24) {
                 if !model.isPaired {
                     PairPromptCard()
-                } else if let problem = model.tasksProblem {
-                    TasksNotice(error: problem, showingLast: !model.threads.isEmpty)
-                } else if model.threads.isEmpty {
-                    EmptyTasks(loading: !model.threadsLoaded && (model.refreshing || model.lastError == nil))
+                } else {
+                    if Set(model.tasks.map(\.source)).count > 1 {
+                        SourceFilterBar(selection: $filter, items: model.tasks)
+                    }
+                    if let problem = model.tasksProblem {
+                        TasksNotice(error: problem, showingLast: !model.threads.isEmpty, fallback: model.inboxFallback,
+                                    lastNote: model.staleTasks.isEmpty ? nil : "Its last tasks are at the end, read-only.")
+                    }
+                    if model.tasks.isEmpty, model.tasksProblem == nil {
+                        EmptyTasks(loading: !model.threadsLoaded && (model.refreshing || model.lastError == nil))
+                    } else if rows.isEmpty, stale.isEmpty, let filter {
+                        Text("Nothing from \(filter.label) right now.")
+                            .font(.system(size: 14))
+                            .foregroundStyle(SamTheme.muted)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 30)
+                    }
                 }
                 if !needs.isEmpty {
                     VStack(spacing: 12) {
                         SectionHeader("Needs you", count: needs.count, symbol: "hand.raised.fill")
-                        ForEach(needs) { NeedsYouCard(thread: $0) }
+                        ForEach(needs) { InboxCard(item: $0) }
                     }
                 }
-                ThreadSection(title: "Working", symbol: "circle.dotted.circle", threads: working)
-                ThreadSection(title: "Recent", symbol: "clock", threads: recent)
+                InboxSection(title: "Working", symbol: "circle.dotted.circle", items: working)
+                InboxSection(title: "Recent", symbol: "clock", items: recent)
+                InboxSection(title: "Last from T3 Code", symbol: "bolt.horizontal.circle", items: stale, stale: true)
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 30)
+            .animation(.smooth, value: filter)
         }
         .scrollIndicators(.hidden)
         .refreshable { await model.refresh(quiet: false) }
+        .onChange(of: Set(model.tasks.map(\.source))) { _, sources in
+            // The filtered source went away (or the bar did): show everything again, never an empty list to be stuck in.
+            if let filter, sources.count < 2 || !sources.contains(filter) { self.filter = nil }
+        }
         .samScreen()
         .navigationTitle("Tasks")
         .toolbar {
@@ -50,28 +74,6 @@ struct TasksView: View {
     }
 }
 
-struct ThreadSection: View {
-    let title: String
-    let symbol: String
-    let threads: [TaskThread]
-
-    var body: some View {
-        if !threads.isEmpty {
-            VStack(spacing: 12) {
-                SectionHeader(title, count: threads.count, symbol: symbol)
-                VStack(spacing: 0) {
-                    ForEach(Array(threads.enumerated()), id: \.element.id) { index, thread in
-                        if index > 0 { Divider().overlay(SamTheme.line).padding(.leading, 44) }
-                        NavigationLink(value: ThreadRoute(threadId: thread.threadId)) { ThreadRow(thread: thread) }
-                            .buttonStyle(.plain)
-                    }
-                }
-                .glassCard(padding: 6)
-            }
-        }
-    }
-}
-
 struct EmptyTasks: View {
     let loading: Bool
     @Environment(AppModel.self) private var model
@@ -80,7 +82,7 @@ struct EmptyTasks: View {
         VStack(spacing: 14) {
             OrbView(mood: .idle).frame(width: 70, height: 70).padding(.vertical, 18)
             Text(loading ? "Loading tasks…" : "No tasks yet").font(.system(size: 17, weight: .semibold))
-            Text("Ask SamRabbit for something and it starts a T3 Code task on your Mac.")
+            Text("Your T3 Code threads and the Claude Code and Codex sessions on your Mac show up here. Ask SamRabbit for something to start one.")
                 .font(.system(size: 14)).foregroundStyle(SamTheme.muted).multilineTextAlignment(.center)
             Button("Ask SamRabbit") { model.sheet = .ask(prefill: "") }
                 .buttonStyle(.glassProminent)
@@ -91,10 +93,14 @@ struct EmptyTasks: View {
 }
 
 /// "T3 not connected": the Mac answers but T3 Code on it does not, so only the task areas are out
-/// of date (the last list stays visible underneath).
+/// of date (the last list stays visible underneath). `fallback`: the inbox failed and T3's own list
+/// stood in, so only Claude Code and Codex are out of date. `lastNote`: where the last rows are, in
+/// place of "Showing the last tasks."
 struct TasksNotice: View {
     let error: BridgeError
     var showingLast = false
+    var fallback = false
+    var lastNote: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -102,7 +108,7 @@ struct TasksNotice: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(SamTheme.amber)
             VStack(alignment: .leading, spacing: 3) {
-                Text(error.isTaskServiceDown ? "T3 not connected" : "Tasks didn't update")
+                Text(title)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(SamTheme.ink)
                 Text(detail)
@@ -116,10 +122,17 @@ struct TasksNotice: View {
         .accessibilityElement(children: .combine)
     }
 
+    var title: String {
+        if fallback { return "Claude Code and Codex didn't update" }
+        return error.isTaskServiceDown ? "T3 not connected" : "Tasks didn't update"
+    }
+
     var detail: String {
         let reason = error.isTaskServiceDown
             ? (error.errorDescription.flatMap { $0.isEmpty ? nil : $0 } ?? "T3 Code on your Mac isn't answering.")
             : (error.errorDescription ?? "")
+        if fallback { return reason + " T3 Code's tasks are current; the others show how they last were." }
+        if let lastNote { return reason + " " + lastNote }
         return showingLast ? reason + " Showing the last tasks." : reason
     }
 }

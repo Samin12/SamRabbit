@@ -81,12 +81,11 @@ struct OrbHeader: View {
         guard model.isPaired else { return "Not paired yet" }
         guard let summary = model.summary else { return model.lastError == nil ? "Connecting…" : "Can't reach your Mac" }
         if summary.r1.live { return "R1 is live" }
-        if summary.t3.needsYou > 0 {
-            return summary.t3.needsYou == 1 ? "1 task needs you" : "\(summary.t3.needsYou) tasks need you"
-        }
-        if summary.t3.working > 0 {
-            return summary.t3.working == 1 ? "Working on 1 task" : "Working on \(summary.t3.working) tasks"
-        }
+        // Every agent on the Mac (the inbox), not only T3's threads.
+        let needs = model.needsYouCount
+        let working = model.workingCount
+        if needs > 0 { return needs == 1 ? "1 task needs you" : "\(needs) tasks need you" }
+        if working > 0 { return working == 1 ? "Working on 1 task" : "Working on \(working) tasks" }
         return "All quiet"
     }
 
@@ -99,8 +98,12 @@ struct OrbHeader: View {
         } else {
             parts.append("R1 seen \(Formatting.ago(summary.r1.lastSeenAt))")
         }
-        if summary.r1.live || summary.t3.needsYou > 0, summary.t3.working > 0 {
-            parts.append("\(summary.t3.working) working")
+        // While the R1 is live the headline says so: what needs you (every agent's) still shows here.
+        if summary.r1.live, model.needsYouCount > 0 {
+            parts.append(model.needsYouCount == 1 ? "1 needs you" : "\(model.needsYouCount) need you")
+        }
+        if summary.r1.live || model.needsYouCount > 0, model.workingCount > 0 {
+            parts.append("\(model.workingCount) working")
         }
         if let next = summary.nextEvent(), let start = next.startsAt, !summary.r1.live {
             parts.append("\(next.title) \(next.isNow() ? "now" : Formatting.until(start, end: next.endsAt))")
@@ -275,157 +278,64 @@ struct QuickActionTile: View {
 
 // MARK: - Sections
 
+/// What needs you across every agent on the Mac (T3 Code, Claude Code, Codex): the first few cards, the rest in
+/// Tasks.
 struct NeedsYouSection: View {
     @Environment(AppModel.self) private var model
+    static let shown = 4
 
-    var threads: [TaskThread] {
-        let full = model.threads.filter(\.status.needsYou)
-        return full.isEmpty ? (model.summary?.t3.threads.filter(\.status.needsYou) ?? []) : full
+    /// The inbox's rows once a list loaded (not T3's last ones while it is down: those wait in Tasks, read-only),
+    /// else what the summary knew (its inbox items, else T3's threads).
+    var items: [InboxItem] {
+        if model.threadsLoaded { return model.liveTasks.filter(\.needsYou) }
+        if let inbox = model.summary?.inbox { return inbox.items.filter(\.needsYou) }
+        return (model.summary?.t3.threads ?? []).filter(\.status.needsYou).map(InboxItem.init(thread:))
     }
 
     var body: some View {
         let problem = model.tasksProblem
-        if !threads.isEmpty || problem != nil {
+        let items = items
+        if !items.isEmpty || problem != nil {
             VStack(spacing: 12) {
-                if !threads.isEmpty {
-                    SectionHeader("Needs you", count: threads.count, symbol: "hand.raised.fill")
+                if !items.isEmpty {
+                    SectionHeader("Needs you", count: max(items.count, model.needsYouCount), symbol: "hand.raised.fill")
                 }
-                if let problem { TasksNotice(error: problem, showingLast: !threads.isEmpty) }
-                ForEach(threads) { thread in
-                    NeedsYouCard(thread: thread)
+                if let problem {
+                    TasksNotice(error: problem, showingLast: !items.isEmpty && !model.t3Stale && !model.inboxFallback,
+                                fallback: model.inboxFallback)
+                }
+                ForEach(items.prefix(Self.shown)) { item in
+                    InboxCard(item: item)
+                }
+                if items.count > Self.shown {
+                    Button {
+                        model.tab = .tasks
+                    } label: {
+                        Label("\(items.count - Self.shown) more in Tasks", systemImage: "checklist")
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.large)
+                    .accessibilityIdentifier("home-more-needs")
                 }
             }
         }
     }
 }
 
-/// A waiting thread with Approve / Deny or the question's answers inline.
-struct NeedsYouCard: View {
-    @Environment(AppModel.self) private var model
-    let thread: TaskThread
-    @State private var answering = false
-    @State private var answer = ""
-
-    var busy: Bool { model.busyThreads.contains(thread.threadId) }
-
-    var body: some View {
-        let style = StatusStyle(thread.status)
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: style.symbol)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(style.color)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(style.color.opacity(0.16)))
-                Text([thread.projectName, Formatting.ago(thread.updatedAt)].compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(SamTheme.muted)
-                Spacer()
-                StatusChip(thread.status)
-            }
-            Button {
-                model.openThread(thread.threadId)
-            } label: {
-                Text(thread.title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(SamTheme.ink)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
-            if let text = thread.pending?.text ?? thread.summary, !text.isEmpty {
-                Text(text)
-                    .font(.system(size: 14.5))
-                    .foregroundStyle(SamTheme.ink2)
-                    .lineLimit(4)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.22)))
-            }
-            PendingActionBar(thread: thread, compact: true)
-        }
-        .glassCard(tint: style.color)
-        .opacity(busy ? 0.6 : 1)
-        .animation(.smooth, value: busy)
-    }
-}
-
+/// What is working across every agent on the Mac.
 struct WorkingSection: View {
     @Environment(AppModel.self) private var model
 
-    var threads: [TaskThread] {
-        let full = model.threads.filter { $0.status == .working }
-        return full.isEmpty ? (model.summary?.t3.threads.filter { $0.status == .working } ?? []) : full
+    var items: [InboxItem] {
+        if model.threadsLoaded { return model.liveTasks.filter { $0.status == .working } }
+        if let inbox = model.summary?.inbox { return inbox.items.filter { $0.status == .working } }
+        return (model.summary?.t3.threads ?? []).filter { $0.status == .working }.map(InboxItem.init(thread:))
     }
 
     var body: some View {
-        if !threads.isEmpty {
-            VStack(spacing: 12) {
-                SectionHeader("Working", count: threads.count, symbol: "circle.dotted.circle")
-                VStack(spacing: 0) {
-                    ForEach(Array(threads.enumerated()), id: \.element.id) { index, thread in
-                        if index > 0 { Divider().overlay(SamTheme.line).padding(.leading, 40) }
-                        NavigationLink(value: ThreadRoute(threadId: thread.threadId)) {
-                            ThreadRow(thread: thread)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .glassCard(padding: 6)
-            }
-        }
-    }
-}
-
-/// One thread in a list.
-struct ThreadRow: View {
-    let thread: TaskThread
-
-    var body: some View {
-        let style = StatusStyle(thread.status)
-        HStack(alignment: .top, spacing: 12) {
-            Group {
-                if thread.status == .working {
-                    ProgressView().controlSize(.small).tint(style.color)
-                } else {
-                    Image(systemName: style.symbol).font(.system(size: 13, weight: .bold)).foregroundStyle(style.color)
-                }
-            }
-            .frame(width: 22, height: 22)
-            .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(thread.title)
-                        .font(.system(size: 15.5, weight: .semibold))
-                        .foregroundStyle(SamTheme.ink)
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(Formatting.ago(thread.updatedAt))
-                        .font(.system(size: 12))
-                        .foregroundStyle(SamTheme.faint)
-                }
-                if let summary = thread.summary {
-                    Text(summary)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(SamTheme.muted)
-                        .lineLimit(2)
-                }
-                if let project = thread.projectName {
-                    Text(project.uppercased())
-                        .font(.system(size: 10, weight: .semibold))
-                        .tracking(0.5)
-                        .foregroundStyle(SamTheme.faint)
-                        .padding(.top, 1)
-                }
-            }
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(SamTheme.faint)
-                .padding(.top, 5)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 11)
-        .contentShape(.rect)
+        InboxSection(title: "Working", symbol: "circle.dotted.circle", items: items)
     }
 }
 

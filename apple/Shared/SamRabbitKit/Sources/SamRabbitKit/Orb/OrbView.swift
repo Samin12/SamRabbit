@@ -47,12 +47,12 @@ public enum OrbMood: String, Sendable, CaseIterable {
         }
     }
 
-    /// The mood a summary calls for.
+    /// The mood a summary calls for (every agent's counts when the summary carries the inbox's).
     public static func from(_ summary: MobileSummary?, reachable: Bool = true) -> OrbMood {
         guard reachable, let summary else { return .offline }
         if summary.r1.live { return .live }
-        if summary.t3.needsYou > 0 { return .attention }
-        if summary.t3.working > 0 { return .working }
+        if summary.needsYouCount > 0 { return .attention }
+        if summary.workingCount > 0 { return .working }
         return .idle
     }
 }

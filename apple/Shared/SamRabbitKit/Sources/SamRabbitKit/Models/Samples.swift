@@ -34,6 +34,31 @@ extension MobileSummary {
             latestConversation: ConversationPreview(conversationId: "c_sample", title: "Weekly focus review",
                                                     lastAt: now.addingTimeInterval(-6 * minute),
                                                     preview: "You logged 18.5 hours of deep work, 3.2 more than last week."),
-            journal: JournalStatus(available: true))
+            journal: JournalStatus(available: true),
+            inbox: InboxOverview(needsYou: 4, working: 3, total: 9, items: [
+                InboxItem(id: "t3:s1", source: .t3, agent: "claude", title: "Deploy release 2.4 to staging",
+                          project: "Assistant", status: .needsApproval, statusLabel: "Wants to run a command",
+                          summary: "Run ./deploy.sh staging", updatedAt: now.addingTimeInterval(-2 * minute),
+                          unread: true, can: ["approve", "reply", "stop", "seen"]),
+                InboxItem(id: "claude:sample-flaky", source: .claude, agent: "claude",
+                          title: "Investigate the flaky long-poll test", project: "jackrabbit-src",
+                          status: .needsApproval, statusLabel: "Waiting for you in the terminal",
+                          summary: "Bash: python3 -I -m unittest -k long_poll",
+                          updatedAt: now.addingTimeInterval(-3 * minute), unread: true,
+                          pending: InboxPending(approvals: [InboxApproval(requestId: "toolu_sample", kind: "command")]),
+                          can: ["open"], live: true),
+                InboxItem(id: "t3:s2", source: .t3, agent: "codex", title: "Fix login redirect", project: "Website",
+                          status: .needsInput, statusLabel: "Has a question", summary: "Where should people land?",
+                          updatedAt: now.addingTimeInterval(-5 * minute), unread: true, can: ["answer", "reply"]),
+                InboxItem(id: "codex:sample-widgets", source: .codex, agent: "codex",
+                          title: "Speed up the widget timeline", project: "jackrabbit-src", status: .done,
+                          statusLabel: "Finished", summary: "First paint: 1.9 s → 0.2 s.",
+                          updatedAt: now.addingTimeInterval(-25 * minute), unread: true,
+                          can: ["reply", "open", "seen"]),
+                InboxItem(id: "t3:s3", source: .t3, agent: "claude", title: "Weekly report from Linear",
+                          project: "Assistant", status: .working, statusLabel: "Working",
+                          summary: "Collecting closed issues…", updatedAt: now.addingTimeInterval(-40),
+                          can: ["reply", "stop"]),
+            ]))
     }
 }

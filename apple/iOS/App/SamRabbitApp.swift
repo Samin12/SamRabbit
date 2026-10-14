@@ -56,7 +56,7 @@ struct RootView: View {
             Tab("Tasks", systemImage: "checklist", value: AppTab.tasks) {
                 NavigationStack(path: $model.tasksPath) { TasksView().destinations() }
             }
-            .badge(model.summary?.t3.needsYou ?? 0)
+            .badge(model.needsYouCount)
             Tab("Mac", systemImage: "macbook", value: AppTab.mac) {
                 NavigationStack(path: $model.macPath) { MacView().destinations() }
             }
@@ -84,6 +84,7 @@ extension View {
     /// The pushed screens every tab can reach.
     func destinations() -> some View {
         navigationDestination(for: ThreadRoute.self) { ThreadDetailView(threadId: $0.threadId) }
+            .navigationDestination(for: InboxRoute.self) { InboxItemView(itemId: $0.itemId) }
             .navigationDestination(for: ConversationRoute.self) {
                 ConversationView(conversationId: $0.conversationId, initialTitle: $0.title)
             }

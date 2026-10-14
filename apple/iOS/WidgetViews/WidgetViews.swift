@@ -19,10 +19,16 @@ struct WidgetSnapshot: Sendable {
     }
 
     var stale: Bool { (fetchedAt.map { date.timeIntervalSince($0) } ?? .infinity) > 45 * 60 }
-    var needsYou: Int { summary?.t3.needsYou ?? 0 }
-    var working: Int { summary?.t3.working ?? 0 }
+    /// Every agent on the Mac when the summary carries the inbox's counts (the app and the provider add them), else T3's.
+    var needsYou: Int { summary?.needsYouCount ?? 0 }
+    var working: Int { summary?.workingCount ?? 0 }
     var mood: OrbMood { paired ? OrbMood.from(summary, reachable: !stale) : .offline }
     var nextEvents: [CalendarEvent] { (summary?.calendar.next ?? []).filter { ($0.endsAt ?? .distantFuture) > date } }
+    /// The first tasks to list: every agent's (the inbox's, in its order), else T3's threads.
+    var taskItems: [InboxItem] {
+        if let items = summary?.inbox?.items, !items.isEmpty { return items }
+        return (summary?.t3.threads ?? []).map(InboxItem.init(thread:))
+    }
 }
 
 /// The widget background: the night backdrop with a blue bloom.
@@ -139,7 +145,7 @@ struct TasksMediumFace: View {
         if !snapshot.paired {
             UnpairedFace()
         } else {
-            let threads = Array((snapshot.summary?.t3.threads ?? []).prefix(3))
+            let threads = Array(snapshot.taskItems.prefix(3))
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     OrbView(mood: snapshot.mood, animated: false, halo: false).frame(width: 20, height: 20)
@@ -154,9 +160,9 @@ struct TasksMediumFace: View {
                     Spacer()
                 } else {
                     VStack(spacing: 7) {
-                        ForEach(threads) { thread in
-                            Link(destination: URL(string: "samrabbit://thread/\(thread.threadId)")!) {
-                                WidgetThreadRow(thread: thread, now: snapshot.date)
+                        ForEach(threads) { item in
+                            Link(destination: WidgetItemRow.link(item)) {
+                                WidgetItemRow(item: item, now: snapshot.date)
                             }
                         }
                     }
@@ -185,31 +191,44 @@ struct MiniCount: View {
     }
 }
 
-struct WidgetThreadRow: View {
-    let thread: TaskThread
+/// One task in a widget: its source (T3 Code, Claude Code, Codex), title, state and project.
+struct WidgetItemRow: View {
+    let item: InboxItem
     let now: Date
 
+    /// "In the terminal" / "In the Codex app" for a prompt only the Mac answers, else the status.
+    static func state(_ item: InboxItem, _ style: StatusStyle) -> String {
+        switch item.heldOnMac {
+        case .waitingInTerminal: "In the terminal"
+        case .waitingInApp: "In the Codex app"
+        default: style.label
+        }
+    }
+
+    /// T3 threads open their own screen; Claude Code and Codex sessions theirs (`samrabbit://inbox/<id>`).
+    static func link(_ item: InboxItem) -> URL {
+        if let threadId = item.threadId, let url = URL(string: "samrabbit://thread/\(threadId)") { return url }
+        return URL(string: "samrabbit://inbox/\(item.id)") ?? URL(string: "samrabbit://tab/tasks")!
+    }
+
     var body: some View {
-        let style = StatusStyle(thread.status)
+        let style = StatusStyle(item.status)
         HStack(spacing: 9) {
-            Image(systemName: style.symbol)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(style.color)
-                .frame(width: 22, height: 22)
-                .background(Circle().fill(style.color.opacity(0.16)))
+            SourceGlyph(item: item, size: 22)
                 .widgetAccentable()
             VStack(alignment: .leading, spacing: 0) {
-                Text(thread.title)
+                Text(item.title)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(SamTheme.ink)
                     .lineLimit(1)
-                Text([style.label, thread.projectName].compactMap { $0 }.joined(separator: " · "))
+                Text([WidgetItemRow.state(item, style), item.project]
+                    .compactMap { $0 }.joined(separator: " · "))
                     .font(.system(size: 11))
-                    .foregroundStyle(SamTheme.muted)
+                    .foregroundStyle(item.needsYou ? style.color : SamTheme.muted)
                     .lineLimit(1)
             }
             Spacer(minLength: 4)
-            Text(Formatting.ago(thread.updatedAt, now: now))
+            Text(Formatting.ago(item.updatedAt, now: now))
                 .font(.system(size: 10.5))
                 .foregroundStyle(SamTheme.faint)
         }
@@ -314,9 +333,9 @@ struct DashboardLargeFace: View {
                         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.05)))
                 }
                 VStack(spacing: 7) {
-                    ForEach(Array((snapshot.summary?.t3.threads ?? []).prefix(3))) { thread in
-                        Link(destination: URL(string: "samrabbit://thread/\(thread.threadId)")!) {
-                            WidgetThreadRow(thread: thread, now: snapshot.date)
+                    ForEach(Array(snapshot.taskItems.prefix(3))) { item in
+                        Link(destination: WidgetItemRow.link(item)) {
+                            WidgetItemRow(item: item, now: snapshot.date)
                         }
                     }
                 }

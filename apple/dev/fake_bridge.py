@@ -79,6 +79,26 @@ The voice assistant (CONTRACTS-WAVE5, "Streaming turn protocol"), with canned an
 * The Mac app's twin of those routes (CONTRACTS-WAVE6): ``/v1/desktop/assistant/turn|session|cancel|end|announcements``
   with the desktop token (``X-SamRabbit-Desktop: fake-desktop-token``, loopback only) instead of a mobile token; the
   same answers, recorded with ``deviceId: "mac"``.
+
+The inbox (CONTRACTS-WAVE6 §A, the phone's twin of WAVE7: every agent on the Mac in one list):
+
+* ``GET /v1/mobile/inbox[?after=<revision>&wait=<0..25>]`` -> ``{revision, updatedAt, counts, sources, items}``: the T3
+  threads, seven Claude Code and Codex sessions (a permission prompt waiting in its terminal, one live and working, one
+  finished and unread, an old idle one; a Codex CLI run finished and unread, a Codex Desktop thread at work, a Codex
+  CLI run that failed) and the six latest chats, in the contract's order. ``revision`` starts from the time in ms and
+  grows by one whenever the list changes; with ``after`` equal to it the answer waits up to ``wait`` seconds for one.
+* ``GET /v1/mobile/inbox/items/<id>`` -> ``{item, messages}`` (the last 12); ``GET /v1/mobile/inbox/targets``;
+  ``POST /v1/mobile/inbox/new {text, projectId?, agent?, model?}`` -> 202 ``{itemId, threadId, title, projectName}``.
+* ``POST /v1/mobile/inbox/items/<id>/approve | answer | reply | stop | seen`` as the real bridge's: T3 items through the
+  threads; a Claude Code or Codex CLI session nobody runs takes a reply (202 ``{ok, how: "terminal", message}``: "a new
+  Terminal window" resumes it, live and working, finished six seconds later), a live one answers 409 ``session_live``,
+  a Codex Desktop thread or a chat 409 ``unsupported_action``. The phone's items never list ``open`` and ``POST
+  .../open`` answers 409 ``unsupported_action`` (only the Mac opens things on its screen).
+* ``POST /__fake/inbox {missing?, id?, live?, unread?, unsure?, status?, clear?}`` / ``GET /__fake/inbox``:
+  ``missing`` makes every inbox route 404 (an older bridge); ``id`` with ``live`` / ``unread`` / ``status`` changes a
+  session, ``unsure`` as when the Mac's process list didn't answer (the real bridge then sends neither ``live`` nor
+  ``reply``, and a reply answers 503 ``session_check_failed``); the answer lists what arrived (replies, seen, new
+  tasks, refusals; ids and sizes only).
 Stdlib only, Python 3.9.
 """
 
@@ -208,6 +228,17 @@ def now_ms() -> int:
 
 def iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def epoch_of(text: str) -> float:
+    """Seconds since the epoch of an ``iso()`` string (the inbox orders newest first)."""
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            return 0.0
 
 
 def sha(data: bytes) -> str:
@@ -450,6 +481,7 @@ class FakeBridge:
             self._seed_threads(now)
             self._seed_calendar(now)
             self._seed_conversations(now)
+            self._seed_inbox(now)
 
     def _seed_threads(self, now: float) -> None:
         self.projects = [
@@ -462,8 +494,12 @@ class FakeBridge:
                    messages: List[Tuple[str, str]], pending: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             pid = {"Assistant": "p_assistant", "Website": "p_website", "SamRabbit": "p_samrabbit"}[project]
             start = now - ago - 60 * len(messages)
+            # The inbox's view: which model family runs it, and whether it changed since Samin last looked (what
+            # waits for him and what failed is unread; finished work he has seen).
             return {"threadId": tid, "title": title, "projectId": pid, "projectName": project, "status": status,
                     "updatedAt": now - ago, "summary": summary, "pending": pending,
+                    "agent": "codex" if tid in ("t_loginfix", "t_weekly") else "claude",
+                    "unread": status in ("needs_approval", "needs_input", "error"),
                     "messages": [{"role": role, "text": text, "at": start + 60 * i}
                                  for i, (role, text) in enumerate(messages)]}
 
@@ -780,6 +816,7 @@ class FakeBridge:
             t["status"] = status
             t["summary"] = summary
             t["pending"] = None
+            t["unread"] = True  # finished since Samin last looked (the inbox's "done and unread")
 
     def place(self, text: str) -> Dict[str, Any]:
         lowered = text.lower()
@@ -788,6 +825,418 @@ class FakeBridge:
         if re.search(r"\b(fix|bug|refactor|repo|test|pr|samrabbit|swift|android)\b", lowered):
             return self.projects[2]
         return self.projects[0]
+
+    def t3_create(self, text: str, project_id: Any = None, agent: Optional[str] = None,
+                  model: Optional[str] = None) -> Dict[str, Any]:
+        """A new task (``POST /t3/threads``, the inbox's ``new``): working for about 45 s, then done."""
+        text = text.strip()
+        if not text:
+            raise ApiError(400, "empty_text", "Say what to do.")
+        with self.lock:
+            project = next((p for p in self.projects if p["projectId"] == project_id), None) or self.place(text)
+            tid = "t_" + uuid.uuid4().hex[:10]
+            title = text if len(text) <= 60 else text[:57].rstrip() + "…"
+            title = title[0].upper() + title[1:]
+            self.threads[tid] = {"threadId": tid, "title": title, "projectId": project["projectId"],
+                                 "projectName": project["name"], "status": "working", "updatedAt": time.time(),
+                                 "summary": "Starting…", "pending": None, "agent": agent or "claude",
+                                 "model": model, "unread": False,
+                                 "messages": [{"role": "user", "text": text, "at": time.time()}]}
+
+        def progress(summary: str, line: Optional[str]) -> Callable[[], None]:
+            def step() -> None:
+                with self.lock:
+                    t = self.threads.get(tid)
+                    if t and t["status"] == "working":
+                        t["summary"] = summary
+                        t["updatedAt"] = time.time()
+                        if line:
+                            self.say(t, "assistant", line)
+            return step
+        # About 45 s from start to finish, so phones can show the task running (Live Activity).
+        self.later(3.0, progress("Reading the project and planning…", "Looking into it. I'll report back here."))
+        self.later(18.0, progress("Making the changes (2 of 3)…", None))
+        self.later(32.0, progress("Checking the result…", None))
+        self.later(45.0, lambda: self.finish(tid, "Done. Here is what I did:\n\n- Read the request\n- Made the change\n"
+                                                  "- Checked it\n\n**All set.**", "Finished: all set."))
+        return {"threadId": tid, "title": title, "projectName": project["name"]}
+
+    def t3_message(self, tid: str, text: str) -> None:
+        text = text.strip()
+        if not text:
+            raise ApiError(400, "empty_text", "Say something.")
+        with self.lock:
+            t = self.thread_or_404(tid)
+            self.say(t, "user", text)
+            t["status"], t["pending"], t["summary"], t["unread"] = "working", None, "Working on your reply…", False
+        self.later(5.0, lambda: self.finish(tid, "Got it — done. " + ("I followed your note: “%s”." % text[:80]),
+                                            "Replied to your message."))
+
+    def t3_stop(self, tid: str) -> None:
+        with self.lock:
+            t = self.thread_or_404(tid)
+            if t["status"] != "working":
+                raise ApiError(409, "not_running", "That task is not running.")
+            t["status"], t["summary"] = "idle", "Stopped from iPhone."
+            self.say(t, "assistant", "Stopped.")
+
+    def t3_respond(self, tid: str, body: Dict[str, Any]) -> None:
+        """Like the real bridge: a requestId that is not the open request is refused (409), and without one the open
+        request of the right kind is answered. ``decision`` is approve / deny (T3's own accept / acceptForSession /
+        decline / cancel too, as the inbox's approve sends them)."""
+        with self.lock:
+            t = self.thread_or_404(tid)
+            pending = t["pending"]
+            wanted = body.get("requestId")
+            if wanted is not None and not isinstance(wanted, str):
+                raise ApiError(400, "invalid_request", "requestId must be a string.")
+            if body.get("decision") is None and body.get("answer") is None and not body.get("answers"):
+                raise ApiError(400, "invalid_request", "Send {decision: approve|deny} or {answer}.")
+            approving = body.get("decision") is not None
+            kind = "approval" if approving else "question"
+            if not pending or pending["kind"] != kind or wanted not in (None, pending.get("requestId")):
+                raise ApiError(409, "t3_request_not_pending", "That %s is no longer pending." % kind)
+            if approving:
+                decision = {"accept": "approve", "acceptForSession": "approve", "decline": "deny",
+                            "cancel": "deny"}.get(str(body.get("decision")), body.get("decision"))
+                if decision not in ("approve", "deny"):
+                    raise ApiError(400, "invalid_decision", "decision must be approve or deny.")
+                t["pending"] = None
+                t["unread"] = False
+                if decision == "approve":
+                    t["status"], t["summary"] = "working", "Approved; deploying…"
+                    self.say(t, "user", "Approved.")
+                    self.later(6.0, lambda: self.finish(tid, "Deployed **2.4.0-rc1** to staging. Smoke tests pass.",
+                                                        "Deployed to staging; smoke tests pass."))
+                else:
+                    t["status"], t["summary"] = "done", "Denied: nothing was deployed."
+                    self.say(t, "user", "Denied.")
+                    self.say(t, "assistant", "Okay, I won't deploy. Nothing changed on staging.")
+                return
+            answer = body.get("answer")
+            if answer is None and isinstance(body.get("answers"), dict):
+                answer = next(iter(body["answers"].values()), None)
+            if isinstance(answer, list):
+                answer = ", ".join(str(a) for a in answer)
+            answer = str(answer or "").strip()
+            if not answer:
+                raise ApiError(400, "empty_answer", "Give an answer.")
+            t["pending"] = None
+            t["unread"] = False
+            t["status"], t["summary"] = "working", "Applying your answer…"
+            self.say(t, "user", answer)
+        self.later(6.0, lambda: self.finish(tid, "Updated: users without `next` now land on `%s`. Tests pass." %
+                                            answer[:40], "Done: default landing page is %s." % answer[:40]))
+
+    # ------------------------------------------------------------------ inbox (CONTRACTS-WAVE6 §A, mobile twin)
+
+    def _seed_inbox(self, now: float) -> None:
+        """Claude Code and Codex sessions on the "Mac" (T3 items come from the threads, chats from the
+        conversations): one waiting for a permission in its terminal, one live and working, one finished and unread,
+        one older; a Codex CLI run finished and unread, a Codex Desktop thread working, a Codex CLI run that failed."""
+        self.inbox_missing = False
+        self.inbox_revision = int(now * 1000)  # like the real bridge: from the time in ms (64-bit on the watch)
+        self.inbox_digest = ""
+        self.inbox_log: Dict[str, List[Dict[str, Any]]] = {"replies": [], "seen": [], "new": [], "refused": []}
+
+        def session(sid: str, source: str, title: str, project: str, status: str, label: str, ago: float,
+                    summary: str, messages: List[Tuple[str, str]], *, live: bool = False, unread: bool = False,
+                    desktop: bool = False, pending: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            start = now - ago - 45 * len(messages)
+            return {"id": "%s:%s" % (source, sid), "source": source, "title": title, "project": project,
+                    "cwd": "/Users/sam/%s" % project, "status": status, "statusLabel": label, "summary": summary,
+                    "updatedAt": now - ago, "unread": unread, "live": live, "desktop": desktop,
+                    "pending": pending or {"approvals": [], "inputs": []},
+                    "messages": [{"role": role, "text": text, "at": start + 45 * i}
+                                 for i, (role, text) in enumerate(messages)]}
+
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        for item in [
+            session("5d0c6f2e-1a47-4f7e-9a51-3c2b1e0d9f88", "claude",
+                    "Investigate the flaky long-poll test in the bridge suite", "jackrabbit-src", "needs-approval",
+                    "Waiting for you in the terminal", 90,
+                    "Bash: python3 -I -m unittest discover -s companion/mac-bridge/tests -k long_poll",
+                    [("user", "The long-poll test fails about one run in ten. Find out why."),
+                     ("assistant", "I can reproduce it: the waiter wakes before the revision moves when the refresher "
+                                   "runs late. I want to run just that test 50 times to be sure.")],
+                    live=True, unread=True,
+                    pending={"approvals": [{"requestId": "toolu_01FlakyLongPoll", "kind": "command",
+                                            "detail": "Bash: python3 -I -m unittest discover -s "
+                                                      "companion/mac-bridge/tests -k long_poll", "options": []}],
+                             "inputs": []}),
+            session("8b1e2c3d-4f5a-4b6c-8d7e-9f0a1b2c3d4e", "claude", "Summarize this week's merged PRs for the changelog",
+                    "website", "done", "Finished", 8 * 60,
+                    "The changelog draft is in CHANGELOG.md: 14 PRs in Features, Fixes and Chores. Want me to open "
+                    "a PR?",
+                    [("user", "Summarize this week's merged PRs into the changelog."),
+                     ("assistant", "Done. **14 PRs** this week:\n\n- Features: 5 (pricing page, the waitlist, …)\n"
+                                   "- Fixes: 7\n- Chores: 2\n\nThe draft is in `CHANGELOG.md`. Want me to open a PR?")],
+                    unread=True),
+            session("c41f9a70-2b6d-4e8a-9c35-7d1e0f2a3b4c", "claude", "Add retry with backoff to the calendar writer",
+                    "jackrabbit-src", "working", "Working", 12,
+                    "Editing samrabbit_calendar.py: wrapping the Composio call in a retry loop…",
+                    [("user", "The calendar writer gives up on the first 503. Add a retry with backoff."),
+                     ("assistant", "Reading `samrabbit_calendar.py`. The write goes through one function, so the "
+                                   "retry can live there.")],
+                    live=True),
+            session("e2a7b9c1-6d3f-4a8e-b0c2-5f4e3d2c1b0a", "claude", "Explain how the watch relay chunks recordings",
+                    "jackrabbit-src", "idle", "Idle", 5 * 3600,
+                    "Recordings go to the phone in 40 KB pieces, each acknowledged; the phone puts them back together "
+                    "and uploads the file.",
+                    [("user", "How does the watch send a recording through the phone?"),
+                     ("assistant", "In `VoiceRelay` chunks of at most **40 KB**: `id`, `seq`, `of`, each one "
+                                   "acknowledged. The phone's `Assembler` puts them back in order and uploads the "
+                                   "file with the watch's own token.")]),
+            session("019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b", "codex", "Speed up the widget timeline provider",
+                    "jackrabbit-src", "done", "Finished", 25 * 60,
+                    "The provider reads the cached summary first and fetches in the background: the first paint "
+                    "drops from 1.9 s to 0.2 s.",
+                    [("user", "The widgets take ages to show anything after a reboot. Make the timeline faster."),
+                     ("assistant", "Done: the provider answers from the App Group cache at once and fetches a fresh "
+                                   "summary in the background. First paint: **1.9 s → 0.2 s**.")],
+                    unread=True),
+            session("019a6c7d-8e9f-7a01-b2c3-d4e5f6a7b8c9", "codex", "Sketch onboarding copy for the iPhone app",
+                    "website", "working", "Working", 30,
+                    "Drafting three versions of the welcome screen…",
+                    [("user", "Write onboarding copy for the iPhone app: three short screens."),
+                     ("assistant", "Drafting three versions of the welcome screen, then pairing and Talk.")],
+                    desktop=True),
+            session("019a1f2e-3d4c-7b5a-9687-a5b4c3d2e1f0", "codex", "Migrate the bridge tests to pytest",
+                    "jackrabbit-src", "error", "Hit an error", 50 * 60,
+                    "stream disconnected before completion: the connection to the model was reset.",
+                    [("user", "Move the bridge tests from unittest to pytest."),
+                     ("assistant", "Converted 12 of 41 files, then the stream disconnected.")],
+                    unread=True),
+        ]:
+            self.sessions[item["id"]] = item
+
+    INBOX_STATUS = {"needs_approval": "needs-approval", "needs_input": "needs-input"}
+    T3_LABELS = {"needs-approval": "Wants to run a command", "needs-input": "Has a question", "working": "Working",
+                 "error": "Failed", "done": "Finished", "idle": "New"}
+
+    def t3_inbox_item(self, t: Dict[str, Any]) -> Dict[str, Any]:
+        """A T3 thread as the real bridge's inbox shows it (``_t3_item``)."""
+        status = self.INBOX_STATUS.get(t["status"], t["status"])
+        pending: Dict[str, Any] = {"approvals": [], "inputs": []}
+        p = t["pending"]
+        if p and p["kind"] == "approval" and status == "needs-approval":
+            pending["approvals"] = [{"requestId": p["requestId"], "kind": p.get("requestKind") or "command",
+                                     "detail": p["text"],
+                                     "options": [{"decision": "accept", "label": "Approve"},
+                                                 {"decision": "acceptForSession", "label": "Always allow"},
+                                                 {"decision": "decline", "label": "Deny"}]}]
+        elif p and p["kind"] == "question" and status == "needs-input":
+            pending["inputs"] = [{"requestId": p["requestId"], "questions": [{
+                "id": p.get("questionId") or "q", "header": p.get("header") or "Question", "question": p["text"],
+                "options": list(p.get("options") or []), "allowCustom": bool(p.get("allowCustom", True)),
+                "multiSelect": bool(p.get("multiSelect", False))}]}]
+        unread = bool(t.get("unread")) and status != "working"
+        can = {"needs-approval": ["approve", "reply", "stop", "open"], "needs-input": ["answer", "reply", "stop", "open"],
+               "working": ["reply", "stop", "open"]}.get(status, ["reply", "open"]) + (["seen"] if unread else [])
+        return {"id": "t3:" + t["threadId"], "source": "t3", "agent": t.get("agent") or "claude", "title": t["title"],
+                "project": t["projectName"], "cwd": "/Users/sam/" + t["projectName"].lower(), "status": status,
+                "statusLabel": self.T3_LABELS.get(status, "Finished"), "summary": t["summary"],
+                "updatedAt": iso(t["updatedAt"]), "unread": unread, "pending": pending, "can": can, "live": False,
+                "progress": None, "phase": None}
+
+    def session_item(self, x: Dict[str, Any]) -> Dict[str, Any]:
+        """A Claude Code or Codex session (the real bridge's ``_claude_item`` / ``_codex_item``)."""
+        status = x["status"]
+        unread = status not in ("working", "idle") and bool(x["unread"])
+        if status == "error" and not unread:
+            status = "idle"  # a failure he has seen settles; its label still says so
+        asking = status in ("needs-approval", "needs-input")
+        if x["source"] == "codex" and x["desktop"]:
+            can = ["open"]  # the app owns its threads
+        elif asking or x["live"] or x.get("unsure"):
+            can = ["open"]  # the CLI owns its prompt / the session is open in a terminal / nobody can tell
+        else:
+            can = ["reply", "open"]
+        # As the real bridge: a Claude Code prompt can't be marked seen (only answered); a Codex item can.
+        if unread and (x["source"] == "codex" or not asking):
+            can.append("seen")
+        return {"id": x["id"], "source": x["source"], "agent": x["source"], "title": x["title"],
+                "project": x["project"], "cwd": x["cwd"], "status": status, "statusLabel": x["statusLabel"],
+                "summary": x["summary"], "updatedAt": iso(x["updatedAt"]), "unread": unread, "pending": x["pending"],
+                "can": can, "live": bool(x["live"]) and not x["desktop"] and not x.get("unsure"), "progress": None,
+                "phase": None}
+
+    def chat_item(self, conv: Dict[str, Any]) -> Dict[str, Any]:
+        return {"id": "chat:" + conv["conversationId"], "source": "samrabbit", "agent": None, "title": conv["title"],
+                "project": "R1", "cwd": None, "status": "idle",
+                "statusLabel": "Live" if conv["live"] else "Conversation", "summary": conv["preview"] or "",
+                "updatedAt": iso(conv["lastAt"] / 1000.0), "unread": False, "pending": {"approvals": [], "inputs": []},
+                "can": ["open"], "live": bool(conv["live"]), "progress": None, "phase": None}
+
+    INBOX_RANK = {"needs-approval": 0, "needs-input": 1, "error": 2, "working": 4}
+
+    @staticmethod
+    def phone_view(item: Dict[str, Any]) -> Dict[str, Any]:
+        """An item as ``/v1/mobile/inbox`` shows it: like the real bridge, the phone's items never list ``open``
+        (opening is the Mac's: the dock or the SamRabbit window)."""
+        return dict(item, can=[action for action in item["can"] if action != "open"])
+
+    def inbox_items(self) -> List[Dict[str, Any]]:
+        items = [self.session_item(x) for x in self.sessions.values()]
+        if self.t3_available:
+            items += [self.t3_inbox_item(t) for t in self.threads.values()]
+        chats = sorted(self.conversations.values(), key=lambda c: c["lastAt"], reverse=True)[:6]
+        items += [self.chat_item(c) for c in chats]
+        items = [self.phone_view(item) for item in items]
+
+        def rank(item: Dict[str, Any]) -> Tuple[int, float]:
+            status = item["status"]
+            order = 3 if status == "done" and item["unread"] else self.INBOX_RANK.get(status, 5)
+            return order, -epoch_of(item["updatedAt"])
+        return sorted(items, key=rank)[:60]
+
+    def inbox(self) -> Dict[str, Any]:
+        """``GET /v1/mobile/inbox``: the revision grows by one whenever what the list shows changes."""
+        with self.lock:
+            items = self.inbox_items()
+            digest = sha(json.dumps(items, sort_keys=True).encode())
+            if digest != self.inbox_digest:
+                if self.inbox_digest:
+                    self.inbox_revision += 1
+                self.inbox_digest = digest
+            needs = sum(1 for i in items if i["status"] in ("needs-approval", "needs-input", "error")
+                        or (i["status"] == "done" and i["unread"]))
+            sources: Dict[str, Any] = {"t3": {"connected": True} if self.t3_available else
+                                       {"connected": False, "reason": "t3_unavailable"},
+                                       "claude": {"available": True}, "codex": {"available": True},
+                                       "samrabbit": {"available": True}}
+            return {"revision": self.inbox_revision, "updatedAt": iso(time.time()),
+                    "counts": {"needsYou": needs, "working": sum(1 for i in items if i["status"] == "working"),
+                               "total": len(items)},
+                    "sources": sources, "items": items}
+
+    def inbox_find(self, item_id: str) -> Tuple[str, Dict[str, Any]]:
+        """(source, the record behind an item id), or 404 ``item_not_found``."""
+        source, _, key = item_id.partition(":")
+        if source == "t3" and not self.t3_available:
+            raise ApiError(503, "t3_unavailable", "T3 Code on the Mac is not answering. Is the T3 Code app running?",
+                           retryable=True)
+        if source == "t3" and key in self.threads:
+            return source, self.threads[key]
+        if source in ("claude", "codex") and item_id in self.sessions:
+            return source, self.sessions[item_id]
+        if source == "chat" and key in self.conversations:
+            return source, self.conversations[key]
+        raise ApiError(404, "item_not_found", "That is not in the inbox.")
+
+    def inbox_detail(self, item_id: str) -> Dict[str, Any]:
+        with self.lock:
+            source, record = self.inbox_find(item_id)
+            if source == "t3":
+                item, messages = self.t3_inbox_item(record), record["messages"]
+            elif source == "chat":
+                item = self.chat_item(record)
+                messages = [{"role": "user" if p["type"] == "message.user" else "assistant", "text": p["text"],
+                             "at": p["at"] / 1000.0}
+                            for _, cid, p in self.events if cid == record["conversationId"]
+                            and p["type"] in ("message.user", "message.assistant.done") and p.get("text")]
+            else:
+                item, messages = self.session_item(record), record["messages"]
+            return {"item": self.phone_view(item),
+                    "messages": [{"role": m["role"], "text": m["text"][:4000], "at": iso(m["at"])}
+                                 for m in messages[-12:]]}
+
+    def session_reply(self, x: Dict[str, Any], text: str) -> Dict[str, Any]:
+        """Claude Code / Codex ``reply``: refused while a CLI owns the session (409 ``session_live``) or the app does
+        (409 ``unsupported_action``); otherwise "a Terminal window on the Mac" resumes it with the reply: live and
+        working, finished about six seconds later (still open in that terminal)."""
+        item = self.session_item(x)
+        if x["source"] == "codex" and x["desktop"]:
+            self.inbox_log["refused"].append({"id": x["id"], "code": "unsupported_action"})
+            raise ApiError(409, "unsupported_action", "Codex Desktop owns this thread: open it there to reply.")
+        if x.get("unsure"):
+            self.inbox_log["refused"].append({"id": x["id"], "code": "session_check_failed"})
+            raise ApiError(503, "session_check_failed", "The Mac couldn't tell whether a terminal runs this session.",
+                           retryable=True)
+        if "reply" not in item["can"]:
+            self.inbox_log["refused"].append({"id": x["id"], "code": "session_live"})
+            raise ApiError(409, "session_live", "It's open in a terminal on the Mac: answer it there.")
+        self.inbox_log["replies"].append({"id": x["id"], "chars": len(text)})
+        x["messages"].append({"role": "user", "text": text, "at": time.time()})
+        x.update(status="working", statusLabel="Working", summary="Working on your reply…", live=True, unread=False,
+                 updatedAt=time.time())
+
+        def done() -> None:
+            with self.lock:
+                if x["status"] != "working":
+                    return
+                answer = "Done — I followed your note: “%s”." % text[:80]
+                x["messages"].append({"role": "assistant", "text": answer, "at": time.time()})
+                x.update(status="done", statusLabel="Finished", summary=answer, unread=True, updatedAt=time.time())
+        self.later(6.0, done)
+        return {"ok": True, "how": "terminal", "message": "It continues in a new Terminal window on the Mac."}
+
+    def inbox_action(self, item_id: str, action: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        with self.lock:
+            source, record = self.inbox_find(item_id)
+            if action == "seen":
+                self.inbox_log["seen"].append({"id": item_id})
+                record["unread"] = False
+                return 200, {"ok": True}
+            if source == "t3":
+                tid = record["threadId"]
+                if action == "reply":
+                    self.t3_message(tid, str(body.get("text") or ""))
+                    return 202, {"ok": True, "how": "t3", "threadId": tid}
+                if action == "stop":
+                    self.t3_stop(tid)
+                    return 200, {"ok": True}
+                if action == "approve":
+                    self.t3_respond(tid, {"decision": body.get("decision"), "requestId": body.get("requestId")})
+                    return 200, {"ok": True}
+                self.t3_respond(tid, {"answers": body.get("answers"), "requestId": body.get("requestId")})
+                return 200, {"ok": True}
+            if action == "reply":
+                text = str(body.get("text") or "").strip()
+                if not text:
+                    raise ApiError(400, "invalid_text", "Send the reply as text.")
+                if source == "chat":
+                    raise ApiError(409, "unsupported_action", "This is a SamRabbit conversation: open it in the app.")
+                return 202, self.session_reply(record, text)
+            if source == "chat":
+                raise ApiError(409, "unsupported_action", "This is a SamRabbit conversation: open it in the app.")
+            raise ApiError(409, "unsupported_action",
+                           "Only the terminal or the app that runs it can do that: open it to answer there.")
+
+    AGENT_MODELS = {"claude": [{"id": "claude-opus-5-5", "label": "Claude Opus 5.5"},
+                               {"id": "claude-sonnet-5", "label": "Claude Sonnet 5"}],
+                    "codex": [{"id": "gpt-5.5-codex", "label": "GPT-5.5 Codex"},
+                              {"id": "gpt-5.5-codex-mini", "label": "GPT-5.5 Codex Mini"}]}
+
+    def inbox_targets(self) -> Dict[str, Any]:
+        with self.lock:
+            active: Dict[str, float] = {}
+            for t in self.threads.values():
+                active[t["projectId"]] = max(active.get(t["projectId"], 0.0), t["updatedAt"])
+            projects = sorted(self.projects, key=lambda p: -active.get(p["projectId"], 0.0))
+            return {"projects": [{"id": p["projectId"], "title": p["name"],
+                                  "lastActiveAt": iso(active[p["projectId"]]) if p["projectId"] in active else None}
+                                 for p in projects],
+                    "agents": [{"id": "claude", "label": "Claude", "models": self.AGENT_MODELS["claude"]},
+                               {"id": "codex", "label": "Codex", "models": self.AGENT_MODELS["codex"]}],
+                    "default": {"projectId": projects[0]["projectId"], "agent": "claude",
+                                "model": "claude-opus-5-5"}}
+
+    def inbox_new(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        agent = body.get("agent")
+        model = body.get("model")
+        if agent is not None and agent not in self.AGENT_MODELS:
+            raise ApiError(400, "invalid_agent", "agent must be claude or codex.")
+        if model is not None and model not in [m["id"] for m in self.AGENT_MODELS[agent or "claude"]]:
+            raise ApiError(400, "invalid_model", "That model is not offered for this agent.")
+        project_id = body.get("projectId")
+        if project_id is not None and not any(p["projectId"] == project_id for p in self.projects):
+            raise ApiError(404, "project_not_found", "No such T3 project.")
+        created = self.t3_create(str(body.get("text") or ""), project_id, agent, model)
+        with self.lock:
+            self.inbox_log["new"].append({"threadId": created["threadId"], "projectId": project_id, "agent": agent,
+                                          "model": model})
+        return dict(created, itemId="t3:" + created["threadId"])
 
     # ------------------------------------------------------------------ summary
 
@@ -1168,6 +1617,30 @@ class Handler(BaseHTTPRequestHandler):
                                       body.get("title") or "Fix login redirect",
                                       "broken" if audio == "broken" else bool(audio))
             return self.send_json(200, {"ok": True, "id": item["id"]})
+        if path == "/__fake/inbox":
+            # ``missing``: an older bridge without the inbox (every route 404); ``id`` + ``live`` / ``unread`` /
+            # ``unsure`` / ``status``: change a Claude Code or Codex session (a CLI opened or closed in a terminal,
+            # the Mac's process list not answering, ...).
+            if method == "POST":
+                body = self.body()
+                with b.lock:
+                    if "missing" in body:
+                        b.inbox_missing = bool(body.get("missing"))
+                    found = b.sessions.get(str(body.get("id") or ""))
+                    if body.get("id") and found is None:
+                        raise ApiError(404, "item_not_found", "No such session.")
+                    for key in ("live", "unread", "unsure"):
+                        if found is not None and key in body:
+                            found[key] = bool(body[key])
+                    if found is not None and body.get("status"):
+                        found["status"] = str(body["status"])
+                        found["updatedAt"] = time.time()
+                    if body.get("clear"):
+                        for log in b.inbox_log.values():
+                            del log[:]
+            with b.lock:
+                return self.send_json(200, {"missing": b.inbox_missing, "revision": b.inbox_revision,
+                                            **{k: list(v) for k, v in b.inbox_log.items()}})
         if path == "/__fake/t3" and method == "POST":
             with b.lock:
                 b.t3_available = bool(self.body().get("available", True))
@@ -1239,6 +1712,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(found[1], found[0])
         if rest.startswith("ui/"):
             return self.ui(method, rest)
+        if rest == "inbox" or rest.startswith("inbox/"):
+            return self.inbox(method, rest)
         if rest.startswith("t3/"):
             return self.t3(method, rest)
         if rest.startswith("calendar/"):
@@ -1455,37 +1930,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(200, {"threads": [b.thread_view(t) for t in items]})
             self.only(method, "POST")
             body = self.body()
-            text = str(body.get("text") or "").strip()
-            if not text:
-                raise ApiError(400, "empty_text", "Say what to do.")
-            with b.lock:
-                project = next((p for p in b.projects if p["projectId"] == body.get("projectId")), None) \
-                    or b.place(text)
-                tid = "t_" + uuid.uuid4().hex[:10]
-                title = text if len(text) <= 60 else text[:57].rstrip() + "…"
-                title = title[0].upper() + title[1:]
-                b.threads[tid] = {"threadId": tid, "title": title, "projectId": project["projectId"],
-                                  "projectName": project["name"], "status": "working", "updatedAt": time.time(),
-                                  "summary": "Starting…", "pending": None,
-                                  "messages": [{"role": "user", "text": text, "at": time.time()}]}
-
-            def progress(summary: str, line: Optional[str]) -> Callable[[], None]:
-                def step() -> None:
-                    with b.lock:
-                        t = b.threads.get(tid)
-                        if t and t["status"] == "working":
-                            t["summary"] = summary
-                            t["updatedAt"] = time.time()
-                            if line:
-                                b.say(t, "assistant", line)
-                return step
-            # About 45 s from start to finish, so phones can show the task running (Live Activity).
-            b.later(3.0, progress("Reading the project and planning…", "Looking into it. I'll report back here."))
-            b.later(18.0, progress("Making the changes (2 of 3)…", None))
-            b.later(32.0, progress("Checking the result…", None))
-            b.later(45.0, lambda: b.finish(tid, "Done. Here is what I did:\n\n- Read the request\n- Made the change\n"
-                                                "- Checked it\n\n**All set.**", "Finished: all set."))
-            return self.send_json(202, {"threadId": tid, "title": title, "projectName": project["name"]})
+            return self.send_json(202, b.t3_create(str(body.get("text") or ""), body.get("projectId")))
         match = re.match(r"^t3/threads/([A-Za-z0-9_-]{1,64})(?:/(message|respond|stop))?$", rest)
         if not match:
             raise ApiError(404, "not_found", "Not found.")
@@ -1500,59 +1945,58 @@ class Handler(BaseHTTPRequestHandler):
             self.only(method, "POST")
             body = self.body()
             if action == "message":
-                text = str(body.get("text") or "").strip()
-                if not text:
-                    raise ApiError(400, "empty_text", "Say something.")
-                b.say(t, "user", text)
-                t["status"], t["pending"], t["summary"] = "working", None, "Working on your reply…"
-                b.later(5.0, lambda: b.finish(tid, "Got it — done. " + ("I followed your note: “%s”." % text[:80]),
-                                              "Replied to your message."))
+                b.t3_message(tid, str(body.get("text") or ""))
                 return self.send_json(202, {"ok": True})
             if action == "stop":
-                if t["status"] != "working":
-                    raise ApiError(409, "not_running", "That task is not running.")
-                t["status"], t["summary"] = "idle", "Stopped from iPhone."
-                b.say(t, "assistant", "Stopped.")
+                b.t3_stop(tid)
                 return self.send_json(200, {"ok": True})
-            # respond: like the real bridge, a requestId that is not the open request is refused (409), and
-            # without one the open request of the right kind is answered.
-            pending = t["pending"]
-            wanted = body.get("requestId")
-            if wanted is not None and not isinstance(wanted, str):
-                raise ApiError(400, "invalid_request", "requestId must be a string.")
-            if body.get("decision") is None and body.get("answer") is None:
-                raise ApiError(400, "invalid_request", "Send {decision: approve|deny} or {answer}.")
-            approving = body.get("decision") is not None
-            kind = "approval" if approving else "question"
-            if not pending or pending["kind"] != kind or wanted not in (None, pending.get("requestId")):
-                raise ApiError(409, "t3_request_not_pending", "That %s is no longer pending." % kind)
-            if approving:
-                decision = body.get("decision")
-                if decision not in ("approve", "deny"):
-                    raise ApiError(400, "invalid_decision", "decision must be approve or deny.")
-                t["pending"] = None
-                if decision == "approve":
-                    t["status"], t["summary"] = "working", "Approved; deploying…"
-                    b.say(t, "user", "Approved.")
-                    b.later(6.0, lambda: b.finish(tid, "Deployed **2.4.0-rc1** to staging. Smoke tests pass.",
-                                                  "Deployed to staging; smoke tests pass."))
-                else:
-                    t["status"], t["summary"] = "done", "Denied: nothing was deployed."
-                    b.say(t, "user", "Denied.")
-                    b.say(t, "assistant", "Okay, I won't deploy. Nothing changed on staging.")
-                return self.send_json(200, {"ok": True})
-            answer = body.get("answer")
-            if isinstance(answer, list):
-                answer = ", ".join(str(a) for a in answer)
-            answer = str(answer or "").strip()
-            if not answer:
-                raise ApiError(400, "empty_answer", "Give an answer.")
-            t["pending"] = None
-            t["status"], t["summary"] = "working", "Applying your answer…"
-            b.say(t, "user", answer)
-            b.later(6.0, lambda: b.finish(tid, "Updated: users without `next` now land on `%s`. Tests pass." %
-                                          answer[:40], "Done: default landing page is %s." % answer[:40]))
+            b.t3_respond(tid, body)
             return self.send_json(200, {"ok": True})
+
+    # ------------------------------------------------------------------ inbox
+
+    def inbox(self, method: str, rest: str) -> None:
+        """``/v1/mobile/inbox*`` (the desktop inbox's routes with the mobile token; ``open`` is the Mac's own)."""
+        b = self.bridge
+        if b.inbox_missing:  # an older bridge
+            raise ApiError(404, "not_found", "Not found.")
+        if rest == "inbox":
+            self.only(method, "GET")
+            after = self.q1("after")
+            wait = min(25.0, max(0.0, float(self.q1("wait", "0") or 0)))
+            answer = b.inbox()
+            if after is not None and after.isdigit() and int(after) == answer["revision"] and wait > 0:
+                deadline = time.time() + wait
+                while time.time() < deadline and answer["revision"] == int(after):
+                    time.sleep(0.2)
+                    answer = b.inbox()
+            return self.send_json(200, answer)
+        if rest in ("inbox/targets", "inbox/new") and not b.t3_available:
+            raise ApiError(503, "t3_unavailable", "T3 Code on the Mac is not answering. Is the T3 Code app running?",
+                           retryable=True)
+        if rest == "inbox/targets":
+            self.only(method, "GET")
+            return self.send_json(200, b.inbox_targets())
+        if rest == "inbox/new":
+            self.only(method, "POST")
+            return self.send_json(202, b.inbox_new(self.body()))
+        match = re.match(r"^inbox/items/([^/]{3,200})(?:/([a-z]+))?$", rest)
+        if not match:
+            raise ApiError(404, "not_found", "Not found.")
+        item_id, action = unquote(match.group(1)), match.group(2)
+        if action is None:
+            self.only(method, "GET")
+            return self.send_json(200, b.inbox_detail(item_id))
+        if action == "open":
+            # Like the real bridge: the phone never brings anything up on the Mac's screen.
+            self.only(method, "POST")
+            raise ApiError(409, "unsupported_action", "Opening is done on the Mac (the dock or the SamRabbit window).")
+        if action not in ("approve", "answer", "reply", "stop", "seen"):
+            raise ApiError(404, "not_found", "Not found.")
+        self.only(method, "POST")
+        body = self.optional_body() if action in ("stop", "seen") else self.body()
+        status, payload = b.inbox_action(item_id, action, body)
+        return self.send_json(status, payload)
 
     # ------------------------------------------------------------------ calendar
 

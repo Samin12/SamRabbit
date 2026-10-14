@@ -277,6 +277,77 @@ public final class BridgeClient: Sendable {
         return list.projects
     }
 
+    // MARK: - Inbox (every agent on the Mac)
+
+    /// `GET /v1/mobile/inbox[?after=&wait=]`: T3 threads, Claude Code and Codex sessions and the recent chats. With
+    /// `after` (the revision last seen) and `wait` (at most 25 s) the Mac answers once something changed, or after
+    /// `wait` with the same list. An older bridge answers 404 (`BridgeError.isRouteMissing`).
+    public func inbox(after revision: Int64? = nil, wait: Int? = nil, timeout: TimeInterval? = nil) async throws
+        -> InboxSnapshot {
+        var query: [URLQueryItem] = []
+        if let revision { query.append(URLQueryItem(name: "after", value: String(revision))) }
+        let seconds = wait.map { min(max($0, 0), 25) }
+        if let seconds, seconds > 0 { query.append(URLQueryItem(name: "wait", value: String(seconds))) }
+        let budget = timeout ?? (seconds.map { TimeInterval($0) + 10 } ?? nil)
+        return try await json(.get("/v1/mobile/inbox", query: query, timeout: budget))
+    }
+
+    /// `GET /v1/mobile/inbox/items/<id>`: the item now and its last messages.
+    public func inboxItem(_ itemId: String) async throws -> InboxItemDetail {
+        try await json(.get(Self.inboxPath(itemId)))
+    }
+
+    /// `POST /v1/mobile/inbox/items/<id>/reply {text}`. A T3 thread gets a new turn; a Claude Code or Codex session
+    /// that no CLI owns is resumed with the reply in a new Terminal window on the Mac (`how: "terminal"`). One that
+    /// is open in a terminal is refused with 409 `session_live` (`BridgeError.isSessionLive`).
+    public func inboxReply(_ itemId: String, text: String) async throws -> InboxReplyResult {
+        try await json(.post(Self.inboxPath(itemId, "reply"), body: ["text": .string(text)], timeout: 20))
+    }
+
+    /// `POST /v1/mobile/inbox/items/<id>/seen`: unread clears (a failed Claude Code or Codex session settles).
+    public func inboxSeen(_ itemId: String) async throws {
+        try await send(.post(Self.inboxPath(itemId, "seen"), body: [:]))
+    }
+
+    /// `POST /v1/mobile/inbox/items/<id>/approve {requestId, decision}` (one of the approval's own options).
+    public func inboxApprove(_ itemId: String, requestId: String, decision: String) async throws {
+        try await send(.post(Self.inboxPath(itemId, "approve"),
+                             body: ["requestId": .string(requestId), "decision": .string(decision)]))
+    }
+
+    /// `POST /v1/mobile/inbox/items/<id>/answer {requestId, answers: {questionId: answer}}`.
+    public func inboxAnswer(_ itemId: String, requestId: String, answers: [String: String]) async throws {
+        try await send(.post(Self.inboxPath(itemId, "answer"),
+                             body: ["requestId": .string(requestId),
+                                    "answers": .object(answers.mapValues { .string($0) })]))
+    }
+
+    /// `POST /v1/mobile/inbox/items/<id>/stop`.
+    public func inboxStop(_ itemId: String) async throws {
+        try await send(.post(Self.inboxPath(itemId, "stop"), body: [:]))
+    }
+
+    /// `GET /v1/mobile/inbox/targets`: where a new task can go (projects, Claude / Codex and their models).
+    public func inboxTargets() async throws -> InboxTargets {
+        try await json(.get("/v1/mobile/inbox/targets", timeout: 15))
+    }
+
+    /// `POST /v1/mobile/inbox/new {text, projectId?, agent?, model?}`: a new T3 thread and its first turn.
+    public func inboxNew(text: String, choice: InboxTargets.Choice = InboxTargets.Choice()) async throws
+        -> CreatedInboxTask {
+        var body: [String: JSONValue] = ["text": .string(text)]
+        if let projectId = choice.projectId { body["projectId"] = .string(projectId) }
+        if let agent = choice.agent { body["agent"] = .string(agent) }
+        if let model = choice.model { body["model"] = .string(model) }
+        return try await json(.post("/v1/mobile/inbox/new", body: body, timeout: 25))
+    }
+
+    /// `/v1/mobile/inbox/items/<id>[/<action>]`. Ids look like `claude:<uuid>`: the colon stays, anything else
+    /// outside the path's safe set is escaped (a `/` never becomes a separator).
+    static func inboxPath(_ itemId: String, _ action: String? = nil) -> String {
+        "/v1/mobile/inbox/items/\(segment(itemId))" + (action.map { "/\($0)" } ?? "")
+    }
+
     // MARK: - Calendar and journal
 
     /// `GET /v1/mobile/calendar/agenda?hours=`

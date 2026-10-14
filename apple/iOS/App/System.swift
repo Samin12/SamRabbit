@@ -8,10 +8,13 @@ import UserNotifications
 private let log = Logger(subsystem: "com.samrabbit.mobile", category: "system")
 
 /// Local notifications (no push: the bridge has no APNs). Each T3 request that needs you (keyed by
-/// thread and request id, shared with the background refresh through the App Group) and each task
-/// started from the phone that finishes is announced once.
+/// thread and request id, shared with the background refresh through the App Group), each Claude Code or Codex
+/// prompt waiting in its terminal or app (keyed by item and tool call), and each task started from the phone that
+/// finishes is announced once.
 final class NotificationController: Sendable {
     private let tracker = TaskTracker.shared
+    /// The icon badge as last set (nil: not yet), so a check that changes nothing doesn't ask the system.
+    private let badge = OSAllocatedUnfairLock<Int?>(initialState: nil)
 
     func requestAuthorization() async {
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
@@ -24,24 +27,43 @@ final class NotificationController: Sendable {
         }
     }
 
-    /// Plans and posts what changed since the last check.
-    func check(threads: [TaskThread]) async {
-        let plan = AlertPlanner.plan(threads: threads, announced: tracker.announced, tracked: tracker.tasks)
+    /// Plans and posts what changed since the last check, and keeps the icon's badge on what needs you (it drops
+    /// after a Mark seen or an answer, and counts what posts no alert: finished and unseen, failed). `agents`: the
+    /// inbox's Claude Code and Codex items; `needsYou`: the badge (every agent that needs you, from the inbox; T3's
+    /// waiting threads without it).
+    func check(threads: [TaskThread], agents: [InboxItem] = [], needsYou: Int? = nil) async {
+        let plan = AlertPlanner.plan(threads: threads, agents: agents, announced: tracker.announced,
+                                     tracked: tracker.tasks)
         tracker.setAnnounced(plan.announced)
         tracker.update(plan.tracked)
-        guard !plan.alerts.isEmpty, await authorized else { return }
+        let count = needsYou ?? threads.filter(\.status.needsYou).count
+        let badgeMoved = badge.withLock { $0 != count }
+        guard !plan.alerts.isEmpty || badgeMoved, await authorized else { return }
         for alert in plan.alerts {
             let content = UNMutableNotificationContent()
             content.title = alert.title
             content.body = alert.body
-            content.sound = .default
+            content.sound = Self.alertSound
             content.threadIdentifier = "samrabbit.tasks"
-            content.userInfo = ["url": "samrabbit://thread/\(alert.threadId)"]
-            content.interruptionLevel = alert.kind == .needsYou ? .timeSensitive : .active
+            content.userInfo = ["url": alert.link]
+            // What can be answered right here breaks through a Focus; a prompt only the Mac answers doesn't.
+            content.interruptionLevel = alert.kind == .needsYou && !alert.onlyOnMac ? .timeSensitive : .active
             let request = UNNotificationRequest(identifier: alert.id, content: content, trigger: nil)
             try? await UNUserNotificationCenter.current().add(request)
         }
-        try? await UNUserNotificationCenter.current().setBadgeCount(threads.filter(\.status.needsYou).count)
+        if (try? await UNUserNotificationCenter.current().setBadgeCount(count)) != nil {
+            badge.withLock { $0 = count }
+        }
+    }
+
+    /// Talk's rule: the simulator plays nothing out loud unless `-SamRabbitAudioOut on`, so its alerts come silent
+    /// (the UI tests' needs-you rows would otherwise chime through the Mac).
+    static var alertSound: UNNotificationSound? {
+        #if targetEnvironment(simulator)
+        UserDefaults.standard.string(forKey: "SamRabbitAudioOut") == "on" ? .default : nil
+        #else
+        .default
+        #endif
     }
 }
 
@@ -88,7 +110,12 @@ enum BackgroundRefresh {
         let account = BridgeAccount.shared
         guard let client = account.client() else { return }
         do {
-            let summary = try await client.summary(timeout: 15)
+            // The inbox beside the summary: the widgets and the badge count every agent on the Mac.
+            async let inboxCall = BridgeError.capture { try await client.inbox(timeout: 15) }
+            let fresh = try await client.summary(timeout: 15)
+            let inbox = await inboxCall
+            let summary = fresh.with(inbox: inbox, kept: SummaryCache.shared.load()?.summary.inbox)
+            let agents = (try? inbox.get())?.agentItems.filter { $0.source != .t3 } ?? []
             SummaryCache.shared.publish(summary) // reloads the widgets only when something changed
             var threads = summary.t3.threads
             // What waits for you comes from the thread list: its entries carry the request ids the
@@ -108,7 +135,10 @@ enum BackgroundRefresh {
             for task in TaskTracker.shared.tasks where !known.contains(task.threadId) {
                 if let detail = try? await client.thread(task.threadId) { threads.append(detail.thread) }
             }
-            if complete { await NotificationController().check(threads: threads) }
+            // Without the list T3's waiting threads aren't announced (nothing to key them on); the Claude Code and
+            // Codex prompts, finished tasks and the badge still are.
+            await NotificationController().check(threads: complete ? threads : threads.filter { !$0.status.needsYou },
+                                                 agents: agents, needsYou: summary.inbox?.needsYou)
             await LiveActivityController().update(with: threads)
         } catch {
             log.notice("background refresh failed")

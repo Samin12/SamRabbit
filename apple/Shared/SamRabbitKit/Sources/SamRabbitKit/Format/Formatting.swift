@@ -79,22 +79,44 @@ public enum Formatting {
 /// One sentence summaries for Siri, notifications and complications.
 public enum SpokenSummary {
     /// "Two tasks need you: approve “Deploy staging” and answer “Fix login”. One is working. Next: Standup at 10:30 AM."
+    /// With the inbox's counts in the summary (the iPhone), every agent counts: "… answer “Flaky test” in the terminal".
     public static func whatNeedsMe(_ summary: MobileSummary, now: Date = .now) -> String {
         var parts: [String] = []
-        let needing = summary.t3.threads.filter(\.status.needsYou)
-        let needsCount = max(summary.t3.needsYou, needing.count)
+        let needsCount: Int
+        let details: [String]
+        if let inbox = summary.inbox {
+            needsCount = inbox.needsYou
+            details = inbox.items.filter(\.needsYou).prefix(3).map { item -> String in
+                let verb = switch item.status {
+                case .needsApproval: "approve"
+                case .needsInput: "answer"
+                case .error: "check"
+                default: "look at"
+                }
+                let place = switch item.heldOnMac {
+                case .waitingInTerminal: " in the terminal"
+                case .waitingInApp: " in the Codex app"
+                default: ""
+                }
+                return "\(verb) “\(Formatting.clip(item.title, 48))”\(place)"
+            }
+        } else {
+            let needing = summary.t3.threads.filter(\.status.needsYou)
+            needsCount = max(summary.t3.needsYou, needing.count)
+            details = needing.prefix(3).map { thread -> String in
+                let verb = thread.status == .needsApproval ? "approve" : "answer"
+                return "\(verb) “\(Formatting.clip(thread.title, 48))”"
+            }
+        }
         if needsCount == 0 {
             parts.append("Nothing needs you right now.")
         } else {
             let lead = needsCount == 1 ? "One task needs you" : "\(number(needsCount)) tasks need you"
-            let details = needing.prefix(3).map { thread -> String in
-                let verb = thread.status == .needsApproval ? "approve" : "answer"
-                return "\(verb) “\(Formatting.clip(thread.title, 48))”"
-            }
             parts.append(details.isEmpty ? lead + "." : lead + ": " + list(details) + ".")
         }
-        if summary.t3.working > 0 {
-            parts.append(summary.t3.working == 1 ? "One is working." : "\(number(summary.t3.working)) are working.")
+        let working = summary.workingCount
+        if working > 0 {
+            parts.append(working == 1 ? "One is working." : "\(number(working)) are working.")
         }
         if let next = summary.nextEvent(after: now), let start = next.startsAt {
             let when = next.isNow(now) ? "now" : Formatting.until(start, end: next.endsAt, now: now)

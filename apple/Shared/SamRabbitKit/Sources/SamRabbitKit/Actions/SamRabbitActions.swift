@@ -10,11 +10,25 @@ public struct SamRabbitActions: Sendable {
     public let account: BridgeAccount
     public let cache: SummaryCache
     public let tracker: TaskTracker
+    /// `refresh` also reads the inbox (`/v1/mobile/inbox`) and puts its counts into the summary, so the widgets
+    /// count every agent on the Mac. The iPhone does; the watch keeps T3's counts (it never reads the inbox).
+    public let includesInbox: Bool
 
-    public init(account: BridgeAccount = .shared, cache: SummaryCache = .shared, tracker: TaskTracker = .shared) {
+    public init(account: BridgeAccount = .shared, cache: SummaryCache = .shared, tracker: TaskTracker = .shared,
+                includesInbox: Bool = SamRabbitActions.inboxByDefault) {
         self.account = account
         self.cache = cache
         self.tracker = tracker
+        self.includesInbox = includesInbox
+    }
+
+    /// The iPhone (and its widgets and intents) read the inbox; the watch doesn't.
+    public static var inboxByDefault: Bool {
+        #if os(iOS)
+        true
+        #else
+        false
+        #endif
     }
 
     public static let shared = SamRabbitActions()
@@ -66,10 +80,20 @@ public struct SamRabbitActions: Sendable {
         await refreshQuietly()
     }
 
-    /// Fetches the summary and hands it to the widgets (reloaded only when it changed).
+    /// Fetches the summary (and on the iPhone the inbox beside it, for every agent's counts) and hands it to the
+    /// widgets (reloaded only when it changed).
     @discardableResult
     public func refresh(timeout: TimeInterval = 10) async throws -> MobileSummary {
-        let summary = try await account.requireClient().summary(timeout: timeout)
+        let client = try account.requireClient()
+        guard includesInbox else {
+            let summary = try await client.summary(timeout: timeout)
+            cache.publish(summary)
+            return summary
+        }
+        async let summaryCall = client.summary(timeout: timeout)
+        async let inboxCall = BridgeError.capture { try await client.inbox(timeout: timeout) }
+        let fresh = try await summaryCall
+        let summary = fresh.with(inbox: await inboxCall, kept: cache.load()?.summary.inbox)
         cache.publish(summary)
         return summary
     }
@@ -162,6 +186,16 @@ public struct PlannedAlert: Sendable, Equatable, Identifiable {
     public var title: String
     public var body: String
     public var threadId: String
+    /// A Claude Code or Codex item's inbox id (`claude:<id>`): the alert opens that item, not a T3 thread.
+    public var itemId: String? = nil
+    /// Only the Mac can answer it (a prompt in a terminal or the Codex app): it comes as a normal alert, never
+    /// time-sensitive through a Focus (Samin is usually at that Mac).
+    public var onlyOnMac = false
+
+    /// What tapping it opens: the T3 thread, or the inbox item.
+    public var link: String {
+        itemId.map { "samrabbit://inbox/\($0)" } ?? "samrabbit://thread/\(threadId)"
+    }
 }
 
 /// Decides which local notifications fresh thread states deserve (no push: the background refresh
@@ -174,6 +208,13 @@ public struct PlannedAlert: Sendable, Equatable, Identifiable {
 /// is not announced until a list shows its request. Keys are kept for a week whether or not the
 /// thread is in the list this time, so a thread that drops out of one list and shows up in another
 /// is not announced twice.
+///
+/// Claude Code and Codex sessions (the inbox's `agents`) are announced the same way when they wait for a prompt in
+/// their terminal or app (`<itemId>|<requestId>`, the tool call it waits on); only the Mac can answer those, so the
+/// alert says where and isn't time-sensitive. A prompt the bridge only guesses at ("May be waiting for you …": a
+/// quiet Codex tool call, which a long build is too) is not announced; one whose tool call the bridge doesn't know
+/// (its stand-in ids `terminal` / `codex`) is keyed with the time it started waiting, so the session's next prompt
+/// is announced too.
 public enum AlertPlanner {
     public struct Plan: Sendable, Equatable {
         public var alerts: [PlannedAlert]
@@ -188,8 +229,9 @@ public enum AlertPlanner {
     ///   - threads: the freshest thread states known (a thread list, plus any looked up).
     ///   - announced: needs-you requests already notified, with when.
     ///   - tracked: tasks started from the phone.
-    public static func plan(threads: [TaskThread], announced: [String: Date], tracked: [TrackedTask],
-                            now: Date = .now) -> Plan {
+    ///   - agents: Claude Code and Codex items from the inbox (T3's come as `threads`; others are skipped).
+    public static func plan(threads: [TaskThread], agents: [InboxItem] = [], announced: [String: Date],
+                            tracked: [TrackedTask], now: Date = .now) -> Plan {
         var alerts: [PlannedAlert] = []
         var keys = announced.filter { now.timeIntervalSince($0.value) < keepAnnounced }
         var seen = Set<String>()
@@ -201,6 +243,17 @@ public enum AlertPlanner {
             let detail = thread.pending?.text.isEmpty == false ? thread.pending!.text : (thread.summary ?? what)
             alerts.append(PlannedAlert(id: "needs:\(key)", kind: .needsYou, title: thread.title,
                                        body: Formatting.clip(detail, 160), threadId: thread.threadId))
+        }
+        for item in agents where item.source == .claude || item.source == .codex {
+            guard item.status == .needsApproval || item.status == .needsInput, !item.isGuess,
+                  let key = needsYouKey(item), seen.insert(key).inserted, keys[key] == nil else { continue }
+            keys[key] = now
+            let place = item.heldOnMac?.headline(item) ?? item.statusLabel
+            let detail = InboxPending.detail(item.pending) ?? item.summary
+            let body = [place, detail].filter { !$0.isEmpty }.joined(separator: ": ")
+            alerts.append(PlannedAlert(id: "needs:\(key)", kind: .needsYou, title: item.title,
+                                       body: Formatting.clip(body, 160), threadId: item.id, itemId: item.id,
+                                       onlyOnMac: item.heldOnMac != nil))
         }
         if keys.count > maxAnnounced {
             keys = Dictionary(uniqueKeysWithValues: keys.sorted { $0.value > $1.value }.prefix(maxAnnounced).map { ($0.key, $0.value) })
@@ -232,4 +285,15 @@ public enum AlertPlanner {
         guard let requestId = thread.pending?.requestId, !requestId.isEmpty else { return nil }
         return "\(thread.threadId)|\(requestId)"
     }
+
+    /// `claude:<sessionId>|<requestId>`, or nil without a request. The bridge's stand-ins for a tool call it doesn't
+    /// know (`terminal`: a prompt only Claude Code's own registry reports; `codex`) would be the same for every prompt
+    /// of the session: those add the time it started waiting (`…|terminal@<ms>`).
+    static func needsYouKey(_ item: InboxItem) -> String? {
+        guard let requestId = item.pendingRequestId, !requestId.isEmpty else { return nil }
+        if standInRequests.contains(requestId) { return "\(item.id)|\(requestId)@\(InboxItem.stamp(item.updatedAt))" }
+        return "\(item.id)|\(requestId)"
+    }
+
+    static let standInRequests: Set<String> = ["terminal", "codex"]
 }
