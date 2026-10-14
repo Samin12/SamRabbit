@@ -1,8 +1,9 @@
 // The agent inbox as the window shows it (GET /v1/desktop/inbox, CONTRACTS-WAVE6 §A): T3 Code threads, Claude Code
 // and Codex sessions, and the recent SamRabbit chats. The same rules as the Agent Dock (Sources/DockModels.swift,
 // DockStore.swift, DockKeyboard.swift), so both say the same thing: forgiving decoding, the contract's order, what
-// "needs you" means, the recommended approval option, answers to questions, optimistic actions with rollback, and
-// the keys. Pure (no DOM, no network): tests/inbox.test.mjs runs it in Node.
+// "needs you" means, the recommended approval option, answers to questions, optimistic actions with rollback,
+// dismissing (hidden at once, the bridge's list decides once it agreed; undo shows it again at once), and the keys.
+// Pure (no DOM, no network): tests/inbox.test.mjs runs it in Node.
 
 import { clip, toMs } from './format.js';
 
@@ -85,13 +86,16 @@ export function normalizeItem(raw) {
     live: raw.live === true,
     progress,
     phase: text(raw.phase) || null,
+    dismissed: raw.dismissed === true,
   };
 }
 
 /** One answer of GET /v1/desktop/inbox: {revision, updatedAt, counts, sources, items} (items sorted, capped). */
 export function normalizeInbox(raw) {
   const body = raw && typeof raw === 'object' ? raw : {};
-  const items = sortItems((Array.isArray(body.items) ? body.items : []).map(normalizeItem).filter(Boolean).slice(0, ITEM_CAP));
+  // A dismissed item is the bridge's to bring back: never a row, even from a bridge that sends it anyway.
+  const items = sortItems((Array.isArray(body.items) ? body.items : []).map(normalizeItem)
+    .filter((item) => item && !item.dismissed).slice(0, ITEM_CAP));
   const computed = {
     needsYou: items.filter(needsYou).length,
     working: items.filter((i) => i.status === 'working' && !isChat(i)).length,
@@ -99,7 +103,8 @@ export function normalizeInbox(raw) {
   };
   const counts = body.counts && typeof body.counts === 'object' ? {
     needsYou: Number(body.counts.needsYou) || 0, working: Number(body.counts.working) || 0, total: Number(body.counts.total) || 0,
-  } : computed;
+    dismissed: Number(body.counts.dismissed) || 0,
+  } : { ...computed, dismissed: 0 };
   return {
     revision: Number.isFinite(body.revision) ? body.revision : 0,
     updatedAt: toMs(body.updatedAt),
@@ -158,6 +163,11 @@ export function sortItems(items) {
 
 export function supports(item, capability) {
   return Array.isArray(item.can) && item.can.includes(capability);
+}
+
+/** Every item of a bridge that knows dismissing (W8): hidden until it changes. */
+export function canDismiss(item) {
+  return Boolean(item) && supports(item, 'dismiss') && !String(item.id).startsWith('pending:');
 }
 
 /** Who runs it: "Claude", "Codex", or null (chats). */
@@ -326,6 +336,18 @@ export function failureNote(error) {
   return { text: `That didn’t work: ${message || `HTTP ${status}`}`, isError: true };
 }
 
+/** Why a dismissal (or its undo) didn't happen, for the toast. */
+export function dismissProblem(error, { undo = false } = {}) {
+  const status = error && typeof error.status === 'number' ? error.status : 0;
+  const code = (error && error.code) || '';
+  const lead = undo ? 'Couldn’t bring it back' : 'Couldn’t dismiss it';
+  if (status === 0) return `${lead}: the Mac bridge isn’t answering.`;
+  if (status === 404 && code === 'item_not_found') return `${lead}: it’s gone from the inbox.`;
+  if (status === 404 || status === 405) return `${lead}: update the bridge (companion/mac-bridge/install.sh).`;
+  if (status === 401 || status === 403) return `${lead}: the bridge didn’t accept SamRabbit.`;
+  return `${lead}: ${error && error.detail ? clip(error.detail, 90) : `HTTP ${status}`}`;
+}
+
 /** What happened, when it's worth saying ("Opened in Terminal."). */
 export function actionInfo(kind, reply) {
   const how = reply && reply.how;
@@ -374,11 +396,17 @@ export function optimisticItem(item, kind, body = {}) {
 
 const OVERLAY_MS = 20_000;
 const PLACEHOLDER_MS = 45_000;
+/** A dismissal (or an undo) nothing settled is let go after this long: the inbox's own list again. */
+export const DISMISS_STALE_MS = 30_000;
+/** How long "Dismissed · Undo" stays (and ⌘Z can undo). */
+export const UNDO_MS = 5_000;
 
 /**
  * The inbox with what the window did meanwhile: optimistic results (shown at once, kept until the inbox catches up,
- * dropped on failure or after 20 s) and new tasks that the bridge hasn't listed yet (45 s). `items` is what the list
- * draws.
+ * dropped on failure or after 20 s), new tasks that the bridge hasn't listed yet (45 s), rows dismissed here (gone at
+ * once; once the bridge said yes, its list from the revision it gave decides, so an item that changed is back by
+ * itself) and dismissals undone here (shown from the copy until the inbox carries them again). `items` is what the
+ * list draws.
  */
 export class InboxStore {
   constructor() {
@@ -386,6 +414,8 @@ export class InboxStore {
     this.items = [];
     this.overlays = new Map(); // id -> {item, started, settledAt}
     this.placeholders = []; // {item, until}
+    this.hidden = new Map(); // id -> {item, at, settles}: dismissed here
+    this.restored = new Map(); // id -> {item, at, settles}: undone here
     this.received = false;
   }
 
@@ -402,6 +432,12 @@ export class InboxStore {
     }
     const present = new Set(inbox.items.map((i) => i.id));
     this.placeholders = this.placeholders.filter((p) => !present.has(p.item.id));
+    for (const [id, entry] of this.hidden) {
+      if (entry.settles != null && inbox.revision >= entry.settles) this.hidden.delete(id);
+    }
+    for (const [id, entry] of this.restored) {
+      if (present.has(id) || (entry.settles != null && inbox.revision >= entry.settles)) this.restored.delete(id);
+    }
     this.tick(now, false);
     this.rebuild();
     const after = this.counts();
@@ -412,7 +448,8 @@ export class InboxStore {
     const base = this.inbox.items.map((item) => (this.overlays.get(item.id) || {}).item || item);
     const ids = new Set(base.map((i) => i.id));
     const extra = this.placeholders.map((p) => p.item).filter((i) => !ids.has(i.id));
-    this.items = sortItems(base.concat(extra));
+    const back = [...this.restored.values()].map((entry) => entry.item).filter((i) => !ids.has(i.id));
+    this.items = sortItems(base.concat(extra, back).filter((i) => !this.hidden.has(i.id)));
     return this.items;
   }
 
@@ -428,8 +465,84 @@ export class InboxStore {
     const before = this.placeholders.length;
     this.placeholders = this.placeholders.filter((p) => p.until > now);
     gone = gone || this.placeholders.length !== before;
+    for (const map of [this.hidden, this.restored]) {
+      for (const [id, entry] of map) {
+        if (now - entry.at >= DISMISS_STALE_MS) {
+          map.delete(id);
+          gone = true;
+        }
+      }
+    }
     if (gone && rebuild) this.rebuild();
     return gone;
+  }
+
+  // ------------------------------------------------------------------ dismissing
+
+  isDismissed(id) {
+    return this.hidden.has(id);
+  }
+
+  /** The row goes at once (and with it from the counts). */
+  dismiss(item, now = Date.now()) {
+    this.restored.delete(item.id);
+    this.hidden.set(item.id, { item, at: now, settles: null });
+    this.rebuild();
+  }
+
+  /** The bridge said yes: its list leaves the item out from `revision` on (at once when the inbox is already there). */
+  confirmDismiss(id, revision) {
+    const entry = this.hidden.get(id);
+    if (!entry) return;
+    const settles = Number.isFinite(revision) ? revision : this.inbox.revision + 1;
+    if (this.inbox.revision >= settles) {
+      this.hidden.delete(id);
+      this.rebuild();
+    } else {
+      entry.settles = settles;
+    }
+  }
+
+  /** The dismissal failed: the row is back. Returns whether it was still hidden here. */
+  failDismiss(id) {
+    const had = this.hidden.delete(id);
+    if (had) this.rebuild();
+    return had;
+  }
+
+  /** Undo: the row is back at once, from the copy kept here (the one hidden, else `item`). */
+  undo(item, now = Date.now()) {
+    const entry = this.hidden.get(item.id);
+    this.hidden.delete(item.id);
+    this.restored.set(item.id, { item: entry ? entry.item : item, at: now, settles: null });
+    this.rebuild();
+  }
+
+  /** The dismissal an undo waited for failed: nothing to undo, the inbox's own row stays. */
+  undoNotNeeded(id) {
+    if (this.restored.delete(id)) this.rebuild();
+  }
+
+  /** The bridge took the undo back: its list carries the item again from `revision` on. */
+  confirmUndo(id, revision) {
+    const entry = this.restored.get(id);
+    if (!entry) return;
+    const settles = Number.isFinite(revision) ? revision : this.inbox.revision + 1;
+    if (this.inbox.revision >= settles) {
+      this.restored.delete(id);
+      this.rebuild();
+    } else {
+      entry.settles = settles;
+    }
+  }
+
+  /** The undo failed: the bridge still keeps it dismissed, so it goes again. */
+  failUndo(id, now = Date.now()) {
+    const entry = this.restored.get(id);
+    if (!entry) return;
+    this.restored.delete(id);
+    this.hidden.set(id, { item: entry.item, at: now, settles: null });
+    this.rebuild();
   }
 
   item(id) {
@@ -513,7 +626,8 @@ export function resolveChoice(targets, picked = {}) {
 /**
  * The Tasks keys (no field has the keys): J/K or ↓/↑ move, ↩ opens the selected item where it lives, E approves the
  * selected item's request with the recommended option (its card is on screen: the selection shows it), R replies,
- * N starts a new task, Esc closes the composer, then the selection. `rows` = [{id, canOpen, canReply, approval}].
+ * X dismisses the selected item, N starts a new task, Esc closes the composer, then the selection.
+ * `rows` = [{id, canOpen, canReply, canDismiss, approval}].
  */
 export function keyAction(key, rows, selected, { composing = false } = {}) {
   const index = rows.findIndex((row) => row.id === selected);
@@ -535,6 +649,8 @@ export function keyAction(key, rows, selected, { composing = false } = {}) {
     }
     case 'reply':
       return index >= 0 && rows[index].canReply ? { type: 'reply', id: rows[index].id } : { type: 'none' };
+    case 'dismiss':
+      return index >= 0 && !composing && rows[index].canDismiss ? { type: 'dismiss', id: rows[index].id } : { type: 'none' };
     case 'compose':
       return { type: 'compose' };
     case 'escape':
@@ -547,7 +663,9 @@ export function keyAction(key, rows, selected, { composing = false } = {}) {
 
 /** What the keys know about a row. */
 export function keyRow(item) {
-  const row = { id: item.id, canOpen: supports(item, 'open'), canReply: supports(item, 'reply'), approval: null };
+  const row = {
+    id: item.id, canOpen: supports(item, 'open'), canReply: supports(item, 'reply'), canDismiss: canDismiss(item), approval: null,
+  };
   const approval = item.pending.approvals[0];
   const option = supports(item, 'approve') && approval ? recommendedOption(approval) : null;
   if (option) row.approval = { requestId: approval.requestId, decision: option.decision };
@@ -569,7 +687,16 @@ export function keyName(event) {
     case 'k': return 'up';
     case 'e': return 'approve';
     case 'r': return 'reply';
+    case 'x': return 'dismiss';
     case 'n': return 'compose';
     default: return null;
   }
+}
+
+/** The row to select once `id` leaves the list: the next one, else the one before, else none (X X X clears a run). */
+export function selectionAfterDismiss(ids, id) {
+  const index = ids.indexOf(id);
+  if (index < 0) return null;
+  if (index + 1 < ids.length) return ids[index + 1];
+  return index > 0 ? ids[index - 1] : null;
 }

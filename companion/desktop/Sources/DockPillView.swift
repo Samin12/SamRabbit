@@ -22,6 +22,8 @@ final class DockUIState: ObservableObject {
     @Published var panelScale: CGFloat = 1
     @Published var maxPanelHeight: CGFloat = 640
     @Published var pillHover = false
+    /// The list row under the pointer (its ✕ shows).
+    @Published var hoveredRow: String?
     @Published var dragging = false
     /// Folded to the orb (⌃⌥M, the "–", "Minimize to Orb").
     @Published var minimized = false

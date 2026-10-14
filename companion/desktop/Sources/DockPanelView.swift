@@ -34,6 +34,21 @@ struct DockPanel: View {
                         list(p)
                     }
                 }
+                .overlay(alignment: .bottom) {
+                    if let toast = store.dismissals.toast {
+                        DockDismissToast(toast: toast, scale: p) { undoDismissRow(store: store, ui: ui) }
+                            .padding(.horizontal, 14 * p)
+                            .padding(.top, 22 * p)
+                            .padding(.bottom, 9 * p)
+                            // The rows under it fade out, so no half line peeks from below the toast.
+                            .background(LinearGradient(colors: [Color(red: 0.07, green: 0.08, blue: 0.11).opacity(0),
+                                                                Color(red: 0.07, green: 0.08, blue: 0.11).opacity(0.82)],
+                                                       startPoint: .top, endPoint: .bottom)
+                                .allowsHitTesting(false))
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+                .animation(.easeOut(duration: 0.18), value: store.dismissals.toast)
                 menuRoom(p)
             }
             .overlay {
@@ -182,7 +197,8 @@ struct DockRow: View {
     @ObservedObject var store: DockStore
     @ObservedObject var ui: DockUIState
     let commands: DockCommands
-    @State private var hover = false
+
+    private var hover: Bool { ui.hoveredRow == item.id }
 
     var body: some View {
         let p = ui.panelScale
@@ -207,7 +223,25 @@ struct DockRow: View {
             RoundedRectangle(cornerRadius: 14 * p, style: .continuous)
                 .strokeBorder(selected ? Palette.pale.opacity(0.35) : (expanded ? Color.white.opacity(0.07) : .clear), lineWidth: 1)
         )
-        .onHover { hover = $0 }
+        .onHover { inside in
+            if inside {
+                ui.hoveredRow = item.id
+            } else if ui.hoveredRow == item.id {
+                ui.hoveredRow = nil
+            }
+        }
+        .contextMenu {
+            if item.supports("open") {
+                Button(DockRowDetail.openTitle(item)) { store.open(item) }
+            }
+            if item.supports("seen") && item.unread {
+                Button("Mark Seen") { store.markSeen(item) }
+            }
+            if item.canDismiss {
+                if item.supports("open") || (item.supports("seen") && item.unread) { Divider() }
+                Button("Dismiss") { dismissRow(item, store: store, ui: ui) }
+            }
+        }
     }
 
     private func toggle(_ expanded: Bool) {
@@ -235,6 +269,13 @@ struct DockRow: View {
                         .monospacedDigit()
                         .foregroundStyle(DockPalette.tertiary)
                         .fixedSize()
+                        .opacity(hover && item.canDismiss ? 0 : 1)
+                        .overlay(alignment: .trailing) {
+                            // Pointed at: a small ✕ where the time is, at the row's trailing edge (X on the keyboard).
+                            if hover && item.canDismiss {
+                                DockDismissButton(scale: p) { dismissRow(item, store: store, ui: ui) }
+                            }
+                        }
                 }
                 meta(p).lineLimit(1)
                 if !item.summary.isEmpty && !(expanded && store.details[item.id] != nil) {
@@ -463,6 +504,12 @@ struct DockRowDetail: View {
             if item.supports("seen") && item.unread {
                 DockCapsuleButton(title: "Mark seen", symbol: "checkmark", style: .quiet, scale: p) { store.markSeen(item) }
             }
+            if item.canDismiss {
+                DockCapsuleButton(title: "Dismiss", symbol: "xmark", style: .quiet, scale: p) {
+                    dismissRow(item, store: store, ui: ui)
+                }
+                .help("Hide it until something changes (X)")
+            }
             Spacer(minLength: 0)
             if let busy = store.busy[item.id] {
                 HStack(spacing: 5 * p) {
@@ -473,7 +520,9 @@ struct DockRowDetail: View {
         }
     }
 
-    private var openTitle: String {
+    private var openTitle: String { Self.openTitle(item) }
+
+    static func openTitle(_ item: DockItem) -> String {
         switch item.source {
         case "t3": return "Open in T3"
         case "samrabbit": return "Open chat"
@@ -490,6 +539,112 @@ struct DockRowDetail: View {
         case "open": return "Opening…"
         default: return "…"
         }
+    }
+}
+
+// MARK: dismissing
+
+/// Dismisses a row from the list (its ✕, its Dismiss button, its menu, X): it leaves at once, the selection moves to
+/// the next row (so X X X clears a run), an open row closes, and the toast offers Undo.
+@MainActor
+func dismissRow(_ item: DockItem, store: DockStore, ui: DockUIState) {
+    let rows = DockSection.visibleIds(store.sections, earlierOpen: ui.earlierOpen)
+    if ui.selected == item.id { ui.selected = DockKeyboard.selection(afterDismissing: item.id, rows: rows) }
+    if ui.expandedRow == item.id {
+        ui.expandedRow = nil
+        store.watched = nil
+    }
+    if ui.hoveredRow == item.id { ui.hoveredRow = nil }
+    store.dismiss(item)
+}
+
+/// The toast's Undo (and ⌘Z in the list): the row is back, selected.
+@MainActor
+func undoDismissRow(store: DockStore, ui: DockUIState) {
+    if let item = store.undoDismiss() { ui.selected = item.id }
+}
+
+/// The ✕ that shows on a row under the pointer, where its time is.
+struct DockDismissButton: View {
+    let scale: CGFloat
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        let p = scale
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 8.5 * p, weight: .bold))
+                .foregroundStyle(hover ? DockPalette.ink : DockPalette.secondary)
+                .frame(width: 19 * p, height: 19 * p)
+                .background(Circle().fill(hover ? DockPalette.controlHover : DockPalette.control))
+                .overlay(Circle().strokeBorder(Color.white.opacity(hover ? 0.2 : 0.1), lineWidth: 1))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Dismiss (X): hidden until something changes")
+        .accessibilityLabel("Dismiss")
+    }
+}
+
+/// "Dismissed · <title> · Undo" for a few seconds after a row goes; or why it couldn't.
+struct DockDismissToast: View {
+    let toast: DockDismissals.Toast
+    let scale: CGFloat
+    let undo: () -> Void
+
+    var body: some View {
+        let p = scale
+        HStack(spacing: 8 * p) {
+            switch toast.kind {
+            case .dismissed:
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 11 * p, weight: .semibold))
+                    .foregroundStyle(DockPalette.secondary)
+                HStack(spacing: 0) {
+                    Text("Dismissed")
+                        .font(.system(size: 12 * p, weight: .semibold))
+                        .foregroundStyle(DockPalette.ink)
+                        .fixedSize()
+                    Text("  ·  " + toast.item.title)
+                        .font(.system(size: 12 * p))
+                        .foregroundStyle(DockPalette.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 6 * p)
+                Button(action: undo) {
+                    Text("Undo")
+                        .font(.system(size: 12 * p, weight: .semibold))
+                        .foregroundStyle(DockPalette.accentText)
+                        .padding(.horizontal, 9 * p)
+                        .padding(.vertical, 3.5 * p)
+                        .background(Capsule().fill(Palette.orb.opacity(0.22)))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Bring it back (⌘Z)")
+            case .failed(let reason):
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 11 * p, weight: .semibold))
+                    .foregroundStyle(DockPalette.error)
+                Text(reason)
+                    .font(.system(size: 12 * p, weight: .medium))
+                    .foregroundStyle(DockPalette.ink.opacity(0.9))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.leading, 12 * p)
+        .padding(.trailing, toast.offersUndo ? 6 * p : 12 * p)
+        .padding(.vertical, 7 * p)
+        .background(RoundedRectangle(cornerRadius: 13 * p, style: .continuous)
+            .fill(Color(red: 0.11, green: 0.12, blue: 0.16).opacity(0.97)))
+        .overlay(RoundedRectangle(cornerRadius: 13 * p, style: .continuous)
+            .strokeBorder(toast.offersUndo ? Color.white.opacity(0.14) : DockPalette.error.opacity(0.45), lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.35), radius: 10 * p, y: 4 * p)
     }
 }
 

@@ -88,18 +88,20 @@ The inbox (CONTRACTS-WAVE6 §A with the phone's rules of WAVE7 C): `GET /v1/mobi
 of the T3 threads, seven Claude Code and Codex sessions on a made-up Mac and the recent chats, in the contract's
 order, with a revision that grows on every change and a long-poll), `GET /inbox/items/<id>` (the item and its last
 messages), `/inbox/targets`, `POST /inbox/new {text, projectId?, agent?, model?}` and `POST /inbox/items/<id>/approve |
-answer | reply | stop | seen`. Like the real bridge the phone's items never list `open` (`POST …/open` answers 409
+answer | reply | stop | seen | dismiss | undismiss` (dismiss: seen, out of the list and its counts until it changes,
+`?include=dismissed` lists them last). Like the real bridge the phone's items never list `open` (`POST …/open` answers 409
 `unsupported_action`); a reply to a Claude Code or Codex CLI session nobody runs "continues in a new Terminal window
 on the Mac" (`202 {how: "terminal", message}`; it is then live there and finishes six seconds later), a live one
 answers 409 `session_live`, a Codex Desktop thread 409 `unsupported_action`. `POST /__fake/inbox {missing?, id?, live?,
-unread?, unsure?, status?, clear?}` / `GET /__fake/inbox` (`missing`: an older bridge without the inbox, every route 404;
-change one session; `unsure`: the Mac's process list didn't answer, so neither `live` nor `reply` and a reply gets 503
-`session_check_failed`; what arrived: replies, seen, new tasks, refusals).
+unread?, unsure?, status?, clear?, refuse?}` / `GET /__fake/inbox` (`missing`: an older bridge without the inbox, every
+route 404; change one session; `unsure`: the Mac's process list didn't answer, so neither `live` nor `reply` and a reply
+gets 503 `session_check_failed`; `refuse: [actions]`: those item actions answer 503; what arrived: replies, seen,
+dismissals and undos, new tasks, refusals).
 
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 223 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 228 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
@@ -133,15 +135,19 @@ finished task is seeing it (a Claude Code session, again when it finishes while 
 leaves Needs you and the badge drops; a T3 failure is marked seen and stays); a session the Mac couldn't check says
 "Can't tell if it's open on your Mac" and offers no reply; T3 Code down keeps the Claude Code and
 Codex rows with "T3 not connected", T3's last rows at the end, read-only and out of the badge; an older bridge without
-the inbox gets T3's thread list as before; New task goes with Codex and its model to `/inbox/new`.
+the inbox gets T3's thread list as before; New task goes with Codex and its model to `/inbox/new`; a swiped card goes
+(the Mac is told, the badge drops) with "Dismissed · Undo", Undo brings it back unread, Dismiss on a session's screen
+goes back to the list without it, and a dismissal the Mac refuses puts the card back and says why.
 `InboxTests` / `InboxBridgeTests` (SamRabbitKit): decoding and the contract's order, where each item waits (`can`
 without `open`, `live`, the bridge's words), T3 items as their threads, the counts past the 60-item cap, the summary
 overlay (a hiccup keeps the last counts, an older bridge leaves T3's), the widgets' cache and reloads (a working
 agent's every line doesn't reload them), "what needs me", the alerts for Claude Code and Codex prompts (not
 time-sensitive, guesses skipped, stand-in request ids), seeing an item (`seenMark`, `markedSeen`), when a screen reads
 its item again (`changeMark`), a session the Mac couldn't check, T3's last rows while it is down and the T3-list
-fallback (`InboxRows`), older lists (`isNewer`), 32-bit safety, and the client against the fake bridge: the long-poll waking
-up, reply / `session_live`, seen, T3 through the inbox, targets and new tasks, T3 down, an older bridge.
+fallback (`InboxRows`), older lists (`isNewer`), 32-bit safety, dismissing (`InboxDismissals`: hidden until the Mac's
+list at its revision, back when it changed, a refusal, the undo, stale entries; dismissed items never rows,
+`counts.dismissed`), and the client against the fake bridge: the long-poll waking up, reply / `session_live`, seen,
+dismiss and undismiss, T3 through the inbox, targets and new tasks, T3 down, an older bridge.
 
 `TalkUITests` (iPhone, real taps, the made-up voice instead of the microphone, the simulator muted): Home's Talk button
 opens Talk listening; the voice is heard, the reply streams in as the caption with the task it started, and it listens
@@ -428,6 +434,16 @@ count every agent.
   finishes again while its screen is open is marked again), here and on the dock; Mark seen on the cards and screens
   does the same. A Claude Code or Codex failure then settles; a T3 one stays an error (and in Needs you) until T3
   settles it, as on the Mac.
+- **Dismiss** (W8; any item of a bridge that lists `dismiss` in `can`): swipe a card or a row left (or long press →
+  Dismiss, or VoiceOver's action), or Dismiss on its screen (back to the list). It leaves Tasks, Home and the counts at
+  once, "Dismissed · <title> · Undo" shows above the tab bar for five seconds, and `POST /inbox/items/<id>/dismiss`
+  hides it on the Mac too (dock and window) until it changes: a new state, a new request, something it did. Then it
+  comes back by itself. Undo brings it back as it was (`undismiss`, after the dismissal's own call if that is still on
+  its way; a task's dismissals and undos always reach the Mac in the order they were made, and only the last one's
+  answer moves the row); a refusal puts it back with "Couldn't dismiss it" and why. The summary's `t3` and
+  `/t3/threads` (the watch, background alerts, the list used when the inbox fails) leave dismissed threads out too. `InboxDismissals` keeps a dismissed row hidden
+  until the inbox at the revision the Mac's yes gave, and an undone one shown until the inbox carries it again.
+  Nothing reaches T3, Claude Code or Codex.
 - **Live**: besides the 20 s refresh, the app follows the inbox's long-poll (`?after=<revision>&wait=25`) while it is
   in front, so a prompt answered on the Mac or a session that finished shows within a moment. Only later revisions
   apply (a refresh that lands after the long-poll changes nothing, nor undoes a Mark seen on its way); a screen reads

@@ -31,8 +31,11 @@ A sidebar (the orb, **Talk**, and the views) and five views (CONTRACTS-WAVE7 §B
   `web/inbox.js` mirrors `Sources/DockModels.swift`) in Needs you / Working / Recent, filtered by T3 · Claude ·
   Codex (with their needs-you counts). A row opens in the detail pane: its last messages (`/items/<id>`), every
   action it supports right now (`can`): Approve / each option, answers to questions, Reply (↩ sends, ⇧↩ new line),
-  Stop, Open (in T3, Terminal, Codex; a SamRabbit chat opens in Chats), Mark seen — at once, rolled back with a
-  short note when the bridge says no ("It's open in Terminal — Open to answer there"). **New task** (N, ⌘N): the
+  Stop, Open (in T3, Terminal, Codex; a SamRabbit chat opens in Chats), Mark seen, Dismiss — at once, rolled back with
+  a short note when the bridge says no ("It's open in Terminal — Open to answer there"). **Dismiss** (the detail pane's
+  button, the ✕ that takes a row's time under the pointer — on Home's needs-you rows too — or X) hides it at once
+  with "Dismissed · <title> · Undo" for five seconds (Undo, or ⌘Z outside a field); the bridge keeps it out of the
+  list and the counts until it changes, then it comes back by itself; a refusal puts it back with a toast saying why. **New task** (N, ⌘N): the
   prompt, the T3 project, Claude or Codex and the model (`/targets`, `/new`); the task shows under Working at once.
 - **Chats** (⌘3, `web/chats.js`): the conversation timeline as before (list, search ⌘K, live stream).
 - **Calendar** (⌘4, `web/calendar.js`): the next seven days by day (`GET /v1/desktop/calendar/agenda?days=7`), a
@@ -51,8 +54,9 @@ A sidebar (the orb, **Talk**, and the views) and five views (CONTRACTS-WAVE7 §B
   while the transcript grows. Each exchange is its own line (`heardId`), so "Yes." twice is two lines.
 - **Keys**: ⌘1–⌘5 views (also in the View menu), ⌘N new task, ⌘K search conversations, ⌘, Settings — ⌘ only (⌃N,
   ⌃K stay the text fields' next line / kill line), and nothing behind a sheet (a journal note, an unpair); in Tasks
-  J/K or ↓/↑ move, ↩ open, E approve with the recommended option (the selected item's card is on screen), R reply, N
-  new task, Esc closes the composer, then the selection; Esc ends a conversation first.
+  J/K or ↓/↑ move, ↩ open, E approve with the recommended option (the selected item's card is on screen), R reply, X
+  dismiss (the next row is selected), N new task, Esc closes the composer, then the selection; Esc ends a conversation
+  first; ⌘Z outside a field undoes a dismissal while its toast shows.
 - **Live**: the inbox long poll (25 s), the sync stream, the summary every minute (`GET /v1/desktop/summary`: the
   phone's summary plus `r1.online` and `devices`), the agenda every five minutes and when a view opens — the
   summary, the agenda and the inbox only while the window is on screen. The page lives as long as the app (it loads
@@ -244,14 +248,21 @@ T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, 
 - **The list** opens on the side with room (above a low dock, below a high one), lined up with the dock's outer edge
   (left edges on the left half, right edges on the right): Needs you, Working, Recent chats, Earlier (folded). A row opens in place with its
   last messages and what the item supports right now (`can`): Approve / Deny (each option), answers to questions,
-  Reply (↩ sends, ⇧↩ new line), Stop, Open (`/open`; a SamRabbit chat opens in the main window), Mark seen. Actions
-  show at once and roll back with a short inline error when the bridge says no; a live terminal session answers
-  "It's open in Terminal — Open to answer there". The compose bar at the bottom sends a new prompt to a T3 project
+  Reply (↩ sends, ⇧↩ new line), Stop, Open (`/open`; a SamRabbit chat opens in the main window), Mark seen, Dismiss.
+  Actions show at once and roll back with a short inline error when the bridge says no; a live terminal session answers
+  "It's open in Terminal — Open to answer there".
+- **Dismiss** (every item, W8): the small ✕ that takes a row's time while the pointer is on it, Dismiss in an open row,
+  right-click → Dismiss, or X. The row leaves at once (the selection moves to the next one, so X X X clears a run), the
+  counts drop with it, and "Dismissed · <title> · Undo" shows for five seconds (Undo, or ⌘Z outside a field, brings it
+  back as it was). The bridge keeps it out of the list until it changes — a new status, a new request, something it did
+  — and then it comes back by itself; a dismissal the bridge refused puts the row back and the toast says why. An item's
+  dismissals and undos go to the bridge one after the other, in the order they were made (dismiss, Undo, dismiss again
+  ends dismissed), and only the last one's answer moves the row (the window does the same). The compose bar at the bottom sends a new prompt to a T3 project
   with a chosen agent and model (`/targets`, `/new`); its project and agent menus open upward over the list (the panel
   grows to fit them, and a long list scrolls).
 - **Keys** (when the list has the keys and no field does — Esc leaves a field): J/K or ↓/↑, ↩ open a row (↩ again:
   Open), E approve the open row with the recommended option (only an open row: its command is on screen), R reply,
-  N compose, Esc close the row, then the list. ⌘ keys in the dock never reach the app's menus (⌘0 there would open the
+  X dismiss the selected row (⌘Z undoes it while the toast shows), N compose, Esc close the row, then the list. ⌘ keys in the dock never reach the app's menus (⌘0 there would open the
   main window); editing keys and ⌃⌘Space still work in its fields.
 - **Shortcuts** (Carbon `RegisterEventHotKey`, no Accessibility permission, shown in the menus): **⌃⌥Space** talk,
   **⌃⌥K** the list on the compose field (it also turns a dock that was turned off back on), **⌃⌥D** show / hide (hidden
@@ -321,7 +332,9 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
 - `--render-dock-snapshots <dir> [--dock-fixture dev/samples/inbox.json] [--dock-backdrop <image>]` draws the pill, its
   states, the list, an open approval, a question, the compose menus, the voice bar, a terminal session, a white page,
   the offline state, the orb, the "–", the dock on a screen at the top left (list below) and minimized in the bottom
-  right corner (list above), and the Settings sheet (at rest, recording, after a combination that went elsewhere) to PNGs from the fixtures and quits (no window, no screen access;
+  right corner (list above), the Settings sheet (at rest, recording, after a combination that went elsewhere) and
+  dismissing (`dock-dismiss-*`: the ✕ under the pointer, Dismiss in an open row, the toast, a refused dismissal) to
+  PNGs from the fixtures and quits (no window, no screen access;
   the glass is simulated by blurring the backdrop). Run it with `SAMRABBIT_NO_MIC=1`.
 - `SAMRABBIT_DOCK_SMOKE=<dir>` walks a running dev copy through open → expand → approve → new prompt → voice → hide →
   back without any synthetic click, logs what AppKit says about the windows at each step and draws each live state.

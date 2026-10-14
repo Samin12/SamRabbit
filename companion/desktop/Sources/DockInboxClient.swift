@@ -17,13 +17,16 @@ enum DockAPI {
         }
     }
 
-    /// What an action answers. `how` says where it went ("t3", "terminal", "app", "desktop").
+    /// What an action answers. `how` says where it went ("t3", "terminal", "app", "desktop"); `dismiss` and
+    /// `undismiss` give the list's revision once it shows the change.
     struct Reply: Decodable, Equatable {
         var ok: Bool?
         var how: String?
         var opened: Bool?
         var conversationId: String?
         var itemId: String?
+        var dismissed: Bool?
+        var revision: Int?
     }
 
     static let longPollWait = 25
@@ -91,6 +94,16 @@ enum DockAPI {
 
     static func open(_ id: String) async -> Result<Reply, Failure> {
         await call("POST", itemPath(id, "open"), body: [:])
+    }
+
+    /// Hidden until it changes (the bridge's own state: nothing reaches T3, Claude Code or Codex).
+    static func dismiss(_ id: String) async -> Result<Reply, Failure> {
+        await call("POST", itemPath(id, "dismiss"), body: [:])
+    }
+
+    /// The undo of `dismiss`.
+    static func undismiss(_ id: String) async -> Result<Reply, Failure> {
+        await call("POST", itemPath(id, "undismiss"), body: [:])
     }
 
     /// `POST /v1/desktop/inbox/new` — a new T3 thread and its first turn.

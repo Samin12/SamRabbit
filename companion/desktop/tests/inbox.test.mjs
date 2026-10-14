@@ -7,9 +7,9 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
-  InboxStore, actionInfo, agentLabel, answersOnTap, buildAnswers, buildSections, failureNote, filterCounts, keyAction,
-  keyName, keyRow, needsYou, normalizeDetail, normalizeInbox, normalizeItem, optimisticItem, recommendedOption,
-  resolveChoice, rowIds, shownCounts, sortItems,
+  DISMISS_STALE_MS, InboxStore, actionInfo, agentLabel, answersOnTap, buildAnswers, buildSections, canDismiss,
+  dismissProblem, failureNote, filterCounts, keyAction, keyName, keyRow, needsYou, normalizeDetail, normalizeInbox,
+  normalizeItem, optimisticItem, recommendedOption, resolveChoice, rowIds, selectionAfterDismiss, shownCounts, sortItems,
 } from '../web/inbox.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../dev/samples/inbox.json', import.meta.url), 'utf8'));
@@ -171,4 +171,94 @@ test('item details keep the last 12 messages with text', () => {
   assert.equal(detail.messages.length, 12);
   assert.equal(detail.messages.at(-1).text, 'm14');
   assert.equal(detail.item.id, fixture.inbox.items[0].id);
+});
+
+test('dismissed: every fixture item can be; a dismissed item is never a row; counts.dismissed decodes', () => {
+  assert.ok(inbox().items.every(canDismiss));
+  assert.equal(canDismiss(normalizeItem({ id: 't3:x', can: ['reply'] })), false, 'a bridge before W8 offers no ✕');
+  assert.equal(canDismiss(normalizeItem({ id: 'pending:x', can: ['dismiss'] })), false, 'a task on its way');
+  const decoded = normalizeInbox({
+    revision: 4, counts: { needsYou: 1, working: 0, total: 1, dismissed: 2 },
+    items: [{ id: 't3:a', status: 'error', can: ['dismiss'] }, { id: 't3:b', status: 'error', dismissed: true, can: ['undismiss'] }],
+  });
+  assert.deepEqual(decoded.items.map((i) => i.id), ['t3:a']);
+  assert.equal(decoded.counts.dismissed, 2);
+  assert.equal(inbox().counts.dismissed, 0, 'no count from the bridge: 0');
+});
+
+test('dismissing: gone at once, kept gone until the bridge’s list at its revision, back when that list has it', () => {
+  const store = new InboxStore();
+  store.apply(fixture.inbox, 1000);
+  const failed = store.item('t3:th_watch_previews');
+  const before = store.counts();
+  store.dismiss(failed, 1000);
+  assert.equal(store.item(failed.id), null, 'gone at once');
+  assert.equal(store.counts().needsYou, before.needsYou - 1, 'and from the counts');
+  store.apply(fixture.inbox, 1100);
+  assert.equal(store.item(failed.id), null, 'an answer from before the bridge hid it: still gone');
+  store.confirmDismiss(failed.id, 2);
+  store.apply({ ...fixture.inbox, revision: 2, items: fixture.inbox.items.filter((i) => i.id !== failed.id) }, 1200);
+  assert.equal(store.isDismissed(failed.id), false, 'from then on the bridge decides');
+  store.apply({ ...fixture.inbox, revision: 3 }, 1300);
+  assert.ok(store.item(failed.id), 'it changed on the bridge and came back by itself');
+  // A yes that comes after the answer it settles holds nothing back.
+  store.dismiss(failed, 1400);
+  store.apply({ ...fixture.inbox, revision: 4, items: fixture.inbox.items.filter((i) => i.id !== failed.id) }, 1500);
+  store.confirmDismiss(failed.id, 4);
+  assert.equal(store.isDismissed(failed.id), false);
+  // A refusal puts it back.
+  store.apply({ ...fixture.inbox, revision: 5 }, 1600);
+  store.dismiss(failed, 1600);
+  assert.equal(store.failDismiss(failed.id), true);
+  assert.ok(store.item(failed.id));
+  // Nothing settles it in 30 s: the inbox's own list again.
+  store.dismiss(failed, 2000);
+  assert.equal(store.tick(2000 + DISMISS_STALE_MS), true);
+  assert.ok(store.item(failed.id));
+});
+
+test('undo: back at once from the copy kept here, until the inbox carries it again; a failed undo hides it again', () => {
+  const store = new InboxStore();
+  store.apply(fixture.inbox, 1000);
+  const done = store.item('t3:th_release_notes');
+  const without = { ...fixture.inbox, revision: 2, items: fixture.inbox.items.filter((i) => i.id !== done.id) };
+  store.dismiss(done, 1000);
+  store.confirmDismiss(done.id, 2);
+  store.apply(without, 1100);
+  assert.equal(store.item(done.id), null);
+  store.undo(done, 1200);
+  assert.equal(store.item(done.id).unread, true, 'back at once, as unread as it was');
+  store.apply(without, 1300);
+  assert.ok(store.item(done.id), 'an answer from before the undo doesn’t take it away');
+  store.confirmUndo(done.id, 3);
+  store.apply({ ...fixture.inbox, revision: 3 }, 1400);
+  assert.equal(store.restored.size, 0, 'the inbox carries it again');
+  assert.ok(store.item(done.id));
+  store.dismiss(done, 1500);
+  store.undo(done, 1500);
+  store.failUndo(done.id, 1600);
+  assert.equal(store.item(done.id), null, 'the bridge still keeps it dismissed');
+  store.undo(done, 1700);
+  store.undoNotNeeded(done.id);
+  assert.ok(store.item(done.id), 'the dismissal never happened: the inbox’s own row');
+});
+
+test('keys: X dismisses the selected row, the next one is selected; what a refusal says', () => {
+  const rows = inbox().items.map(keyRow);
+  const first = rows[0].id;
+  assert.equal(rows[0].canDismiss, true);
+  assert.deepEqual(keyAction('dismiss', rows, first), { type: 'dismiss', id: first });
+  assert.deepEqual(keyAction('dismiss', rows, null), { type: 'none' }, 'nothing selected: nothing goes');
+  assert.deepEqual(keyAction('dismiss', rows, first, { composing: true }), { type: 'none' });
+  assert.deepEqual(keyAction('dismiss', [{ ...rows[0], canDismiss: false }], first), { type: 'none' });
+  assert.equal(keyName({ key: 'x' }), 'dismiss');
+  assert.equal(keyName({ key: 'X' }), 'dismiss');
+  assert.equal(keyName({ key: 'x', metaKey: true }), null, '⌘X is the fields’ cut');
+  assert.equal(selectionAfterDismiss(['a', 'b', 'c'], 'a'), 'b');
+  assert.equal(selectionAfterDismiss(['a', 'b', 'c'], 'c'), 'b', 'the last: the one before it');
+  assert.equal(selectionAfterDismiss(['a'], 'a'), null);
+  assert.equal(selectionAfterDismiss(['a'], 'z'), null);
+  assert.match(dismissProblem({ status: 0 }), /^Couldn’t dismiss it: the Mac bridge isn’t answering/);
+  assert.match(dismissProblem({ status: 404 }, { undo: true }), /^Couldn’t bring it back: update the bridge/);
+  assert.match(dismissProblem({ status: 404, code: 'item_not_found' }), /gone from the inbox/);
 });

@@ -239,8 +239,43 @@ enum DockSnapshots {
                 save(name, canvas, VStack { sheet }.frame(width: canvas.width, height: canvas.height))
             }
         }
+        // 19–22. Dismissing (W8): the ✕ on a row under the pointer, the Dismiss button in an open row, the row gone
+        //        with "Dismissed · Undo" (one fewer needing him), and a dismissal that failed (the row back, and why).
+        do {
+            let failed = "t3:th_watch_previews"
+            let (store, ui) = fixture.make()
+            ui.expanded = true
+            ui.selected = failed
+            ui.hoveredRow = failed
+            save("dock-dismiss-1-hover.png", CGSize(width: 680, height: 1000), Stage { panel(store, ui, idleVoice) })
+        }
+        do {
+            let failed = "t3:th_watch_previews"
+            let (store, ui) = fixture.make()
+            ui.expanded = true
+            ui.selected = failed
+            ui.expandedRow = failed
+            save("dock-dismiss-2-open.png", CGSize(width: 680, height: 1000), Stage { panel(store, ui, idleVoice) })
+        }
+        do {
+            let failed = "t3:th_watch_previews"
+            let (store, ui) = fixture.make()
+            ui.expanded = true
+            ui.selected = DockKeyboard.selection(afterDismissing: failed,
+                                                 rows: DockSection.visibleIds(store.sections, earlierOpen: false))
+            store.fixtureDismiss(failed)
+            save("dock-dismiss-3-toast.png", CGSize(width: 680, height: 1000), Stage { panel(store, ui, idleVoice) })
+        }
+        do {
+            let failed = "t3:th_watch_previews"
+            let (store, ui) = fixture.make()
+            ui.expanded = true
+            ui.selected = failed
+            store.fixtureDismiss(failed, failure: DockStore.dismissProblem(DockAPI.Failure(status: 0), undo: false))
+            save("dock-dismiss-4-failed.png", CGSize(width: 680, height: 1000), Stage { panel(store, ui, idleVoice) })
+        }
         for path in written { print(path) }
-        return written.count == 18 ? 0 : 1
+        return written.count == 22 ? 0 : 1
     }
 
     /// A small label under a state (dev snapshots only).

@@ -1569,10 +1569,12 @@ class T3Hub:
         pairs.sort(key=lambda entry: entry[0])
         return [(thread, item) for _key, thread, item in pairs]
 
-    def threads(self, filter_name: Optional[str] = None, *, limit: int = 40,
-                max_age: float = SHELL_MAX_AGE) -> List[Dict[str, Any]]:
+    def threads(self, filter_name: Optional[str] = None, *, limit: int = 40, max_age: float = SHELL_MAX_AGE,
+                hide: Optional[Callable[[Dict[str, Any]], bool]] = None) -> List[Dict[str, Any]]:
+        """The threads, most urgent first. ``hide``: True for an item to leave out (the inbox's dismissed threads,
+        ``samrabbit_inbox.InboxService.t3_dismissed``), before the filter and the limit."""
         snapshot = self.snapshot(max_age)
-        ordered = [item for _thread, item in self._ordered(snapshot)]
+        ordered = [item for _thread, item in self._ordered(snapshot) if hide is None or not hide(item)]
         if filter_name == "needs_you":
             ordered = [item for item in ordered if item["status"] in MOBILE_NEEDS_YOU]
         elif filter_name == "working":
@@ -1584,10 +1586,12 @@ class T3Hub:
             raise T3Error(400, "invalid_filter", "filter must be needs_you, working or recent.")
         return ordered[:max(1, min(100, limit))]
 
-    def summary_part(self, snapshot: Optional[_Snapshot]) -> Dict[str, Any]:
+    def summary_part(self, snapshot: Optional[_Snapshot], *,
+                     hide: Optional[Callable[[Dict[str, Any]], bool]] = None) -> Dict[str, Any]:
+        """``summary.t3``: the counts and the first five threads, less what ``hide`` leaves out (as ``threads``)."""
         if snapshot is None:
             return {"available": False, "needsYou": 0, "working": 0, "threads": []}
-        items = [item for _thread, item in self._ordered(snapshot)]
+        items = [item for _thread, item in self._ordered(snapshot) if hide is None or not hide(item)]
         return {"available": True,
                 "needsYou": sum(1 for item in items if item["status"] in MOBILE_NEEDS_YOU),
                 "working": sum(1 for item in items if item["status"] == "working"),
@@ -1954,7 +1958,7 @@ class UnavailableHub:
     def error(self) -> T3Error:
         return T3Error(503, self.code, self.message)
 
-    def summary_part(self, _snapshot: Any) -> Dict[str, Any]:
+    def summary_part(self, _snapshot: Any, **_kwargs: Any) -> Dict[str, Any]:
         return {"available": False, "needsYou": 0, "working": 0, "threads": [], "reason": self.code}
 
     def __getattr__(self, name: str) -> Any:

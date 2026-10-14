@@ -3,9 +3,11 @@ import SwiftUI
 
 /// One T3 Code thread: its messages (Markdown), what it waits for, a composer and Stop. Opening a finished or failed
 /// one is seeing it: it is marked seen through the inbox (here and on the Mac's dock), and Mark seen stays at hand
-/// should that fail. While T3 Code isn't answering it shows its last state, read-only.
+/// should that fail; Dismiss hides it (here and on the Mac) until it changes. While T3 Code isn't answering it shows
+/// its last state, read-only.
 struct ThreadDetailView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var close
     let threadId: String
     @State private var detail: ThreadDetail?
     @State private var error: BridgeError?
@@ -118,6 +120,18 @@ struct ThreadDetailView: View {
                     }
                     .disabled(model.busyItems.contains(listed.id))
                     .accessibilityIdentifier("thread-detail-seen")
+                }
+            }
+            if let listed, listed.canDismiss, !stale {
+                ToolbarItem(placement: .topBarTrailing) {
+                    // Hidden here and on the Mac until it changes (T3 itself is never told); back to the list.
+                    Button {
+                        model.dismiss(listed)
+                        close()
+                    } label: {
+                        Label("Dismiss", systemImage: "eye.slash")
+                    }
+                    .accessibilityIdentifier("thread-detail-dismiss")
                 }
             }
         }

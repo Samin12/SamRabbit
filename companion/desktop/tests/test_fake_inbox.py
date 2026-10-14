@@ -110,7 +110,8 @@ class FakeInboxTest(unittest.TestCase):
         self.assertEqual({i["source"] for i in items}, {"t3", "claude", "codex", "samrabbit"})
         self.assertEqual({i["status"] for i in items}, {"needs-approval", "needs-input", "error", "done", "working", "idle"})
         # Counted like the bridge: "working" includes the SamRabbit chat that is streaming a reply.
-        self.assertEqual(body["counts"], {"needsYou": 6, "working": 5, "total": 15})
+        self.assertEqual(body["counts"], {"needsYou": 6, "working": 5, "total": 15, "dismissed": 0})
+        self.assertTrue(all("dismiss" in i["can"] for i in items), "every item can be dismissed, as from the bridge")
         self.assertTrue(any(i["source"] == "samrabbit" and i["status"] == "working" for i in items))
         self.assertTrue(any(len(i["title"]) > 100 for i in items), "a long title")
         approval = next(i for i in items if i["pending"]["approvals"])
@@ -159,6 +160,39 @@ class FakeInboxTest(unittest.TestCase):
         self.assertEqual(detail["messages"][-1], {"role": "user", "text": "Ship it", "at": detail["messages"][-1]["at"]})
         status, _ = self.call("POST", "/v1/desktop/inbox/items/t3:th_snapshot_cache/stop", {})
         self.assertEqual((status, self.item("t3:th_snapshot_cache")["status"]), (200, "idle"))
+
+    def test_dismiss_hides_until_it_changes_and_undo_brings_it_back(self) -> None:
+        before = self.inbox()
+        status, body = self.call("POST", "/v1/desktop/inbox/items/t3:th_watch_previews/dismiss", {})
+        self.assertEqual((status, body["ok"], body["dismissed"]), (200, True, True))
+        self.assertGreater(body["revision"], before["revision"])
+        after = self.inbox()
+        self.assertNotIn("t3:th_watch_previews", [i["id"] for i in after["items"]])
+        self.assertEqual((after["counts"]["needsYou"], after["counts"]["total"], after["counts"]["dismissed"]),
+                         (before["counts"]["needsYou"] - 1, before["counts"]["total"] - 1, 1))
+        status, everything = self.call("GET", "/v1/desktop/inbox?include=dismissed")
+        hidden = [i for i in everything["items"] if i.get("dismissed")]
+        self.assertEqual([i["id"] for i in hidden], ["t3:th_watch_previews"])
+        self.assertIn("undismiss", hidden[0]["can"])
+        self.assertNotIn("dismiss", hidden[0]["can"])
+        self.assertFalse(hidden[0]["unread"], "dismissing marks it seen")
+        # The undo: back, as unread as it was.
+        status, body = self.call("POST", "/v1/desktop/inbox/items/t3:th_watch_previews/undismiss", {})
+        self.assertEqual((status, body["dismissed"]), (200, False))
+        self.assertTrue(self.item("t3:th_watch_previews")["unread"])
+        # It comes back by itself when it changes (a reply makes it work).
+        self.call("POST", "/v1/desktop/inbox/items/t3:th_release_notes/dismiss", {})
+        self.assertNotIn("t3:th_release_notes", [i["id"] for i in self.inbox()["items"]])
+        self.call("POST", "/v1/desktop/inbox/items/t3:th_release_notes/reply", {"text": "One more thing"})
+        self.assertEqual(self.item("t3:th_release_notes")["status"], "working")
+        self.assertEqual(self.inbox()["counts"]["dismissed"], 0)
+        # A refused action (dev): 503, nothing changes.
+        self.call("POST", "/dev/inbox/refuse", {"actions": ["dismiss"]})
+        status, body = self.call("POST", "/v1/desktop/inbox/items/t3:th_watch_previews/dismiss", {})
+        self.assertEqual((status, body["error"]["code"]), (503, "dev_refused"))
+        self.assertIn("t3:th_watch_previews", [i["id"] for i in self.inbox()["items"]])
+        self.call("POST", "/dev/inbox/refuse", {"actions": []})
+        self.assertEqual(self.call("POST", "/v1/desktop/inbox/items/t3:nope/dismiss", {})[0], 404)
 
     def test_live_sessions_and_open(self) -> None:
         status, body = self.call("POST", "/v1/desktop/inbox/items/codex:019a7788-99aa-4bbc-8cde-f00112233445/reply",

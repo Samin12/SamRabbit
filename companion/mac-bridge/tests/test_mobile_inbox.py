@@ -75,6 +75,8 @@ class PhoneAuthTest(PhoneInboxBase):
                   ("POST", "/v1/mobile/inbox/items/t3:t-done/reply", {"text": REPLY}),
                   ("POST", "/v1/mobile/inbox/items/t3:t-running/stop", {}),
                   ("POST", "/v1/mobile/inbox/items/t3:t-done/seen", {}),
+                  ("POST", "/v1/mobile/inbox/items/t3:t-error/dismiss", {}),
+                  ("POST", "/v1/mobile/inbox/items/t3:t-error/undismiss", {}),
                   ("POST", "/v1/mobile/inbox/items/t3:t-done/open", {}),
                   ("GET", "/v1/mobile/inbox/nope", None), ("DELETE", "/v1/mobile/inbox", None)]
         for method, path, body in routes:
@@ -133,11 +135,13 @@ class PhoneListTest(PhoneInboxBase):
         self.assertTrue({"t3", "claude", "codex"} <= {item["source"] for item in phone["items"]},
                         "Claude Code and Codex sessions on the phone too")
         items = self.by_id(phone)
-        self.assertEqual(["approve", "reply", "stop"], items["t3:t-approval"]["can"])
-        self.assertEqual(["answer", "reply", "stop"], items["t3:t-input"]["can"])
-        self.assertEqual(["reply"], items["claude:" + IDS["done"]]["can"], "nobody runs it: a reply resumes it")
-        self.assertEqual([], items["claude:" + IDS["waiting"]]["can"], "a prompt in a terminal: only the Mac answers")
-        self.assertEqual([], items["codex:" + IDS["desk"]]["can"], "Codex Desktop owns its threads")
+        self.assertEqual(["approve", "reply", "stop", "dismiss"], items["t3:t-approval"]["can"])
+        self.assertEqual(["answer", "reply", "stop", "dismiss"], items["t3:t-input"]["can"])
+        self.assertEqual(["reply", "dismiss"], items["claude:" + IDS["done"]]["can"],
+                         "nobody runs it: a reply resumes it")
+        self.assertEqual(["dismiss"], items["claude:" + IDS["waiting"]]["can"],
+                         "a prompt in a terminal: only the Mac answers (it can still be dismissed)")
+        self.assertEqual(["dismiss"], items["codex:" + IDS["desk"]]["can"], "Codex Desktop owns its threads")
         self.assertIn("open", self.by_id(self.get_inbox())["t3:t-approval"]["can"],
                       "the dock's own list is untouched: the phone's view is a copy")
         self.assert_log_clean(SECRET_PROMPT, SECRET_ANSWER, "5521")
@@ -179,13 +183,13 @@ class PhoneListTest(PhoneInboxBase):
         self.assertEqual(200, status, value)
         status, dock = self.call("GET", "/v1/desktop/inbox/items/t3:t-approval", desktop=True)
         self.assertEqual(({"item", "messages"}, dock["messages"]), (set(value), value["messages"]))
-        self.assertEqual(["approve", "reply", "stop"], value["item"]["can"])
+        self.assertEqual(["approve", "reply", "stop", "dismiss"], value["item"]["can"])
         self.assertEqual(["req-approve-1"], [entry["requestId"] for entry in value["item"]["pending"]["approvals"]])
         status, value = self.call("GET", "/v1/mobile/inbox/items/claude:" + IDS["done"], token=self.phone)
         self.assertEqual(200, status, value)
         self.assertEqual([("user", SECRET_PROMPT), ("assistant", "Looking at it.\n\n" + SECRET_ANSWER)],
                          [(entry["role"], entry["text"]) for entry in value["messages"]])
-        self.assertEqual(["reply"], value["item"]["can"])
+        self.assertEqual(["reply", "dismiss"], value["item"]["can"])
         status, value = self.call("GET", "/v1/mobile/inbox/items/claude:" + IDS["sdk"], token=self.phone)
         self.assertEqual((404, "item_not_found"), (status, value["error"]["code"]))
 
@@ -223,6 +227,100 @@ class PhoneSeenTest(PhoneInboxBase):
                     self.assertFalse(items[item_id]["unread"])
                     self.assertNotIn("seen", items[item_id]["can"])
         self.assertEqual([], self.fake_t3.dispatched, "seen dispatches nothing to T3")
+
+
+# ====================================================================== dismiss
+
+
+class PhoneDismissTest(PhoneInboxBase):
+    def test_what_the_phone_dismisses_is_dismissed_in_the_dock_and_back(self) -> None:
+        self.build_world()
+        dock = self.get_inbox()
+        start = self.phone_inbox()
+        self.assertTrue(all("dismiss" in item["can"] for item in start["items"]), "every item, on the phone too")
+        answers: List[Dict[str, Any]] = []
+        waiter = threading.Thread(target=lambda: answers.append(self.get_inbox(f"?after={dock['revision']}&wait=20")))
+        waiter.start()
+        time.sleep(0.3)
+        status, answer = self.phone_act("t3:t-error", "dismiss")
+        self.assertEqual((200, True), (status, answer["dismissed"]))
+        waiter.join(timeout=15)
+        self.assertFalse(waiter.is_alive(), "the dock's long poll wakes up")
+        self.assertNotIn("t3:t-error", self.by_id(answers[0]))
+        self.assertEqual(start["counts"]["needsYou"] - 1, answers[0]["counts"]["needsYou"])
+        phone = self.phone_inbox()
+        self.assertEqual((answers[0]["revision"], answers[0]["counts"]), (phone["revision"], phone["counts"]))
+        self.assertNotIn("t3:t-error", self.by_id(phone))
+        # What the dock dismisses is gone from the phone too; ?include=dismissed works there, without open.
+        status, answer = self.act("claude:" + IDS["done"], "dismiss")
+        self.assertEqual(200, status, answer)
+        status, everything = self.call("GET", "/v1/mobile/inbox?include=dismissed", token=self.phone)
+        self.assertEqual(200, status, everything)
+        hidden = {item["id"]: item for item in everything["items"] if item.get("dismissed")}
+        self.assertEqual({"t3:t-error", "claude:" + IDS["done"]}, set(hidden))
+        self.assertEqual(["reply", "undismiss"], hidden["claude:" + IDS["done"]]["can"])
+        self.assertEqual(["reply", "open", "undismiss"],
+                         self.by_id(self.get_inbox("?include=dismissed"))["claude:" + IDS["done"]]["can"])
+        # The phone's undo, seen by the dock.
+        status, answer = self.phone_act("t3:t-error", "undismiss")
+        self.assertEqual((200, False), (status, answer["dismissed"]))
+        self.assertIn("t3:t-error", self.by_id(self.get_inbox()))
+        self.assertEqual(1, self.phone_inbox()["counts"]["dismissed"])
+        status, answer = self.phone_act("claude:" + IDS["sdk"], "dismiss")
+        self.assertEqual((404, "item_not_found"), (status, answer["error"]["code"]))
+        self.assertEqual([], self.fake_t3.dispatched, "dismissing never touches T3")
+        self.assertEqual([], self.recorder.calls, "nor opens anything")
+        log = self.log.getvalue()
+        for label in ("POST /v1/mobile/inbox/items/{id}/dismiss 200", "POST /v1/mobile/inbox/items/{id}/undismiss 200",
+                      "POST /v1/desktop/inbox/items/{id}/dismiss 200"):
+            self.assertIn(label, log)
+        self.assertNotIn("t-error", log, "route templates only: no item ids")
+
+
+    def test_a_dismissed_thread_leaves_t3s_own_lists_until_it_changes(self) -> None:
+        """What the watch, the phone's background alerts, its fallback list and the voice assistants read
+        (``summary.t3``, ``/v1/mobile/t3/threads``) leaves out what was dismissed in the inbox, as the inbox does."""
+        self.build_world()
+        self.phone_inbox()
+
+        def summary(path: str = "/v1/mobile/summary") -> Dict[str, Any]:
+            status, value = (self.call("GET", path, desktop=True) if path.startswith("/v1/desktop")
+                             else self.call("GET", path, token=self.phone))
+            self.assertEqual(200, status, value)
+            return value["t3"]
+
+        def listed(query: str = "") -> List[Dict[str, Any]]:
+            status, value = self.call("GET", "/v1/mobile/t3/threads" + query, token=self.phone)
+            self.assertEqual(200, status, value)
+            return value["threads"]
+
+        before = summary()
+        self.assertEqual(["t-approval", "t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        status, answer = self.phone_act("t3:t-approval", "dismiss")
+        self.assertEqual((200, True), (status, answer["dismissed"]))
+        for path in ("/v1/mobile/summary", "/v1/desktop/summary"):
+            with self.subTest(summary=path):
+                part = summary(path)
+                self.assertEqual(before["needsYou"] - 1, part["needsYou"], "at once: no summary from before it")
+                self.assertNotIn("t-approval", [item["threadId"] for item in part["threads"]])
+        self.assertEqual(["t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        self.assertNotIn("t-approval", [item["threadId"] for item in listed()], "the watch's whole list too")
+        everything = listed("?include=dismissed")
+        self.assertEqual([True], [item.get("dismissed") for item in everything if item["threadId"] == "t-approval"])
+        self.assertEqual(1, sum(1 for item in everything if "dismissed" in item), "only the dismissed one says so")
+        # The undo brings it back everywhere.
+        self.phone_act("t3:t-approval", "undismiss")
+        self.assertEqual(before["needsYou"], summary()["needsYou"])
+        self.assertEqual(["t-approval", "t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        # Dismissed again, it comes back by itself when it changes (without waiting for the inbox to look again).
+        self.act("t3:t-approval", "dismiss")
+        self.assertEqual(["t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        with self.fake_t3.lock:
+            self.fake_t3.get_thread("t-approval")["updatedAt"] = "2026-10-08T18:45:00.000Z"
+        self.hub.invalidate()
+        self.assertEqual(["t-approval", "t-input"], [item["threadId"] for item in listed("?filter=needs_you")])
+        self.assertEqual(before["needsYou"], summary()["needsYou"])
+        self.assertEqual([], self.fake_t3.dispatched, "dismissing never touches T3")
 
 
 # ====================================================================== T3 from the phone
@@ -320,7 +418,7 @@ class PhoneSessionTest(PhoneInboxBase):
         self.assertEqual((str(self.cwd), ["/opt/test/bin/claude", "--resume", IDS["done"], "--", REPLY]),
                          (folder, argv), "as from the dock: the reply is the prompt, the CLI's own prompts stay")
         item = self.by_id(self.phone_inbox())[item_id]
-        self.assertEqual((True, []), (item["live"], item["can"]), "its Terminal window is starting: live")
+        self.assertEqual((True, ["dismiss"]), (item["live"], item["can"]), "its Terminal window is starting: live")
         for answer in (self.phone_act(item_id, "reply", {"text": REPLY}), self.act(item_id, "reply", {"text": REPLY})):
             self.assertEqual((409, "session_live"), (answer[0], answer[1]["error"]["code"]),
                              "pressed again on the phone or in the dock: never a second CLI")

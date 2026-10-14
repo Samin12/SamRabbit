@@ -309,6 +309,17 @@ public final class BridgeClient: Sendable {
         try await send(.post(Self.inboxPath(itemId, "seen"), body: [:]))
     }
 
+    /// `POST /v1/mobile/inbox/items/<id>/dismiss`: hidden (and seen) here and on the Mac until it changes; the
+    /// bridge's own state only, nothing reaches T3, Claude Code or Codex.
+    public func inboxDismiss(_ itemId: String) async throws -> InboxDismissResult {
+        try await json(.post(Self.inboxPath(itemId, "dismiss"), body: [:]))
+    }
+
+    /// `POST /v1/mobile/inbox/items/<id>/undismiss`: the undo of `inboxDismiss`.
+    public func inboxUndismiss(_ itemId: String) async throws -> InboxDismissResult {
+        try await json(.post(Self.inboxPath(itemId, "undismiss"), body: [:]))
+    }
+
     /// `POST /v1/mobile/inbox/items/<id>/approve {requestId, decision}` (one of the approval's own options).
     public func inboxApprove(_ itemId: String, requestId: String, decision: String) async throws {
         try await send(.post(Self.inboxPath(itemId, "approve"),

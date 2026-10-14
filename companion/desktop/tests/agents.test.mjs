@@ -12,10 +12,13 @@ import { Resource } from '../web/resource.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../dev/samples/inbox.json', import.meta.url), 'utf8'));
 
-function fakeApi({ fail = null, newTask = { itemId: 't3:th_new' } } = {}) {
+function fakeApi({ fail = null, newTask = { itemId: 't3:th_new' }, hold = null } = {}) {
   const calls = [];
+  const log = []; // when each action started and finished (the order the bridge sees them in)
   return {
     calls,
+    log,
+    revision: 1,
     async inbox() {
       return fixture.inbox;
     },
@@ -25,7 +28,14 @@ function fakeApi({ fail = null, newTask = { itemId: 't3:th_new' } } = {}) {
     },
     async act(id, action, body) {
       calls.push(['act', id, action, body]);
-      if (fail) throw fail;
+      log.push(`act ${id} ${action}`);
+      if (hold && hold.action === action) await hold.promise;
+      log.push(`done ${id} ${action}`);
+      if (fail && (!fail.only || fail.only === action)) throw fail;
+      if (action === 'dismiss' || action === 'undismiss') {
+        this.revision += 1;
+        return { ok: true, dismissed: action === 'dismiss', revision: this.revision };
+      }
       return action === 'open' ? { opened: true, how: 'terminal' } : { ok: true };
     },
     async targets() {
@@ -201,4 +211,103 @@ test('a Resource shares one read at a time and keeps the last value when a read 
   await resource.refresh();
   assert.deepEqual(resource.value, { n: 1 });
   assert.ok(resource.error);
+});
+
+test('dismiss: gone at once, then the bridge; the undo brings it back and goes after the dismissal', async () => {
+  const api = fakeApi();
+  const inbox = loaded(api);
+  const item = inbox.item('t3:th_watch_previews');
+  const needs = inbox.counts().needsYou;
+  const events = [];
+  inbox.on((what) => events.push(what));
+  const pending = inbox.dismiss(item);
+  assert.equal(inbox.item(item.id), null, 'gone at once');
+  assert.equal(inbox.counts().needsYou, needs - 1);
+  assert.ok(events.some((e) => e.dismissed === item.id));
+  assert.equal(inbox.undoable().id, item.id, '⌘Z has something to bring back');
+  assert.deepEqual(await pending, { ok: true, problem: null });
+  assert.deepEqual(api.calls.find((c) => c[0] === 'act'), ['act', item.id, 'dismiss', {}]);
+  assert.equal(inbox.item(item.id), null, 'still gone until the inbox catches up');
+  assert.deepEqual(await inbox.undoDismiss(item), { ok: true, problem: null });
+  assert.ok(inbox.item(item.id), 'back');
+  assert.equal(inbox.counts().needsYou, needs);
+  assert.deepEqual(api.calls.filter((c) => c[0] === 'act').map((c) => c[2]), ['dismiss', 'undismiss']);
+  assert.equal(inbox.undoable(), null);
+});
+
+test('an undo pressed while the dismissal is on its way waits for it (the bridge never gets them out of order)', async () => {
+  let release;
+  const hold = { action: 'dismiss', promise: new Promise((resolve) => { release = resolve; }) };
+  const api = fakeApi({ hold });
+  const inbox = loaded(api);
+  const item = inbox.item('t3:th_release_notes');
+  const dismissed = inbox.dismiss(item);
+  const undone = inbox.undoDismiss(item);
+  assert.ok(inbox.item(item.id), 'back at once');
+  await Promise.resolve();
+  assert.deepEqual(api.calls.filter((c) => c[0] === 'act').map((c) => c[2]), ['dismiss'], 'the undo waits');
+  release();
+  await dismissed;
+  await undone;
+  assert.deepEqual(api.log,
+    [`act ${item.id} dismiss`, `done ${item.id} dismiss`, `act ${item.id} undismiss`, `done ${item.id} undismiss`]);
+  assert.ok(inbox.item(item.id));
+});
+
+test('dismiss, Undo, dismiss again before the first answer: the bridge gets the three in order and keeps it dismissed', async () => {
+  let release;
+  const hold = { action: 'dismiss', promise: new Promise((resolve) => { release = resolve; }) };
+  const api = fakeApi({ hold });
+  const inbox = loaded(api);
+  const item = inbox.item('t3:th_release_notes');
+  const id = item.id;
+  const first = inbox.dismiss(item);
+  const undo = inbox.undoDismiss(item);
+  const again = inbox.dismiss(item);
+  assert.equal(inbox.item(id), null, 'hidden: the last thing he did');
+  await Promise.resolve();
+  assert.deepEqual(api.calls.filter((c) => c[0] === 'act').map((c) => c[2]), ['dismiss'], 'the others wait');
+  release();
+  const done = { ok: true, problem: null };
+  assert.deepEqual(await Promise.all([first, undo, again]), [done, done, done]);
+  assert.deepEqual(api.log, [`act ${id} dismiss`, `done ${id} dismiss`, `act ${id} undismiss`, `done ${id} undismiss`,
+    `act ${id} dismiss`, `done ${id} dismiss`]);
+  assert.equal(inbox.dismissCalls.size, 0, 'nothing left to wait for');
+  // The bridge's list from after the undo (revision 3, the item in it) never shows it: the last dismissal settles at 4.
+  inbox.receive({ ...fixture.inbox, revision: 3 });
+  assert.equal(inbox.item(id), null);
+  inbox.receive({ ...fixture.inbox, revision: 4, items: fixture.inbox.items.filter((i) => i.id !== id) });
+  assert.equal(inbox.item(id), null);
+  assert.equal(inbox.store.isDismissed(id), false, 'the bridge\'s list decides from then on');
+  // And an undo now goes at once (nothing on its way to wait for).
+  assert.deepEqual(await inbox.undoDismiss(item), done);
+  assert.equal(api.log.at(-1), `done ${id} undismiss`);
+});
+
+test('a refused dismissal puts the row back and says why; a refused undo hides it again', async () => {
+  const api = fakeApi({ fail: Object.assign(new ApiError(0, '', 'offline'), { only: 'dismiss' }) });
+  const inbox = loaded(api);
+  const item = inbox.item('t3:th_watch_previews');
+  const result = await inbox.dismiss(item);
+  assert.equal(result.ok, false);
+  assert.match(result.problem, /^Couldn’t dismiss it: the Mac bridge isn’t answering/);
+  assert.ok(inbox.item(item.id), 'rolled back');
+  assert.equal(inbox.undoable(), null);
+  const undoApi = fakeApi({ fail: Object.assign(new ApiError(503, 'dev_refused', 'no'), { only: 'undismiss' }) });
+  const other = loaded(undoApi);
+  const again = other.item('t3:th_watch_previews');
+  await other.dismiss(again);
+  const undo = await other.undoDismiss(again);
+  assert.match(undo.problem, /^Couldn’t bring it back/);
+  assert.equal(other.item(again.id), null, 'the bridge still keeps it dismissed');
+  // A dismissal refused after its undo: nothing to say, the row stays.
+  const late = fakeApi({ fail: Object.assign(new ApiError(0, '', 'offline'), { only: 'dismiss' }) });
+  const third = loaded(late);
+  const row = third.item('t3:th_release_notes');
+  const first = third.dismiss(row);
+  const back = third.undoDismiss(row);
+  assert.deepEqual(await first, { ok: false, problem: null });
+  assert.deepEqual(await back, { ok: true, problem: null });
+  assert.ok(third.item(row.id));
+  assert.equal(late.calls.filter((c) => c[0] === 'act' && c[2] === 'undismiss').length, 0, 'no undismiss was needed');
 });

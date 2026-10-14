@@ -14,6 +14,7 @@ import { h } from './dom.js';
 import { createHome } from './home.js';
 import { icon } from './icons.js';
 import { keyName } from './inbox.js';
+import { undoLastDismiss } from './items.js';
 import { windowShortcut } from './keys.js';
 import { nativeState, onNative, params, postNative, receiveNative } from './native.js';
 import { createOrb } from './orb.js';
@@ -193,6 +194,9 @@ function runShortcut(shortcut) {
     case 'settings':
       show('settings');
       break;
+    case 'undo':
+      undoLastDismiss(agents);
+      break;
     default:
       break;
   }
@@ -201,7 +205,7 @@ function runShortcut(shortcut) {
 document.addEventListener('keydown', (event) => {
   const typing = document.activeElement && (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)
     || document.activeElement.isContentEditable);
-  const shortcut = windowShortcut(event, current);
+  const shortcut = windowShortcut(event, current, { typing });
   if (shortcut) {
     // Handled here (so the menus don't run it a second time); behind a sheet (a journal note, an unpair) nothing
     // moves: the sheet is modal.

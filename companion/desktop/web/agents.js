@@ -1,11 +1,12 @@
 // The live agent inbox of the window: the long poll, the open items' last messages, what a new task can be sent to,
-// drafts, and the actions (approve / answer / reply / stop / seen / open / new) with their optimistic results and a
-// short note when the bridge says no. Home and Tasks draw from it. No DOM; the API is injected (tests/agents.test.mjs
-// runs it against a fake).
+// drafts, and the actions (approve / answer / reply / stop / seen / open / new / dismiss and its undo) with their
+// optimistic results and a short note when the bridge says no. Home and Tasks draw from it. No DOM; the API is
+// injected (tests/agents.test.mjs runs it against a fake).
 
 import { InboxPoller } from './api.js';
 import {
-  InboxStore, actionInfo, agentLabel, buildAnswers, failureNote, normalizeDetail, optimisticItem, resolveChoice,
+  InboxStore, UNDO_MS, actionInfo, agentLabel, buildAnswers, canDismiss, dismissProblem, failureNote, normalizeDetail,
+  optimisticItem, resolveChoice,
 } from './inbox.js';
 
 export class AgentInbox {
@@ -29,6 +30,10 @@ export class AgentInbox {
     this.composeBusy = false;
     this.composeNote = null;
     this.watched = null;
+    // id -> the last dismiss / undismiss call for it: a promise of whether the bridge keeps the item dismissed after
+    // it. Each call waits for the one before (dismissCall), so the bridge gets them in the order they were made.
+    this.dismissCalls = new Map();
+    this.lastDismissed = null; // {item, at}: what ⌘Z brings back for a few seconds
     this.listeners = new Set();
     this.poller = poll ? new InboxPoller({
       fetchInbox: (options) => api.inbox(options),
@@ -229,6 +234,95 @@ export class AgentInbox {
 
   open(item) {
     return this.perform(item, 'open', {}, { optimistic: null });
+  }
+
+  /**
+   * Dismiss: the row goes at once (the counts with it), then `POST …/dismiss`; the bridge keeps it out of the list
+   * until it changes. Resolves to {ok, problem}: a refusal puts the row back and `problem` says why. Nothing reaches
+   * T3, Claude Code or Codex.
+   */
+  dismiss(item) {
+    if (!canDismiss(item) || this.store.isDismissed(item.id)) return Promise.resolve({ ok: false, problem: null });
+    this.store.dismiss(item, this.now());
+    this.notes.delete(item.id);
+    this.lastDismissed = { item, at: this.now() };
+    this.emit({ inbox: true, item: item.id, dismissed: item.id });
+    return this.dismissCall(item.id, async (_before, latest) => {
+      try {
+        const reply = await this.api.act(item.id, 'dismiss', {});
+        // Undone (or dismissed again) meanwhile: the rows are the later call's.
+        if (latest()) this.store.confirmDismiss(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
+        this.poller?.poke();
+        return { dismissed: true, result: { ok: true, problem: null } };
+      } catch (error) {
+        let shown = false;
+        if (latest()) {
+          shown = this.store.failDismiss(item.id);
+          if (this.lastDismissed && this.lastDismissed.item.id === item.id) this.lastDismissed = null;
+        }
+        // Undone meanwhile: nothing to say.
+        return { dismissed: false, result: { ok: false, problem: shown ? dismissProblem(error) : null } };
+      } finally {
+        this.emit({ inbox: true, item: item.id });
+      }
+    });
+  }
+
+  /**
+   * The undo: the row is back at once (as it was), then `POST …/undismiss`, after the dismissal's own call if it is
+   * still on its way. Resolves to {ok, problem}: a refusal hides it again and `problem` says why.
+   */
+  async undoDismiss(item) {
+    if (!item) return { ok: false, problem: null };
+    if (this.lastDismissed && this.lastDismissed.item.id === item.id) this.lastDismissed = null;
+    this.store.undo(item, this.now());
+    this.emit({ inbox: true, item: item.id, undone: item.id });
+    return this.dismissCall(item.id, async (before, latest) => {
+      if (before === false) {
+        // The dismissal it undoes failed (or it is back already): nothing to undo, the inbox's own row stays.
+        if (latest()) this.store.undoNotNeeded(item.id);
+        this.emit({ inbox: true, item: item.id });
+        return { dismissed: false, result: { ok: true, problem: null } };
+      }
+      try {
+        const reply = await this.api.act(item.id, 'undismiss', {});
+        if (latest()) this.store.confirmUndo(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
+        this.poller?.poke();
+        return { dismissed: false, result: { ok: true, problem: null } };
+      } catch (error) {
+        const mine = latest();
+        if (mine) this.store.failUndo(item.id, this.now());
+        return { dismissed: true, result: { ok: false, problem: mine ? dismissProblem(error, { undo: true }) : null } };
+      } finally {
+        this.emit({ inbox: true, item: item.id });
+      }
+    });
+  }
+
+  /**
+   * Runs one dismiss / undismiss call for `id` after the one before it, so the bridge gets them in the order they
+   * were made (dismiss, Undo, dismiss again ends dismissed). `run(before, latest)` gets whether the bridge kept the
+   * item dismissed after that call (undefined: none) and `latest()`, true while no later call for `id` was made
+   * (only the latest one changes the rows: an earlier one's answer is the later one's to settle). It resolves to
+   * {dismissed, result}; this resolves to `result`.
+   */
+  dismissCall(id, run) {
+    const before = this.dismissCalls.get(id);
+    let tail = null;
+    const latest = () => this.dismissCalls.get(id) === tail;
+    const call = (async () => run(before ? await before : undefined, latest))();
+    tail = call.then((outcome) => outcome.dismissed, () => false);
+    this.dismissCalls.set(id, tail);
+    tail.then(() => {
+      if (this.dismissCalls.get(id) === tail) this.dismissCalls.delete(id);
+    });
+    return call.then((outcome) => outcome.result);
+  }
+
+  /** What ⌘Z would bring back (the last dismissal, for as long as its toast shows), or null. */
+  undoable() {
+    const last = this.lastDismissed;
+    return last && this.now() - last.at < UNDO_MS ? last.item : null;
   }
 
   /**

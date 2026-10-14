@@ -18,6 +18,11 @@ enum InboxTests {
         ("quietWhileTerminalSessionsFlap", quietWhileTerminalSessionsFlap),
         ("smokeRunsOnlyAgainstTheFake", smokeRunsOnlyAgainstTheFake),
         ("formatsTimesAndText", formatsTimesAndText),
+        ("decodesDismissed", decodesDismissed),
+        ("dismissHidesAtOnceUntilTheBridgeAgrees", dismissHidesAtOnceUntilTheBridgeAgrees),
+        ("dismissThatFailsComesBackAndSaysWhy", dismissThatFailsComesBackAndSaysWhy),
+        ("undoBringsItBackUntilTheInboxHasIt", undoBringsItBackUntilTheInboxHasIt),
+        ("toastAndStaleEntriesExpire", toastAndStaleEntriesExpire),
     ]
 
     static func fixture() throws -> DockInbox { try DockInbox.decode(Fixture.inboxData()) }
@@ -328,5 +333,127 @@ enum InboxTests {
         expectEqual(DockText.oneLine("a\n\n b\tc  d"), "a b c d")
         expectEqual(DockText.clip("abcdefghij", 6), "abcde…")
         expectEqual(DockText.meta("SamRabbit", nil, " ", "Finished"), "SamRabbit · Finished")
+    }
+
+    // MARK: dismissing (W8)
+
+    static func inbox(_ revision: Int, _ items: [DockItem]) -> DockInbox {
+        DockInbox(revision: revision, updatedAt: nil, counts: DockCounts(needsYou: items.filter(\.needsYou).count,
+                                                                         working: 0, total: items.count),
+                  sources: [:], items: items)
+    }
+
+    static func decodesDismissed() throws {
+        let inbox = try fixture()
+        expect(inbox.items.allSatisfy(\.canDismiss), "every fixture item can be dismissed")
+        expect(inbox.items.allSatisfy { !$0.dismissed })
+        expectEqual(inbox.counts.dismissed, 0, "a bridge without the count: 0")
+        let json = """
+        {"revision": 7, "counts": {"needsYou": 1, "working": 0, "total": 1, "dismissed": 2},
+         "items": [{"id": "t3:a", "status": "error", "title": "A", "can": ["reply", "dismiss"]},
+                   {"id": "t3:b", "status": "error", "title": "B", "can": ["reply", "undismiss"], "dismissed": true}]}
+        """
+        let decoded = try DockInbox.decode(Data(json.utf8))
+        expectEqual(decoded.items.map(\.id), ["t3:a"], "a dismissed item is never a row, even when a bridge sends it")
+        expectEqual(decoded.counts, DockCounts(needsYou: 1, working: 0, total: 1, dismissed: 2))
+        let old = try DockInbox.decode(Data(#"{"revision": 1, "counts": {"needsYou": 3, "working": 0, "total": 3}, "items": []}"#.utf8))
+        expectEqual(old.counts.needsYou, 3, "counts from a bridge before W8 still decode (no fallback to the rows)")
+        let plain = DockItem(id: "t3:x", source: "t3", title: "X", status: .error, can: ["reply"])
+        expect(!plain.canDismiss, "a bridge that can't dismiss offers no ✕")
+    }
+
+    static func dismissHidesAtOnceUntilTheBridgeAgrees() throws {
+        let now = Date()
+        let failed = DockItem(id: "t3:failed", source: "t3", title: "Hermes", status: .error, updatedAt: now, can: ["reply", "dismiss"])
+        let other = DockItem(id: "t3:other", source: "t3", title: "Greeting", status: .error, updatedAt: now, can: ["reply", "dismiss"])
+        var state = DockDismissals()
+        state.dismiss(failed, now: now)
+        expectEqual(state.shown([failed, other]).map(\.id), ["t3:other"], "gone at once")
+        expectEqual(state.toast?.kind, .dismissed)
+        expectEqual(state.toast?.item.title, "Hermes")
+        expect(state.toast?.offersUndo == true)
+        // A long poll that still carries it (the bridge hadn't hidden it yet): still hidden here.
+        state.apply(inbox(10, [failed, other]))
+        expectEqual(state.shown([failed, other]).map(\.id), ["t3:other"])
+        // The bridge's yes: its list leaves it out from revision 11.
+        state.confirmed("t3:failed", revision: 11, current: 10)
+        expect(state.isHidden("t3:failed"))
+        state.apply(inbox(11, [other]))
+        expect(!state.isHidden("t3:failed"), "from then on the bridge's list decides")
+        // It changed and came back on the bridge: it shows again by itself.
+        expectEqual(state.shown([failed, other]).map(\.id), ["t3:failed", "t3:other"])
+        // A yes that arrives after the answer it settles: nothing is held back.
+        state.dismiss(other, now: now)
+        state.apply(inbox(12, []))
+        state.confirmed("t3:other", revision: 12, current: 12)
+        expect(!state.isHidden("t3:other"))
+        expectEqual(state.shown([]).map(\.id), [])
+    }
+
+    static func dismissThatFailsComesBackAndSaysWhy() throws {
+        let now = Date()
+        let item = DockItem(id: "claude:s1", source: "claude", title: "Flaky test", status: .needsApproval, can: ["open", "dismiss"])
+        var state = DockDismissals()
+        state.dismiss(item, now: now)
+        expectEqual(state.shown([item]).count, 0)
+        state.failed(item.id, reason: "Couldn’t dismiss it: the Mac bridge isn’t answering.", now: now)
+        expectEqual(state.shown([item]).map(\.id), ["claude:s1"], "rolled back")
+        expectEqual(state.toast?.kind, .failed("Couldn’t dismiss it: the Mac bridge isn’t answering."))
+        expect(state.toast?.offersUndo == false, "nothing to undo")
+        var copy = state
+        expectEqual(copy.undo(now: now), nil)
+        // A failure the undo already took care of says nothing.
+        var undone = DockDismissals()
+        undone.dismiss(item, now: now)
+        _ = undone.undo(now: now)
+        undone.failed(item.id, reason: "x", now: now)
+        expectEqual(undone.toast, nil)
+        undone.undoNotNeeded(item.id)
+        expectEqual(undone.shown([item]).map(\.id), ["claude:s1"])
+    }
+
+    static func undoBringsItBackUntilTheInboxHasIt() throws {
+        let now = Date()
+        let item = DockItem(id: "t3:done", source: "t3", title: "Release notes", status: .done, updatedAt: now, unread: true,
+                            can: ["reply", "seen", "dismiss"])
+        var state = DockDismissals()
+        state.dismiss(item, now: now)
+        state.confirmed(item.id, revision: 21, current: 20)
+        state.apply(inbox(21, []))
+        expectEqual(state.shown([]).count, 0, "the bridge hides it now")
+        let back = state.undo(now: now)
+        expectEqual(back?.id, "t3:done")
+        expectEqual(state.toast, nil, "the toast goes with the undo")
+        expectEqual(state.shown([]).map(\.id), ["t3:done"], "back at once, from the copy kept here")
+        expectEqual(state.shown([]).first?.unread, true, "as unread as it was")
+        state.apply(inbox(21, []))
+        expectEqual(state.shown([]).map(\.id), ["t3:done"], "an older answer without it doesn't take it away")
+        state.undoConfirmed(item.id, revision: 22, current: 21)
+        var fresh = item
+        fresh.summary = "from the bridge"
+        state.apply(inbox(22, [fresh]))
+        expectEqual(state.shown([fresh]).map(\.summary), ["from the bridge"], "the inbox's own copy once it has it")
+        // An undo that fails: hidden again (the bridge still has it dismissed), and the toast says so.
+        var failing = DockDismissals()
+        failing.dismiss(item, now: now)
+        _ = failing.undo(now: now)
+        failing.undoFailed(item.id, reason: "Couldn’t bring it back: the Mac bridge isn’t answering.", now: now)
+        expectEqual(failing.shown([]).count, 0)
+        expectEqual(failing.toast?.offersUndo, false)
+    }
+
+    static func toastAndStaleEntriesExpire() throws {
+        let now = Date()
+        let item = DockItem(id: "t3:x", source: "t3", title: "X", status: .error, can: ["dismiss"])
+        var state = DockDismissals()
+        state.dismiss(item, now: now)
+        state.tick(now: now.addingTimeInterval(DockDismissals.toastSeconds - 0.5))
+        expect(state.toast != nil)
+        state.tick(now: now.addingTimeInterval(DockDismissals.toastSeconds + 0.1))
+        expectEqual(state.toast, nil, "the toast is short")
+        expect(state.isHidden("t3:x"), "the row stays gone")
+        state.tick(now: now.addingTimeInterval(DockDismissals.staleSeconds + 1))
+        expect(!state.isHidden("t3:x"), "nothing settled it in 30 s: the inbox's own list again")
+        expect(!state.hasWork)
     }
 }

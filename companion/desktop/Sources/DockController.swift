@@ -830,6 +830,13 @@ final class DockController: NSObject {
     private func keepCommandKey(_ event: NSEvent) -> Bool {
         guard event.window is DockPanelWindow, event.modifierFlags.contains(.command) else { return true }
         let flags = event.modifierFlags
+        // ⌘Z outside a field, while "Dismissed · Undo" shows: the undo (a field keeps its own ⌘Z).
+        if (event.charactersIgnoringModifiers ?? "").lowercased() == "z", !flags.contains(.shift),
+           !flags.contains(.control), !flags.contains(.option), !(event.window?.firstResponder is NSTextView),
+           store.dismissals.toast?.offersUndo == true {
+            undoDismissRow(store: store, ui: ui)
+            return false
+        }
         switch DockCommandKey.route(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers ?? "",
                                     shift: flags.contains(.shift), control: flags.contains(.control),
                                     option: flags.contains(.option)) {
@@ -1022,6 +1029,8 @@ final class DockController: NSObject {
             ui.expandedRow = id
             store.watched = id
             ui.focusRequest = .reply(id)
+        case .dismiss(let id):
+            if let item = store.item(id) { dismissRow(item, store: store, ui: ui) }
         case .compose:
             ui.focusRequest = .compose
         case .collapsePanel:

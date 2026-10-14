@@ -2,13 +2,14 @@ import Foundation
 
 // The expanded panel's keyboard, when the panel is the key window and no text field has the keys:
 // J/K or ↓/↑ move, Enter expands (and on an expanded row, opens it), E approves the open row's request with the
-// recommended option (only once the row is open, so the command it approves is on screen), R replies, N goes to the
-// compose field, Esc closes the row and then the panel. ⌘+/⌘−/⌘0 size the dock; every other ⌘ key is kept from the
+// recommended option (only once the row is open, so the command it approves is on screen), R replies, X dismisses the
+// selected row (the next one is selected, so X X X clears a run of them; ⌘Z or the toast's Undo brings one back), N goes
+// to the compose field, Esc closes the row and then the panel. ⌘+/⌘−/⌘0 size the dock; every other ⌘ key is kept from the
 // app's menus (⌘0 there opens the main window, ⌘K searches it, ⌘Q quits) except editing and the emoji picker.
 // Pure: the panel turns NSEvents into DockKey and carries out the DockKeyAction this answers.
 
 enum DockKey: Equatable {
-    case down, up, enter, approve, reply, compose, escape
+    case down, up, enter, approve, reply, dismiss, compose, escape
 }
 
 /// A ⌘ key pressed while a dock window has the keys. AppKit offers ⌘ keys to the main menu before the window sees
@@ -51,6 +52,7 @@ extension DockKey {
         case "k": return .up
         case "e": return .approve
         case "r": return .reply
+        case "x": return .dismiss
         case "n": return .compose
         default: return nil
         }
@@ -62,18 +64,21 @@ struct DockKeyRow: Equatable {
     let id: String
     var canOpen = false
     var canReply = false
+    var canDismiss = false
     /// The approval E would answer, with its recommended decision.
     var approval: (requestId: String, decision: String)?
 
     static func == (a: DockKeyRow, b: DockKeyRow) -> Bool {
-        a.id == b.id && a.canOpen == b.canOpen && a.canReply == b.canReply
+        a.id == b.id && a.canOpen == b.canOpen && a.canReply == b.canReply && a.canDismiss == b.canDismiss
             && a.approval?.requestId == b.approval?.requestId && a.approval?.decision == b.approval?.decision
     }
 
-    init(id: String, canOpen: Bool = false, canReply: Bool = false, approval: (requestId: String, decision: String)? = nil) {
+    init(id: String, canOpen: Bool = false, canReply: Bool = false, canDismiss: Bool = false,
+         approval: (requestId: String, decision: String)? = nil) {
         self.id = id
         self.canOpen = canOpen
         self.canReply = canReply
+        self.canDismiss = canDismiss
         self.approval = approval
     }
 
@@ -81,6 +86,7 @@ struct DockKeyRow: Equatable {
         id = item.id
         canOpen = item.supports("open")
         canReply = item.supports("reply")
+        canDismiss = item.canDismiss
         if item.supports("approve"), let approval = item.firstApproval, let option = approval.recommended {
             self.approval = (approval.requestId, option.decision)
         }
@@ -95,6 +101,7 @@ enum DockKeyAction: Equatable {
     case open(String)
     case approve(id: String, requestId: String, decision: String)
     case reply(String)
+    case dismiss(String)
     case compose
     case collapsePanel
     case zoom(Int)  // +1, −1, 0 = reset
@@ -125,10 +132,24 @@ enum DockKeyboard {
         case .reply:
             guard let index, rows[index].canReply else { return .none }
             return .reply(rows[index].id)
+        case .dismiss:
+            // The selected row only (open or not): its title is on screen, and the toast can bring it back.
+            guard let index, rows[index].canDismiss else { return .none }
+            return .dismiss(rows[index].id)
         case .compose:
             return .compose
         case .escape:
             return expanded != nil ? .collapseRow : .collapsePanel
         }
+    }
+}
+
+extension DockKeyboard {
+    /// The row to select once `dismissed` leaves the list: the next one, else the one before it, else none (the
+    /// selection moves on like Mail's, so X X X dismisses a run of rows).
+    static func selection(afterDismissing dismissed: String, rows: [String]) -> String? {
+        guard let index = rows.firstIndex(of: dismissed) else { return nil }
+        if index + 1 < rows.count { return rows[index + 1] }
+        return index > 0 ? rows[index - 1] : nil
     }
 }

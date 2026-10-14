@@ -31,7 +31,7 @@
           }],
           "inputs": []
         },
-        "can": ["approve", "reply", "stop", "seen", "open"], "live": false, "progress": null, "phase": "Waiting for approval"
+        "can": ["approve", "reply", "stop", "seen", "open", "dismiss"], "live": false, "progress": null, "phase": "Waiting for approval"
       },
       {
         "id": "t3:th_waitlist_db", "source": "t3", "agent": "codex",
@@ -51,7 +51,7 @@
             }]
           }]
         },
-        "can": ["answer", "reply", "stop", "seen", "open"], "live": false, "progress": null, "phase": null
+        "can": ["answer", "reply", "stop", "seen", "open", "dismiss"], "live": false, "progress": null, "phase": null
       },
       {
         "id": "claude:5d0c6f2e-1a47-4f7e-9a51-3c2b1e0d9f88", "source": "claude", "agent": "claude",
@@ -61,7 +61,7 @@
         "summary": "Wants to run: python3 -I -m unittest discover -s companion/mac-bridge/tests -k longpoll",
         "updatedAt": "2026-10-13T19:52:00Z", "unread": true,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open"], "live": true, "progress": null, "phase": null
+        "can": ["open", "dismiss"], "live": true, "progress": null, "phase": null
       },
       {
         "id": "codex:019a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8", "source": "codex", "agent": "codex",
@@ -71,7 +71,7 @@
         "summary": "Codex is waiting for approval in the Codex app.",
         "updatedAt": "2026-10-13T19:47:00Z", "unread": true,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open", "seen"], "live": false, "progress": null, "phase": null
+        "can": ["open", "seen", "dismiss"], "live": false, "progress": null, "phase": null
       },
       {
         "id": "t3:th_watch_previews", "source": "t3", "agent": "claude",
@@ -81,7 +81,7 @@
         "summary": "SamRabbitWatchWidgets: 'accessoryCorner' is unavailable in this context. I stopped before changing the deployment target.",
         "updatedAt": "2026-10-13T19:41:00Z", "unread": true,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["reply", "seen", "open"], "live": false, "progress": null, "phase": null
+        "can": ["reply", "seen", "open", "dismiss"], "live": false, "progress": null, "phase": null
       },
       {
         "id": "t3:th_release_notes", "source": "t3", "agent": "claude",
@@ -91,7 +91,7 @@
         "summary": "Release notes are in docs/releases/1.4.md: the Agent Dock, Mac voice, watch complications and 14 fixes.",
         "updatedAt": "2026-10-13T19:31:00Z", "unread": true,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["reply", "seen", "open"], "live": false, "progress": null, "phase": null
+        "can": ["reply", "seen", "open", "dismiss"], "live": false, "progress": null, "phase": null
       },
       {
         "id": "t3:th_snapshot_cache", "source": "t3", "agent": "codex",
@@ -101,7 +101,7 @@
         "summary": "Running the bridge suite after moving the snapshot cache behind one lock.",
         "updatedAt": "2026-10-13T19:59:40Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["stop", "reply", "open"], "live": false, "progress": 0.6, "phase": "Running tests"
+        "can": ["stop", "reply", "open", "dismiss"], "live": false, "progress": 0.6, "phase": "Running tests"
       },
       {
         "id": "codex:019a7788-99aa-4bbc-8cde-f00112233445", "source": "codex", "agent": "codex",
@@ -111,7 +111,7 @@
         "summary": "Converted 9 of 14 settings files; writing the compatibility shim for the old JSON keys.",
         "updatedAt": "2026-10-13T19:58:30Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open"], "live": true, "progress": null, "phase": null
+        "can": ["open", "dismiss"], "live": true, "progress": null, "phase": null
       },
       {
         "id": "claude:8e1f0a2b-3c4d-4e5f-a6b7-c8d9e0f1a2b3", "source": "claude", "agent": "claude",
@@ -121,7 +121,7 @@
         "summary": "Writing email 3 of 5: the follow-up for people who paired an iPhone but never used the watch.",
         "updatedAt": "2026-10-13T19:59:55Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open"], "live": true, "progress": null, "phase": null
+        "can": ["open", "dismiss"], "live": true, "progress": null, "phase": null
       },
       {
         "id": "t3:th_dark_mode", "source": "t3", "agent": "claude",
@@ -131,7 +131,7 @@
         "summary": "Reading the settings page and the theme tokens.",
         "updatedAt": "2026-10-13T19:59:58Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["stop", "reply", "open"], "live": false, "progress": 0.2, "phase": "Reading code"
+        "can": ["stop", "reply", "open", "dismiss"], "live": false, "progress": 0.2, "phase": "Reading code"
       },
       {
         "id": "chat:c_watch_calendar", "source": "samrabbit", "agent": null,
@@ -141,7 +141,7 @@
         "summary": "You have the design review at 3:30 and a call with Ana at 5.",
         "updatedAt": "2026-10-13T19:59:50Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open"], "live": true, "progress": null, "phase": null
+        "can": ["open", "dismiss"], "live": true, "progress": null, "phase": null
       },
       {
         "id": "chat:c_sleep_chart", "source": "samrabbit", "agent": null,
@@ -151,7 +151,7 @@
         "summary": "You averaged seven hours and twelve minutes. Thursday was your shortest night.",
         "updatedAt": "2026-10-13T18:12:00Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open"], "live": false, "progress": null, "phase": null
+        "can": ["open", "dismiss"], "live": false, "progress": null, "phase": null
       },
       {
         "id": "chat:c_mac_inbox", "source": "samrabbit", "agent": null,
@@ -161,7 +161,7 @@
         "summary": "Safari on the Brooklyn forecast and your packing list in Notes.",
         "updatedAt": "2026-10-13T15:20:00Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open"], "live": false, "progress": null, "phase": null
+        "can": ["open", "dismiss"], "live": false, "progress": null, "phase": null
       },
       {
         "id": "t3:th_readme_shots", "source": "t3", "agent": "claude",
@@ -171,7 +171,7 @@
         "summary": "Replaced the six screenshots and shrank them to under 300 KB each.",
         "updatedAt": "2026-10-13T16:05:00Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["reply", "seen", "open"], "live": false, "progress": null, "phase": null
+        "can": ["reply", "seen", "open", "dismiss"], "live": false, "progress": null, "phase": null
       },
       {
         "id": "codex:019a1111-2222-4333-8444-555566667777", "source": "codex", "agent": "codex",
@@ -181,7 +181,7 @@
         "summary": "Chunks are 40 KB because WatchConnectivity drops larger sendMessage payloads.",
         "updatedAt": "2026-10-12T21:40:00Z", "unread": false,
         "pending": {"approvals": [], "inputs": []},
-        "can": ["open"], "live": false, "progress": null, "phase": null
+        "can": ["open", "dismiss"], "live": false, "progress": null, "phase": null
       }
     ]
   },

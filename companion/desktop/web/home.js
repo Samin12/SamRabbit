@@ -6,7 +6,7 @@ import { relativeStart, timeRange, upcoming } from './agenda.js';
 import { h } from './dom.js';
 import { icon } from './icons.js';
 import { needsYou, recommendedOption, supports } from './inbox.js';
-import { approvalCard, itemRow, shortAgo } from './items.js';
+import { approvalCard, dismissWithUndo, itemRow, shortAgo } from './items.js';
 import { createOrb } from './orb.js';
 import { deviceRows, greeting, headline, summaryDevices } from './status.js';
 import { openExternal, redrawWhenFree, reportDragExclusions } from './ui.js';
@@ -45,6 +45,8 @@ export function createHome(ctx, el) {
       const option = approval ? recommendedOption(approval) : null;
       const row = itemRow(item, {
         now, busy: agents.busy.get(item.id) || '', onclick: () => ctx.show('tasks', { item: item.id }),
+        // ✕ under the pointer: gone at once, with Undo (the bridge keeps it away until it changes).
+        onDismiss: (it) => dismissWithUndo(agents, it, { toast: ctx.toast }),
       });
       if (!approval || !option) return row;
       // The command is on screen before anything can be approved from Home: the card shows it.

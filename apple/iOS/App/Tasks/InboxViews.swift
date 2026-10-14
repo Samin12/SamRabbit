@@ -1,10 +1,12 @@
 import SamRabbitKit
 import SwiftUI
+import UIKit
 
 // The inbox's rows on the iPhone: every agent on the Mac (T3 Code threads, Claude Code and Codex sessions) in Tasks
 // and on Home. T3 items act as they always have (Approve / Deny / answers inline, their own thread screen); a Claude
 // Code or Codex session can be replied to when no terminal owns it (the Mac resumes it in a new Terminal window),
-// marked seen, and otherwise says where it waits ("Waiting for you in the terminal").
+// marked seen, and otherwise says where it waits ("Waiting for you in the terminal"). Any row can be swiped left to
+// dismiss it (long press: Dismiss too): it goes here and on the Mac until it changes, with "Dismissed · Undo".
 
 /// A card for something that needs you: the source, what it waits on, and what can be done from here.
 struct InboxCard: View {
@@ -52,6 +54,7 @@ struct InboxCard: View {
         .animation(.smooth, value: busy)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inbox-card-\(item.id)")
+        .swipeToDismiss(item, radius: 26)
     }
 
     @ViewBuilder private var actions: some View {
@@ -239,6 +242,7 @@ struct InboxSection: View {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         if index > 0 { Divider().overlay(SamTheme.line).padding(.leading, 52) }
                         InboxLink(item: item) { InboxRow(item: item) }
+                            .swipeToDismiss(item, enabled: !stale, radius: 14)
                     }
                 }
                 .opacity(stale ? 0.55 : 1)
@@ -328,5 +332,166 @@ enum InboxText {
             parts.append(item.source.label)
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: dismissing
+
+extension View {
+    /// Swipe left to dismiss `item` (and Dismiss in its long-press menu and for VoiceOver), when it can be dismissed.
+    func swipeToDismiss(_ item: InboxItem, enabled: Bool = true, radius: CGFloat = 20) -> some View {
+        modifier(SwipeToDismiss(item: item, enabled: enabled && item.canDismiss, radius: radius))
+    }
+}
+
+/// The row follows a leftward swipe over a "Dismiss" mark; let go past about a third of its width (or with a quick
+/// flick) and it goes, else it springs back. A UIKit pan that only begins for a mostly sideways, leftward move: the
+/// list's scroll keeps every vertical drag, and a swipe that starts on a button never taps it.
+struct SwipeToDismiss: ViewModifier {
+    @Environment(AppModel.self) private var model
+    let item: InboxItem
+    let enabled: Bool
+    let radius: CGFloat
+    @State private var offset: CGFloat = 0
+    @State private var width: CGFloat = 1
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .offset(x: offset)
+                .background(alignment: .trailing) { mark }
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = max(1, $0) }
+                .gesture(LeftSwipe(changed: { offset = min(0, $0) }, ended: ended))
+                .contextMenu {
+                    Button("Dismiss", systemImage: "eye.slash") { model.dismiss(item) }
+                }
+                .accessibilityAction(named: "Dismiss") { model.dismiss(item) }
+        } else {
+            content
+        }
+    }
+
+    /// Behind the row, showing more as it moves.
+    private var mark: some View {
+        let shown = min(1, -offset / max(1, width * 0.38))
+        return HStack(spacing: 7) {
+            Image(systemName: "eye.slash.fill").font(.system(size: 15, weight: .semibold))
+            Text("Dismiss").font(.system(size: 15, weight: .semibold))
+        }
+        .foregroundStyle(SamTheme.ink)
+        .padding(.trailing, 22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .background(RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(SamTheme.orb.opacity(0.18 + 0.32 * shown)))
+        .opacity(offset < -2 ? Double(0.35 + 0.65 * shown) : 0)
+        .scaleEffect(0.96 + 0.04 * shown, anchor: .trailing)
+        .accessibilityHidden(true)
+    }
+
+    /// Far enough (a third of the row) or fast enough (a flick): it goes; else back in place.
+    private func ended(_ translation: CGFloat, _ velocity: CGFloat, _ cancelled: Bool) {
+        let far = !cancelled && (-translation > width * 0.38 || (velocity < -650 && -translation > 24))
+        guard far else {
+            withAnimation(.spring(duration: 0.3, bounce: 0.2)) { offset = 0 }
+            return
+        }
+        withAnimation(.smooth(duration: 0.2)) { offset = -width * 1.15 }
+        model.dismiss(item)
+        // Should it come back (a refusal, the undo), it comes back in place.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            offset = 0
+        }
+    }
+}
+
+/// A pan that begins only when it moves left more than up or down (`changed`: the horizontal translation;
+/// `ended`: translation, velocity, whether it was cancelled).
+struct LeftSwipe: UIGestureRecognizerRepresentable {
+    var changed: (CGFloat) -> Void
+    var ended: (CGFloat, CGFloat, Bool) -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        let translation = recognizer.translation(in: recognizer.view).x
+        switch recognizer.state {
+        case .began, .changed:
+            changed(translation)
+        case .ended:
+            ended(translation, recognizer.velocity(in: recognizer.view).x, false)
+        case .cancelled, .failed:
+            ended(translation, 0, true)
+        default:
+            break
+        }
+    }
+
+    @MainActor final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: pan.view)
+            return velocity.x < 0 && abs(velocity.x) > abs(velocity.y) * 1.4
+        }
+
+        // The list's own scroll may run beside it (it only scrolls up and down).
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            other is UIPanGestureRecognizer && other.view is UIScrollView
+        }
+    }
+}
+
+/// "Dismissed · <title>" with Undo, at the bottom for a few seconds after a task was dismissed.
+struct UndoSnackbar: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        ZStack {
+            if let offer = model.undoOffer {
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(SamTheme.orbPale)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Dismissed").font(.system(size: 14.5, weight: .semibold)).foregroundStyle(SamTheme.ink)
+                        Text(offer.item.title)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(SamTheme.muted)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Button {
+                        model.undoDismiss()
+                    } label: {
+                        Text("Undo").font(.system(size: 15, weight: .bold))
+                            .padding(.horizontal, 6)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(SamTheme.orb)
+                    .accessibilityIdentifier("undo-dismiss")
+                }
+                .padding(.leading, 16)
+                .padding(.trailing, 10)
+                .padding(.vertical, 10)
+                .glassEffect(.regular.tint(SamTheme.night.opacity(0.8)), in: .rect(cornerRadius: 22))
+                .padding(.horizontal, 14)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .id(offer.id)
+                .task(id: offer.id) {
+                    try? await Task.sleep(for: .seconds(5))
+                    withAnimation(.smooth) { if model.undoOffer?.id == offer.id { model.undoOffer = nil } }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("undo-snackbar")
+            }
+        }
+        .animation(.spring(duration: 0.35, bounce: 0.2), value: model.undoOffer)
     }
 }

@@ -185,6 +185,7 @@ enum KeyboardTests {
         ("replyComposeEscape", replyComposeEscape),
         ("commandKeysStayInTheDock", commandKeysStayInTheDock),
         ("rowsFromItems", rowsFromItems),
+        ("xDismissesTheSelectedRow", xDismissesTheSelectedRow),
     ]
 
     static func key(_ code: UInt16, _ chars: String, command: Bool = false, control: Bool = false) -> DockKey? {
@@ -203,6 +204,9 @@ enum KeyboardTests {
         expectEqual(key(14, "e"), .approve)
         expectEqual(key(15, "r"), .reply)
         expectEqual(key(45, "n"), .compose)
+        expectEqual(key(7, "x"), .dismiss)
+        expectEqual(key(7, "X"), .dismiss)
+        expectEqual(key(7, "x", command: true), nil, "⌘X is the fields' cut")
         expectEqual(key(24, "=", command: true), nil, "⌘ keys go through DockCommandKey")
         expectEqual(key(29, "0", command: true), nil)
         expectEqual(key(38, "j", command: true), nil)
@@ -299,10 +303,29 @@ enum KeyboardTests {
     static func rowsFromItems() throws {
         let items = try DockInbox.decode(Fixture.inboxData()).items
         let pairing = DockKeyRow(items.first { $0.id == "t3:th_pairing_redirect" }!)
-        expectEqual(pairing, DockKeyRow(id: "t3:th_pairing_redirect", canOpen: true, canReply: true,
+        expectEqual(pairing, DockKeyRow(id: "t3:th_pairing_redirect", canOpen: true, canReply: true, canDismiss: true,
                                         approval: (requestId: "req_run_tests", decision: "accept")))
-        // The CLI owns its own prompt: Open only, no inline approve.
+        // The CLI owns its own prompt: Open only, no inline approve (it can still be dismissed).
         let cli = DockKeyRow(items.first { $0.id.hasPrefix("claude:5d0c") }!)
-        expectEqual(cli, DockKeyRow(id: cli.id, canOpen: true, canReply: false, approval: nil))
+        expectEqual(cli, DockKeyRow(id: cli.id, canOpen: true, canReply: false, canDismiss: true, approval: nil))
+    }
+
+    static func xDismissesTheSelectedRow() throws {
+        let rows = [DockKeyRow(id: "a", canDismiss: true), DockKeyRow(id: "b", canDismiss: true),
+                    DockKeyRow(id: "c", canDismiss: false)]
+        expectEqual(DockKeyboard.action(for: .dismiss, rows: rows, selected: "a", expanded: nil), .dismiss("a"))
+        expectEqual(DockKeyboard.action(for: .dismiss, rows: rows, selected: "b", expanded: "b"), .dismiss("b"),
+                    "an open row too")
+        expectEqual(DockKeyboard.action(for: .dismiss, rows: rows, selected: "c", expanded: nil), .none,
+                    "a bridge that can't dismiss it")
+        expectEqual(DockKeyboard.action(for: .dismiss, rows: rows, selected: nil, expanded: nil), .none,
+                    "nothing selected: nothing goes")
+        expectEqual(DockKeyboard.action(for: .dismiss, rows: rows, selected: "gone", expanded: nil), .none)
+        // The selection moves on, so X X X clears a run of rows.
+        let ids = ["a", "b", "c"]
+        expectEqual(DockKeyboard.selection(afterDismissing: "a", rows: ids), "b")
+        expectEqual(DockKeyboard.selection(afterDismissing: "c", rows: ids), "b", "the last one: the row before it")
+        expectEqual(DockKeyboard.selection(afterDismissing: "a", rows: ["a"]), nil)
+        expectEqual(DockKeyboard.selection(afterDismissing: "z", rows: ids), nil)
     }
 }

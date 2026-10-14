@@ -33,3 +33,9 @@ test('⌥ or ⇧ with ⌘ and plain keys are not the window’s', () => {
   assert.equal(windowShortcut(key('n')), null);
   assert.equal(windowShortcut(null), null);
 });
+
+test('⌘Z outside a field is the undo of a dismissal; a field keeps its own ⌘Z', () => {
+  assert.deepEqual(windowShortcut(key('z', { metaKey: true })), { type: 'undo' });
+  assert.equal(windowShortcut(key('z', { metaKey: true }), 'tasks', { typing: true }), null);
+  assert.equal(windowShortcut(key('Z', { metaKey: true, shiftKey: true })), null, '⇧⌘Z is redo');
+});

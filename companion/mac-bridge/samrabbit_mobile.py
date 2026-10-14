@@ -20,6 +20,8 @@ Routes (CONTRACTS-WAVE4 "Mobile API"):
   (recorded into the day's "Phone" conversation, so the desktop app shows it too).
 * T3 (``samrabbit_t3``): ``GET /v1/mobile/t3/threads?filter=``, ``GET /v1/mobile/t3/threads/<id>``,
   ``POST .../message|respond|stop``, ``POST /v1/mobile/t3/threads {text, projectId?}``, ``GET /v1/mobile/t3/projects``.
+  The list and the summary's ``t3`` leave out the threads Samin dismissed in the inbox until they change
+  (``samrabbit_inbox``); ``?include=dismissed`` lists them too, with ``dismissed: true``.
 * Calendar (Composio, ``samrabbit_calendar``): ``GET /v1/mobile/calendar/agenda?hours=24`` (or ``?days=``: whole days),
   ``POST /v1/mobile/calendar/block {minutes, title?}``, ``POST /v1/mobile/calendar/events {title, startsAt, endsAt}``.
 * ``POST /v1/mobile/journal {text}``: ``**HH:MM** <text>`` appended to today's Heptabase journal (explicit notes only;
@@ -1166,6 +1168,17 @@ class MobileService:
         return datetime.fromtimestamp(self._clock(), self.zone)
 
     # ------------------------------------------------------------------ summary
+    def t3_hidden(self) -> Optional[Callable[[Dict[str, Any]], bool]]:
+        """What T3's lists leave out: the threads dismissed in the inbox that have not changed since (the inbox's
+        ``t3_dismissed``), or None without the inbox."""
+        rule = getattr(getattr(self.server, "inbox", None), "t3_dismissed", None)
+        return rule if callable(rule) else None
+
+    def forget_summary(self) -> None:
+        """Something the summary shows changed (a dismissal in the inbox): the next one is built again."""
+        with self._lock:
+            self._summary = None
+
     def summary(self) -> Dict[str, Any]:
         with self._lock:
             cached = self._summary
@@ -1177,7 +1190,7 @@ class MobileService:
             calendar = {"available": False, "reason": "loading"}
         if journal.get("_loading"):
             journal = {"available": False, "reason": "loading"}
-        t3_part = self.t3.summary_part(self.t3.cached())
+        t3_part = self.t3.summary_part(self.t3.cached(), hide=self.t3_hidden())
         if t3_state.get("_failed") and t3_state.get("reason"):
             t3_part["reason"] = t3_state["reason"]
             if t3_part.get("available"):
@@ -1448,7 +1461,11 @@ class MobileService:
         query = _query(handler)
         filter_name = _one(query, "filter")
         limit = _int(query, "limit", 40, 1, 100)
-        threads = self.t3.threads(filter_name, limit=limit)
+        include = {part.strip() for value in query.get("include") or [] for part in value.split(",")}
+        hidden = self.t3_hidden()
+        # Dismissed in the inbox: left out (the watch, the phone's alerts, the assistants), or marked when asked for.
+        hide = None if "dismissed" in include else hidden
+        threads = self.t3.threads(filter_name, limit=limit, hide=hide)
         missing = [item["threadId"] for item in threads if item["status"] in t3.MOBILE_NEEDS_YOU and
                    "pending" not in item]
         if missing:
@@ -1459,7 +1476,9 @@ class MobileService:
             except t3.T3Error:
                 fetched = 0
             if fetched:
-                threads = self.t3.threads(filter_name, limit=limit, max_age=60.0)
+                threads = self.t3.threads(filter_name, limit=limit, max_age=60.0, hide=hide)
+        if hide is None and hidden is not None:
+            threads = [dict(item, dismissed=True) if hidden(item) else item for item in threads]
         with self._lock:
             self._summary = None
         return 200, {"threads": threads, "updatedAt": iso_utc(self._clock())}

@@ -1,11 +1,13 @@
 // Drawing inbox items (agents and chats) the way the Agent Dock does: the source tile (T3 with its model family in a
-// corner, Claude's asterisk, Codex's brackets, the orb for SamRabbit chats), the status dot or progress ring, a row,
-// the approval card and the question card. Home and Tasks share these.
+// corner, Claude's asterisk, Codex's brackets, the orb for SamRabbit chats), the status dot or progress ring, a row
+// (with its ✕ under the pointer), the approval card and the question card, and dismissing with "Dismissed · Undo".
+// Home and Tasks share these.
 
 import { h } from './dom.js';
+import { clip } from './format.js';
 import { icon } from './icons.js';
 import {
-  agentLabel, answersOnTap, approvalKindLabel, metaLine, needsYou, recommendedOption, supports,
+  agentLabel, answersOnTap, approvalKindLabel, canDismiss, metaLine, needsYou, recommendedOption, supports,
 } from './inbox.js';
 
 /** "now", "4m", "2h", "3d", then "Oct 2" (the dock's short times). */
@@ -79,15 +81,28 @@ export function itemMeta(item) {
     item.live && item.source !== 'samrabbit' ? h('span', { class: 'live-chip', text: 'Live' }) : null);
 }
 
-/** One list row: tile, title, meta, two lines of summary, time. */
-export function itemRow(item, { selected = false, now = Date.now(), busy = '', onclick, compact = false } = {}) {
+/**
+ * One list row: tile, title, meta, two lines of summary, time. With `onDismiss` (and an item that can be dismissed)
+ * a small ✕ takes the time's place while the pointer is on the row.
+ */
+export function itemRow(item, { selected = false, now = Date.now(), busy = '', onclick, compact = false, onDismiss = null } = {}) {
   const summary = item.summary || (item.status === 'working' && item.phase ? item.phase : '');
+  const dismissible = Boolean(onDismiss) && canDismiss(item) && !busy;
   return h('button', {
-    class: `item-row${selected ? ' selected' : ''}${compact ? ' compact' : ''} source-${item.source}`,
+    class: `item-row${selected ? ' selected' : ''}${compact ? ' compact' : ''}${dismissible ? ' dismissible' : ''} source-${item.source}`,
     type: 'button',
     dataset: { id: item.id },
     'aria-current': selected ? 'true' : null,
-    onclick,
+    onclick: (event) => {
+      // The ✕ is inside the row (a button can't hold a button): a press on it dismisses instead of selecting.
+      if (dismissible && event.target && event.target.closest && event.target.closest('.row-dismiss')) {
+        event.preventDefault();
+        event.stopPropagation();
+        onDismiss(item);
+        return;
+      }
+      onclick?.(event);
+    },
   },
   sourceGlyph(item, compact ? 28 : 30),
   h('div', { class: 'item-main' },
@@ -95,6 +110,8 @@ export function itemRow(item, { selected = false, now = Date.now(), busy = '', o
       statusMark(item),
       h('span', { class: 'item-title', text: item.title }),
       h('time', { class: 'item-time', text: busy ? '' : shortAgo(item.updatedAt, now) }),
+      dismissible ? h('span', { class: 'row-dismiss', role: 'button', title: 'Dismiss (X): hidden until something changes', 'aria-label': 'Dismiss' },
+        icon('close', { size: 11 })) : null,
       busy ? h('span', { class: 'spinner' }) : null),
     itemMeta(item),
     !compact && summary ? h('div', { class: 'item-summary', text: summary }) : null,
@@ -172,4 +189,43 @@ export function noteLine(note, { onOpen } = {}) {
     icon(note.isError ? 'alert' : 'check', { size: 13 }),
     h('span', { text: note.text }),
     note.offersOpen && onOpen ? h('button', { class: 'link', type: 'button', onclick: onOpen }, 'Open') : null);
+}
+
+/**
+ * Dismisses an item from Home or Tasks: it goes at once, "Dismissed · <title>" with Undo shows for five seconds (⌘Z
+ * too), and a refusal puts it back with a toast saying why. `onUndone(item)` runs when Undo brought it back,
+ * `onFailed(item)` when the bridge refused.
+ */
+export function dismissWithUndo(agents, item, { toast, onUndone = null, onFailed = null } = {}) {
+  let shown = null;
+  const undo = () => {
+    shown?.close();
+    agents.undoDismiss(item).then((result) => {
+      if (result.problem) toast(result.problem, { tone: 'error', icon: 'alert', timeout: 6000 });
+      else onUndone?.(item);
+    });
+  };
+  shown = toast(`Dismissed · ${clip(item.title, 64)}`, { action: { label: 'Undo', run: undo }, icon: 'eye', timeout: 5000 });
+  lastUndo = { id: item.id, run: undo };
+  agents.dismiss(item).then((result) => {
+    if (result.problem) {
+      shown?.close();
+      if (lastUndo && lastUndo.id === item.id) lastUndo = null;
+      toast(result.problem, { tone: 'error', icon: 'alert', timeout: 6000 });
+      onFailed?.(item);
+    }
+  });
+  return undo;
+}
+
+let lastUndo = null;
+
+/** ⌘Z outside a field: the undo of the last dismissal while its toast shows. Whether there was one. */
+export function undoLastDismiss(agents) {
+  const item = agents.undoable();
+  if (!item || !lastUndo || lastUndo.id !== item.id) return false;
+  const { run } = lastUndo;
+  lastUndo = null;
+  run();
+  return true;
 }
