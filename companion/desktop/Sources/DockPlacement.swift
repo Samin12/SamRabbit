@@ -79,6 +79,50 @@ struct DockLegacySpot: Codable, Equatable {
     var xFraction: Double
 }
 
+/// The few UserDefaults calls the dock's memory makes (UserDefaults has them all), so tests/swift can run them on a
+/// dictionary instead of the app's settings.
+protocol DockDefaults: AnyObject {
+    func data(forKey key: String) -> Data?
+    func bool(forKey key: String) -> Bool
+    func set(_ value: Any?, forKey key: String)
+    func removeObject(forKey key: String)
+}
+
+extension UserDefaults: DockDefaults {}
+
+/// Where the dock was left, as the app keeps it: `AgentDockPlace` (a DockPlace, JSON), and Wave 6's `AgentDockSpot`
+/// turned into one at the first launch that finds it. That happens once (`AgentDockPlaceMigrated`): the old key stays
+/// for an older copy to read, and "Move Back to the Middle" (no place) must not bring the old spot back next launch.
+struct DockPlaceMemory {
+    static let placeKey = "AgentDockPlace"
+    static let legacyKey = "AgentDockSpot"
+    static let migratedKey = "AgentDockPlaceMigrated"
+
+    let defaults: DockDefaults
+
+    /// nil: never moved, or "Move Back to the Middle".
+    var place: DockPlace? {
+        get { defaults.data(forKey: Self.placeKey).flatMap { try? JSONDecoder().decode(DockPlace.self, from: $0) } }
+        nonmutating set {
+            if let newValue, let data = try? JSONEncoder().encode(newValue) { defaults.set(data, forKey: Self.placeKey) }
+            else { defaults.removeObject(forKey: Self.placeKey) }
+        }
+    }
+
+    /// At launch: Wave 6's spot as a corner and a gap, the first time only, and only when there is no place yet (a
+    /// pill of about `size`, on `screens` as they are now). The place it made, or nil when there was nothing to do.
+    @discardableResult
+    func migrate(size: CGSize, screens: [DockScreen]) -> DockPlace? {
+        guard !defaults.bool(forKey: Self.migratedKey) else { return nil }
+        defaults.set(true, forKey: Self.migratedKey)
+        guard place == nil, let data = defaults.data(forKey: Self.legacyKey),
+              let legacy = try? JSONDecoder().decode(DockLegacySpot.self, from: data) else { return nil }
+        let converted = DockPlacement.migrated(legacy, size: size, screens: screens)
+        place = converted
+        return converted
+    }
+}
+
 enum DockMetrics {
     static let baselineWidth: CGFloat = 1728
     static let pillBaseHeight: CGFloat = 44

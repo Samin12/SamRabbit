@@ -180,9 +180,7 @@ final class DockController: NSObject {
     private enum Key {
         static let enabled = "AgentDockEnabled"
         static let hiddenUntil = "AgentDockHiddenUntil"
-        /// Wave 6's {screen, x fraction}: read once into `place`, then left alone (an older copy still reads it).
-        static let legacySpot = "AgentDockSpot"
-        static let place = "AgentDockPlace"
+        // AgentDockPlace, Wave 6's AgentDockSpot and AgentDockPlaceMigrated: DockPlaceMemory.
         static let zoom = "AgentDockZoom"
         static let putAway = "AgentDockPutAway"
         static let minimized = "AgentDockMinimized"
@@ -204,23 +202,20 @@ final class DockController: NSObject {
         }
     }
 
+    private let memory = DockPlaceMemory(defaults: UserDefaults.standard)
+
     /// Where Samin left it (nil: never moved, or "Move Back to the Middle").
     private var place: DockPlace? {
-        get { UserDefaults.standard.data(forKey: Key.place).flatMap { try? JSONDecoder().decode(DockPlace.self, from: $0) } }
-        set {
-            if let newValue, let data = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(data, forKey: Key.place) }
-            else { UserDefaults.standard.removeObject(forKey: Key.place) }
-        }
+        get { memory.place }
+        set { memory.place = newValue }
     }
 
-    /// Wave 6 remembered a fraction of the bottom edge: the same place as a corner and a gap, once.
+    /// Wave 6 remembered a fraction of the bottom edge: the same place as a corner and a gap, at the first launch only.
     private func migratePlace() {
-        let defaults = UserDefaults.standard
-        guard defaults.data(forKey: Key.place) == nil, let data = defaults.data(forKey: Key.legacySpot),
-              let legacy = try? JSONDecoder().decode(DockLegacySpot.self, from: data) else { return }
         let size = CGSize(width: 260, height: DockMetrics.pillBaseHeight)
-        place = DockPlacement.migrated(legacy, size: size, screens: screens())
-        Log.write("dock: its spot is a corner and a gap now (\(place?.spot.corner.rawValue ?? "-"))")
+        if let converted = memory.migrate(size: size, screens: screens()) {
+            Log.write("dock: its spot is a corner and a gap now (\(converted.spot.corner.rawValue))")
+        }
     }
 
     private func savePresence() {
@@ -234,7 +229,15 @@ final class DockController: NSObject {
         set { UserDefaults.standard.set(DockMetrics.zoom(newValue), forKey: Key.zoom) }
     }
 
+    /// The switch in AgentDockEnabled (off = "Turn Off the Dock" until it is turned on again).
     var isEnabled: Bool { enabled }
+
+    /// What Settings' "Show the Agent Dock" says: turned on, and not put away (⌃⌥D, "Hide Agent Dock") or hidden for a
+    /// while. Stepping aside for the main window doesn't count: that is the dock's own doing.
+    var isOn: Bool {
+        guard enabled, !presence.hidden else { return false }
+        return hiddenUntil.map { $0 <= Date() } ?? true
+    }
 
     var isMinimized: Bool { presence.minimized }
 
@@ -255,6 +258,26 @@ final class DockController: NSObject {
 
     /// Dev runs: the screen it is on, and the frame it rests at there (without the "–").
     var devState: (screen: DockScreen?, rest: CGRect) { (screen, restFrame) }
+
+    /// Dev runs: what the dock keeps of Samin's moves (its spot, the orb, ⌃⌥D's hide), to put back after a smoke run.
+    struct DevMemory {
+        let place: DockPlace?
+        let minimized: Bool
+        let putAway: Bool
+    }
+
+    var devMemory: DevMemory { DevMemory(place: place, minimized: presence.minimized, putAway: presence.hidden) }
+
+    func devRestore(_ kept: DevMemory) {
+        place = kept.place
+        presence.minimized = kept.minimized
+        presence.hidden = kept.putAway
+        presence.overApp = false
+        savePresence()
+        chooseScreen()
+        refresh()
+        if visible { placePill() }
+    }
 
     // MARK: start
 
@@ -365,6 +388,8 @@ final class DockController: NSObject {
         }
         if DockVisibility.shows(input) { show() } else { hide() }
         scheduleUnhide()
+        let on = isOn
+        if ui.switchedOn != on { ui.switchedOn = on }
     }
 
     private func scheduleUnhide() {
@@ -1072,6 +1097,7 @@ final class DockController: NSObject {
 
     /// ⌃⌥D: on screen here → put away until pressed again; away (for any reason: ⌃⌥D, a hide for a while, turned
     /// off, stepped aside for the main window) → back as it was; on screen on another display → brought to this one.
+    /// The hot key only: the menus use putAwayFromMenu / bringBackFromMenu, which never look at the pointer.
     func toggleShown() {
         guard started else { return }
         let effects = presence.handle(.toggleShown(elsewhere: isElsewhere()), visibilityInput())
@@ -1079,10 +1105,27 @@ final class DockController: NSObject {
         carry(effects)
     }
 
-    /// ⌃⌥M (and "Minimize to Orb" / "Expand the Dock"): orb ↔ pill; a dock that isn't on screen comes back so.
-    func toggleMinimized() {
+    /// "Hide Agent Dock" (the menu bar extra), "Hide the Dock" (its own menu): put away where it is, until ⌃⌥D or
+    /// "Show Agent Dock". Never moved: in the menu bar extra the pointer is on the menu bar's display.
+    func putAwayFromMenu() {
         guard started else { return }
-        let effects = presence.handle(.toggleMinimized(elsewhere: isElsewhere()), visibilityInput())
+        carry(presence.handle(.putAway, visibilityInput()))
+        Log.write("dock: put away (menu)")
+    }
+
+    /// "Show Agent Dock" in the menu bar extra: back as it was and where it was, as ⌃⌥D brings it back (on again, a
+    /// hide for a while over, over the main window), without moving it to the menu bar's display.
+    func bringBackFromMenu() {
+        guard started else { return }
+        carry(presence.handle(.bringBack, visibilityInput()))
+        Log.write("dock: shown (menu)")
+    }
+
+    /// ⌃⌥M (and "Minimize to Orb" / "Expand the Dock"): orb ↔ pill; a dock that isn't on screen comes back so (the hot
+    /// key brings it to the pointer's screen; a menu item leaves it on its own).
+    func toggleMinimized(fromMenu: Bool = false) {
+        guard started else { return }
+        let effects = presence.handle(.toggleMinimized(elsewhere: !fromMenu && isElsewhere()), visibilityInput())
         Log.write("dock: " + (presence.minimized ? "minimized to the orb" : "expanded to the pill"))
         carry(effects)
     }
@@ -1095,16 +1138,18 @@ final class DockController: NSObject {
         carry([])
     }
 
-    /// Settings: the dock on or off (off for good, until it is turned on again). On also ends ⌃⌥D's hide: the switch
-    /// says it shows.
+    /// Settings (and the main window's Settings): the dock on or off (off for good, until it is turned on again). On
+    /// also ends ⌃⌥D's hide and a hide for a while, even when it was never turned off: the switch then says it shows.
     func setEnabled(_ on: Bool) {
-        guard started, on != enabled else { return }
+        guard started else { return }
         if on {
-            turnOn()
+            guard !isOn else { return }
+            if !enabled { turnOn() }
+            hiddenUntil = nil
             _ = presence.handle(.showFromMenu, visibilityInput())
             savePresence()
             refresh()
-        } else {
+        } else if enabled {
             turnOff()
         }
     }
@@ -1177,8 +1222,8 @@ final class DockController: NSObject {
         menu.addItem(DockMenuItem("Open SamRabbit") { AppModel.shared.openMainWindow() })
         menu.addItem(.separator())
         menu.addItem(DockMenuItem(presence.minimized ? "Expand the Dock" : "Minimize to Orb",
-                                  shortcut: shortcuts.working(.minimize)) { [weak self] in self?.toggleMinimized() })
-        menu.addItem(DockMenuItem("Hide the Dock", shortcut: shortcuts.working(.showHide)) { [weak self] in self?.toggleShown() })
+                                  shortcut: shortcuts.working(.minimize)) { [weak self] in self?.toggleMinimized(fromMenu: true) })
+        menu.addItem(DockMenuItem("Hide the Dock", shortcut: shortcuts.working(.showHide)) { [weak self] in self?.putAwayFromMenu() })
         for choice in DockVisibility.HideChoice.allCases {
             menu.addItem(DockMenuItem(choice.label) { [weak self] in self?.hide(for: choice) })
         }

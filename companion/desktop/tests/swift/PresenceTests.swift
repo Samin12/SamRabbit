@@ -13,6 +13,7 @@ enum PresenceTests {
         ("minimizeAndExpand", minimizeAndExpand),
         ("minimizingAHiddenDockShowsIt", minimizingAHiddenDockShowsIt),
         ("showFromTheMenu", showFromTheMenu),
+        ("menusNeverMoveItToThePointer", menusNeverMoveItToThePointer),
     ]
 
     /// Another app is in front: the dock shows by the Wave 6 rules.
@@ -181,5 +182,40 @@ enum PresenceTests {
         presence.minimized = true
         _ = presence.handle(.showFromMenu, outside)
         expect(presence.minimized)
+    }
+
+    static func menusNeverMoveItToThePointer() throws {
+        // The dock is on screen on one display; the menu bar extra is clicked on another (⌃⌥D pressed there would
+        // bring it over). "Hide Agent Dock" puts it away where it is: no bringing it here, no new screen remembered.
+        var presence = DockPresence()
+        expectEqual(presence.handle(.putAway, outside), [.closeList])
+        expect(presence.hidden && !shows(presence, outside))
+        expectEqual(presence.handle(.putAway, outside), [.closeList], "twice is still away")
+        expect(presence.hidden)
+        // "Show Agent Dock" there: back as it was, where it was.
+        expectEqual(presence.handle(.bringBack, outside), [])
+        expect(!presence.hidden && shows(presence, outside))
+        // …lifting whatever kept it away, as ⌃⌥D does (but never .bringHere).
+        let now = Date()
+        var off = DockPresence()
+        let both = DockVisibilityInput(enabled: false, hiddenUntil: now.addingTimeInterval(60), now: now)
+        expectEqual(off.handle(.bringBack, both), [.turnOn, .endHide])
+        var inWindow = DockPresence()
+        expectEqual(inWindow.handle(.bringBack, inApp), [])
+        expect(inWindow.overApp && shows(inWindow, inApp))
+        // "Hide Agent Dock" over the main window ends "over the app"; during a conversation the voice bar stays.
+        expectEqual(inWindow.handle(.putAway, inApp), [.closeList])
+        expect(inWindow.hidden && !inWindow.overApp && !shows(inWindow, inApp))
+        var talking = outside
+        talking.voiceActive = true
+        var voice = DockPresence()
+        _ = voice.handle(.putAway, talking)
+        expect(voice.hidden && shows(voice, talking) && !shows(voice, outside))
+        // "Expand Agent Dock" in the menu bar extra on a put-away dock: shown, not brought to the menu bar's display.
+        var folded = DockPresence()
+        folded.minimized = true
+        _ = folded.handle(.putAway, outside)
+        expectEqual(folded.handle(.toggleMinimized(elsewhere: false), outside), [])
+        expect(!folded.minimized && !folded.hidden)
     }
 }

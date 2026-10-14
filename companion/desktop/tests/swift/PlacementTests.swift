@@ -19,6 +19,7 @@ enum PlacementTests {
         ("minimizeButtonSide", minimizeButtonSide),
         ("bringsItToAnotherScreen", bringsItToAnotherScreen),
         ("migratesTheWave6Spot", migratesTheWave6Spot),
+        ("theWave6SpotIsConvertedOnce", theWave6SpotIsConvertedOnce),
         ("cornerDragZooms", cornerDragZooms),
     ]
 
@@ -374,6 +375,46 @@ enum PlacementTests {
         expectEqual(DockPlacement.migrated(DockLegacySpot(screenId: "laptop", xFraction: 0.5), size: pill, screens: []).spot, .home)
     }
 
+    static func theWave6SpotIsConvertedOnce() throws {
+        // Samin's settings as Wave 6 left them: the dock dragged a quarter along the 32".
+        let mac = FakeDefaults()
+        mac.values[DockPlaceMemory.legacyKey] = try JSONEncoder().encode(DockLegacySpot(screenId: "big", xFraction: 0.25))
+        // The first launch of this version: turned into a corner and a gap, and noted as done.
+        let converted = DockPlaceMemory(defaults: mac).migrate(size: pill, screens: [laptop, big])
+        expectEqual(converted?.spot, DockSpot(corner: .bottomLeft, dx: 670, dy: 14))
+        expectEqual(DockPlaceMemory(defaults: mac).place, converted, "kept as AgentDockPlace")
+        expect(mac.values[DockPlaceMemory.migratedKey] as? Bool == true)
+        expect(mac.values[DockPlaceMemory.legacyKey] != nil, "Wave 6's key is left for an older copy")
+        // "Move Back to the Middle" forgets the spot; the next launch (the login item's too) leaves it forgotten.
+        DockPlaceMemory(defaults: mac).place = nil
+        expect(mac.values[DockPlaceMemory.placeKey] == nil)
+        expect(DockPlaceMemory(defaults: mac).migrate(size: pill, screens: [laptop, big]) == nil, "converted once only")
+        expect(DockPlaceMemory(defaults: mac).place == nil, "still in the middle after a relaunch")
+        // Moved again, relaunched: where he left it, not the old spot.
+        let moved = DockPlacement.remember(DockSpot(corner: .topRight, dx: 8, dy: 8), on: big, in: nil)
+        DockPlaceMemory(defaults: mac).place = moved
+        _ = DockPlaceMemory(defaults: mac).migrate(size: pill, screens: [laptop, big])
+        expectEqual(DockPlaceMemory(defaults: mac).place, moved)
+
+        // A place from before the flag existed wins over the old spot (and the flag is set from then on).
+        let earlier = FakeDefaults()
+        earlier.values[DockPlaceMemory.legacyKey] = try JSONEncoder().encode(DockLegacySpot(screenId: "laptop", xFraction: 1))
+        earlier.values[DockPlaceMemory.placeKey] = try JSONEncoder().encode(moved)
+        expect(DockPlaceMemory(defaults: earlier).migrate(size: pill, screens: [laptop, big]) == nil)
+        expectEqual(DockPlaceMemory(defaults: earlier).place, moved)
+        expect(earlier.values[DockPlaceMemory.migratedKey] as? Bool == true)
+        // Never moved in Wave 6, or nothing readable: nothing to convert, and not looked at again.
+        let fresh = FakeDefaults()
+        expect(DockPlaceMemory(defaults: fresh).migrate(size: pill, screens: [laptop]) == nil)
+        expect(DockPlaceMemory(defaults: fresh).place == nil)
+        expect(fresh.values[DockPlaceMemory.migratedKey] as? Bool == true)
+        let odd = FakeDefaults()
+        odd.values[DockPlaceMemory.legacyKey] = Data("not json".utf8)
+        expect(DockPlaceMemory(defaults: odd).migrate(size: pill, screens: [laptop]) == nil)
+        odd.values[DockPlaceMemory.placeKey] = Data("not json either".utf8)
+        expect(DockPlaceMemory(defaults: odd).place == nil, "an unreadable place is no place")
+    }
+
     static func cornerDragZooms() throws {
         expectEqual(DockMetrics.zoomFromDrag(startZoom: 1, startHeight: 44, up: 22, outward: 0), 1.5)
         expectEqual(DockMetrics.zoomFromDrag(startZoom: 1, startHeight: 44, up: -11, outward: 0), 0.75)
@@ -381,4 +422,14 @@ enum PlacementTests {
         expectEqual(DockMetrics.zoomFromDrag(startZoom: 1.2, startHeight: 53, up: 400, outward: 0), 1.6, "clamped")
         expectEqual(DockMetrics.zoomFromDrag(startZoom: 1, startHeight: 0, up: 10, outward: 0), 1)
     }
+}
+
+/// The app's UserDefaults as a dictionary: what DockPlaceMemory reads and writes on one simulated Mac.
+final class FakeDefaults: DockDefaults {
+    var values: [String: Any] = [:]
+
+    func data(forKey key: String) -> Data? { values[key] as? Data }
+    func bool(forKey key: String) -> Bool { values[key] as? Bool ?? false }
+    func set(_ value: Any?, forKey key: String) { values[key] = value }
+    func removeObject(forKey key: String) { values[key] = nil }
 }

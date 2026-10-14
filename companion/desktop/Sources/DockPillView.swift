@@ -34,6 +34,8 @@ final class DockUIState: ObservableObject {
     @Published var pillAnchor: Alignment = .bottom
     /// The dock is on screen (the menu bar extra says "Hide" or "Show").
     @Published var shown = false
+    /// Turned on and not put away or hidden for a while (DockController.isOn: Settings' "Show the Agent Dock").
+    @Published var switchedOn = true
 }
 
 /// The voice state as the dock draws it. Live it comes from `MacVoice` (owned by the voice workstream); snapshots and

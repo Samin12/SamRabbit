@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Unit tests for the Agent Dock's pure logic: inbox decoding and order, placement maths (corner + gap, clamping,
-# snapping, the list's side), the visibility, show/hide/minimize and list state machines, the keyboard model and the
-# global shortcuts (parsing, rules). Compiles those sources (Foundation only, no AppKit) with the tests in this
+# snapping, the list's side) and its memory (Wave 6's spot converted once), the visibility, show/hide/minimize and
+# list state machines (the menus' pointer-free hide and show too), the keyboard model and the global shortcuts
+# (parsing, rules). Compiles those sources (Foundation only, no AppKit) with the tests in this
 # directory into a throwaway binary and runs it. Needs Xcode's command line tools.
 #
 #   companion/desktop/tests/swift/run.sh [name-filter]

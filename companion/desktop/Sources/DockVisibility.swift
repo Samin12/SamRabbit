@@ -79,10 +79,13 @@ enum DockVisibility {
 
 /// Samin's own say over the dock, beside the rules above (CONTRACTS-WAVE7 §B2): ⌃⌥D shows and hides it (hidden
 /// lasts until he presses it again; pressed while the dock is on another screen it brings the dock to his), and ⌃⌥M,
-/// the "–" on the pill, "Minimize to Orb" or a click on the orb fold it to the orb and back. Pure, like the rest of
-/// this file: the controller keeps `hidden` and `minimized` in UserDefaults and carries out the effects.
+/// the "–" on the pill, "Minimize to Orb" or a click on the orb fold it to the orb and back. The menus' Hide / Show /
+/// Minimize do what the keys do without looking at the pointer: a menu item never moves the dock to another screen.
+/// Pure, like the rest of this file: the controller keeps `hidden` and `minimized` in UserDefaults and carries out the
+/// effects.
 struct DockPresence: Equatable {
-    /// ⌃⌥D put it away: until ⌃⌥D again or "Show Agent Dock" (⌃⌥K shows it with its list until that closes).
+    /// ⌃⌥D or "Hide Agent Dock" put it away: until ⌃⌥D again or "Show Agent Dock" (⌃⌥K shows it with its list until
+    /// that closes).
     var hidden = false
     /// Folded to the orb.
     var minimized = false
@@ -97,7 +100,12 @@ struct DockPresence: Equatable {
     enum Event: Equatable {
         /// ⌃⌥D. `elsewhere`: the dock is (or would come back) on another screen than the pointer's.
         case toggleShown(elsewhere: Bool)
-        /// ⌃⌥M, "Minimize to Orb" / "Expand the Dock".
+        /// "Hide Agent Dock" / "Hide the Dock" in a menu: put away where it is. A menu never asks where the pointer
+        /// is (in the menu bar extra it is on the menu bar's display, maybe not the dock's).
+        case putAway
+        /// "Show Agent Dock" in the menu bar extra: back as it was and where it was (⌃⌥D's reveal, never moved).
+        case bringBack
+        /// ⌃⌥M (`elsewhere` as for ⌃⌥D), "Minimize to Orb" / "Expand the Dock" in the menus (never elsewhere).
         case toggleMinimized(elsewhere: Bool)
         /// The "–" on the pill.
         case minimize
@@ -144,6 +152,14 @@ struct DockPresence: Equatable {
                 return [.closeList]
             }
             return reveal(input, elsewhere: elsewhere)
+
+        case .putAway:
+            hidden = true
+            overApp = false
+            return [.closeList]
+
+        case .bringBack:
+            return reveal(input, elsewhere: false)
 
         case .toggleMinimized(let elsewhere):
             minimized.toggle()
