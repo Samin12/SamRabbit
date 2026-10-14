@@ -18,8 +18,12 @@ Sources (each optional; one that fails never empties the others):
 * **Codex** sessions: ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`` and nothing else under ``~/.codex`` (never
   ``auth.json``, ``config.toml`` or ``session_index.jsonl``: the walk starts inside ``sessions/``). Codex Desktop
   (originator ``Codex Desktop``) and the CLI (``codex_cli_rs``, ``codex-tui``); never T3's own Codex threads
-  (originator ``T3 Code``: they are T3 items), ``codex exec`` runs or subagents. Status from the tail's events
-  (``task_started`` / ``task_complete``, an ``*_approval_request`` nothing answered yet, ``turn_aborted``, ``error``).
+  (originator ``T3 Code``: they are T3 items), ``codex exec`` runs or subagents; symlinks are never followed. The title
+  is the first thing typed, looked for past the ~100 KB of instructions Codex Desktop writes first (up to 4 MB in,
+  once). Status from the tail's events: ``task_started`` / ``task_complete`` (a failed turn is a ``task_complete``
+  with an ``error``), ``turn_aborted``, an ``*_approval_request`` nothing answered yet (older Codex), ``error``.
+  Codex writes no approval request into its rollouts today, so a tool call with no output that went quiet for 30 s
+  "may be waiting" for Samin, unless the turn runs with approvals off (``approval_policy: never``).
 * **SamRabbit chats**: the sync store's 6 most recent conversations (R1, Watch, iPhone, Mac), ``working`` while a
   reply is being made.
 
@@ -27,15 +31,18 @@ Claude and Codex sessions count only when written in the last 3 days. ``live`` (
 right now) comes from Claude Code's registry (its pids checked with ``ps -p`` at most every 5 s), else ``ps -ax`` (the
 session id in the command line; at most every 30 s, only while a session is not in the registry) and ``lsof`` (the
 working folder). A live session cannot be continued from here (``409 session_live``: answer
-it where it runs); one that is not live is continued in a new Terminal window running ``claude --resume <id> <text>``
-or ``codex resume <id> <text>`` in its folder, so Samin keeps the CLI's own permission prompts.
+it where it runs); one that is not live is continued in a new Terminal window running ``claude --resume <id> --
+<text>`` or ``codex resume <id> -- <text>`` in its folder, so Samin keeps the CLI's own permission prompts. A session
+just resumed that way counts as live for 15 s (before ``ps`` can see it), so a second press never starts a second CLI.
+A Claude or Codex session that failed needs Samin until he marked it seen; then it is idle ("Hit an error").
 
 Routes (loopback peer + the desktop token only: the desktop sync API's rule, through ``samrabbit_mobile``):
 
 * ``GET /v1/desktop/inbox?after=<revision>&wait=<0..25>`` -> ``{revision, updatedAt, counts: {needsYou, working,
   total}, sources: {t3: {connected, reason?}, claude: {available, reason?}, codex: {available, reason?}, samrabbit:
   {available}}, items}``. With ``after`` equal to the current revision the answer waits up to ``wait`` seconds for a
-  change. ``revision`` grows by one whenever what the list shows changes (a hash of it).
+  change. ``revision`` grows by one whenever what the list shows changes (a hash of it); it starts from the time in
+  ms, so a bridge started again is always past what it gave out before.
 * ``GET /v1/desktop/inbox/items/<id>`` -> ``{item, messages: [{role, text, at}]}`` (the last 12, each at most 4000
   characters).
 * ``POST /v1/desktop/inbox/items/<id>/approve {requestId, decision}`` · ``/answer {requestId, answers}`` ·
@@ -113,9 +120,14 @@ REUSE_SECONDS = 1.0  # a request reuses a list built this recently
 TAIL_BYTES = 64 * 1024
 HEAD_BYTES = 96 * 1024
 DETAIL_BYTES = 768 * 1024  # how far back an item's messages are looked for
+CODEX_META_BYTES = 1024 * 1024  # a rollout's first record (session_meta: it carries the instructions), at most
+CODEX_TITLE_BYTES = 4 * 1024 * 1024  # how far into a rollout its first typed message is looked for (once)
+CODEX_LINE_BYTES = 256 * 1024  # a longer record there (a pasted image) is read this far, for its first words
 WAITING_AFTER_SECONDS = 4.0  # a tool call nobody answered for this long is a prompt waiting in the terminal
 WORKING_SECONDS = 15.0  # a session written to this recently is working
 CODEX_QUIET_SECONDS = 120.0  # an open Codex turn with nothing written for this long is not "working" any more
+CODEX_ASK_SECONDS = 30.0  # an open Codex tool call this quiet, with approvals on, may be a prompt waiting
+LAUNCH_GRACE_SECONDS = 15.0  # a session just resumed in Terminal counts as live this long (before ps can see it)
 LIVE_CHECK_SECONDS = 5.0  # Claude Code's registry and its pids, at most this often
 TABLE_SECONDS = 30.0  # the whole process table (when a session is not in the registry), at most this often
 T3_DETAILS_PER_REFRESH = 4  # thread reads (open requests, the last answer) per refresh, ...
@@ -159,10 +171,15 @@ _CODEX_DESKTOP = "Codex Desktop"
 _CODEX_CLI = frozenset({"codex_cli_rs", "codex-tui", "codex_tui", "codex-cli", "codex_cli"})
 _CODEX_STARTS = frozenset({"task_started", "turn_started"})
 _CODEX_ENDS = frozenset({"task_complete", "turn_complete"})
+_CODEX_TURN_EVENTS = _CODEX_STARTS | _CODEX_ENDS | {"turn_aborted"}
 _CODEX_APPROVALS = frozenset({"exec_approval_request", "apply_patch_approval_request", "request_permissions"})
 _CODEX_QUESTIONS = frozenset({"request_user_input", "elicitation_request"})
 _CODEX_RESOLVES = frozenset({"exec_command_begin", "exec_command_end", "patch_apply_begin", "patch_apply_end",
                              "user_message", "agent_message"})
+_CODEX_CALLS = frozenset({"function_call", "custom_tool_call", "local_shell_call"})
+# Codex's own tools that run (or return) by themselves: an open one never waits for an approval.
+_CODEX_SELF_RUNNING = frozenset({"wait", "wait_agent", "sleep", "spawn_agent", "send_message", "followup_task",
+                                 "list_agents", "request_user_input_async", "update_plan", "view_image"})
 _APPROVAL_TEXT = dict(t3._APPROVAL_TEXT)  # noqa: SLF001 - the same words as the phone
 
 
@@ -231,16 +248,21 @@ def _typed(text: str) -> bool:
     return bool(_typed_line(text))
 
 
+def _open_file(path: str) -> Any:
+    """``path`` for reading, never through a symlink (ELOOP): a session file is only ever the file it is."""
+    return os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb")
+
+
 def _read_head(path: str, limit: int = HEAD_BYTES) -> Tuple[bytes, bool]:
     """The first ``limit`` bytes and whether that was the whole file."""
-    with open(path, "rb") as handle:
+    with _open_file(path) as handle:
         data = handle.read(limit + 1)
     return data[:limit], len(data) <= limit
 
 
 def _read_tail(path: str, size: int, limit: int) -> Tuple[bytes, bool]:
     """The last ``limit`` bytes of a file of ``size`` bytes, and whether they start mid-line."""
-    with open(path, "rb") as handle:
+    with _open_file(path) as handle:
         start = max(0, size - limit)
         handle.seek(start)
         return handle.read(limit), start > 0
@@ -907,11 +929,15 @@ class _CodexFile:
         self.mtime = 0.0
         self.started_at = 0.0
         self.last_at = 0.0
-        self.turn = ""  # open | done | aborted | ""
+        self.title_at = 0  # where the search for the first typed message goes on from ...
+        self.title_done = False  # ... until it found one or went CODEX_TITLE_BYTES in
+        self.turn = ""  # open | done | failed | aborted | ""
         self.error: Optional[str] = None
         self.last_text = ""
         self.pending: Optional[Dict[str, Any]] = None  # {"kind": approval | question, "payload": {...}}
         self.open_calls = 0
+        self.open_call: Optional[Dict[str, str]] = None  # the newest tool call with no output yet: {id, name, ...}
+        self.approval_policy: Optional[str] = None  # the latest turn_context's: never | on-request | untrusted | ...
 
 
 def _codex_user_text(payload: Dict[str, Any]) -> Optional[str]:
@@ -939,6 +965,125 @@ def _codex_assistant_text(payload: Dict[str, Any]) -> Optional[str]:
         return "\n".join(str(part.get("text") or "") for part in payload.get("content") or []
                          if isinstance(part, dict) and part.get("type") == "output_text").strip() or None
     return None
+
+
+def _codex_said(item: Dict[str, Any]) -> Optional[str]:
+    """What a person typed in a rollout record: a user message (as a response item or an event), or the
+    ``item_completed`` event of a ``UserMessage`` (how Codex Desktop writes it now: an image there is a path)."""
+    payload = _dict(item.get("payload"))
+    if item.get("type") == "event_msg" and payload.get("type") == "item_completed":
+        entry = _dict(payload.get("item"))
+        if entry.get("type") != "UserMessage":
+            return None
+        parts = [str(part.get("text") or "") for part in entry.get("content") or []
+                 if isinstance(part, dict) and part.get("type") == "text"]
+        return "\n\n".join(part for part in parts if part.strip()) or None
+    if item.get("type") in ("event_msg", "response_item"):
+        return _codex_user_text(payload)
+    return None
+
+
+def _codex_prompt(said: Optional[str]) -> str:
+    """The title a user message gives: its first typed line, "" for what Codex injected."""
+    if not said or _CODEX_INJECTED.match(said):
+        return ""
+    return _typed_line(_codex_clean(said))
+
+
+def _codex_cut_prompt(line: bytes) -> str:
+    """The first typed words of a user message longer than ``CODEX_LINE_BYTES`` (a pasted image), read straight
+    from its JSON as far as it was read."""
+    opening = line[:8192].replace(b" ", b"")
+    if b'"role":"user"' not in opening and b'"UserMessage"' not in opening:
+        return ""
+    for match in _CUT_TEXT.finditer(line):
+        fragment = re.sub(rb"\\u?[0-9a-fA-F]{0,3}$|\\$", b"", match.group(1))
+        try:
+            text = json.loads(b'"' + fragment + b'"')
+        except ValueError:
+            continue
+        prompt = _codex_prompt(text) if isinstance(text, str) else ""
+        if prompt:
+            return prompt
+    return ""
+
+
+def _codex_error(value: Any) -> Optional[str]:
+    """A turn's failure as ``task_complete`` carries it (``error: {message, codex_error_info}``), else None."""
+    if isinstance(value, dict):
+        return str(value.get("message") or "").strip() or "Codex hit an error."
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _codex_call(payload: Dict[str, Any]) -> Dict[str, str]:
+    """A tool call as the inbox shows it while it may wait: {id, name, kind, detail} (never the code it runs)."""
+    name = str(payload.get("name") or payload.get("type") or "")
+    command: Any = _dict(payload.get("action")).get("command")
+    raw = payload.get("arguments")
+    if command is None and isinstance(raw, str) and len(raw) <= 64 * 1024:
+        try:
+            arguments = json.loads(raw)
+        except ValueError:
+            arguments = None
+        if isinstance(arguments, dict):
+            command = arguments.get("command") or arguments.get("cmd")
+    if isinstance(command, list):
+        command = " ".join(str(part) for part in command)
+    if isinstance(command, str) and command.strip():
+        kind, detail = "command", "Wants to run: " + _clip(command, 200)
+    elif name == "apply_patch":
+        kind, detail = "file-change", "Wants to edit files"
+    elif name in ("exec", "shell", "exec_command", "local_shell_call", "container.exec"):
+        kind, detail = "command", "Wants to run a command"
+    else:
+        kind, detail = "permission", "Wants to use " + _clip(name or "a tool", 80)
+    return {"id": str(payload.get("call_id") or payload.get("id") or "codex"), "name": name, "kind": kind,
+            "detail": detail}
+
+
+def _codex_meta(path: str) -> Tuple[Optional[Dict[str, Any]], int, bool]:
+    """A rollout's first record when it is its ``session_meta``, where the next record starts, and whether that is
+    settled (False while the first line is still being written: look again next time)."""
+    with _open_file(path) as handle:
+        line = handle.readline(CODEX_META_BYTES + 1)
+    if not line.endswith(b"\n"):
+        return None, 0, len(line) > CODEX_META_BYTES  # longer than any session_meta: not one the inbox reads
+    try:
+        value = json.loads(line)
+    except ValueError:
+        return None, len(line), True
+    if not isinstance(value, dict) or value.get("type") != "session_meta":
+        return None, len(line), True
+    return value, len(line), True
+
+
+def _skip_line(handle: Any, limit: int) -> Tuple[int, bool]:
+    """Reads on to the end of the current line, at most ``limit`` bytes: (bytes read, whether the line ended)."""
+    skipped = 0
+    while skipped < limit:
+        chunk = handle.readline(min(CODEX_LINE_BYTES, limit - skipped))
+        skipped += len(chunk)
+        if chunk.endswith(b"\n"):
+            return skipped, True
+        if not chunk:
+            break
+    return skipped, False
+
+
+def _codex_policy(record: _CodexFile, item: Dict[str, Any]) -> None:
+    policy = _dict(item.get("payload")).get("approval_policy")
+    if isinstance(policy, str) and policy:
+        record.approval_policy = policy
+
+
+def _real_folder(path: str) -> bool:
+    """A folder that is one (never a symlink to one)."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _codex_kept(meta: Dict[str, Any]) -> Optional[bool]:
@@ -984,7 +1129,7 @@ class CodexSessions:
                 names = [name for name in os.listdir(path) if _DAY.match(name)]
             except OSError:
                 return []
-            return sorted(names, key=int, reverse=True)
+            return sorted((name for name in names if _real_folder(os.path.join(path, name))), key=int, reverse=True)
 
         for year in numbered(self.root):
             for month in numbered(os.path.join(self.root, year)):
@@ -1004,9 +1149,11 @@ class CodexSessions:
         seen_paths = set()
         for folder in self._day_folders():
             try:
-                folder_info = os.stat(folder)
+                folder_info = os.lstat(folder)
             except OSError:
                 continue
+            if not stat.S_ISDIR(folder_info.st_mode):
+                continue  # a symlink: never followed out of sessions/
             cached = self._days.get(folder)
             if cached is None or cached[0] != folder_info.st_mtime_ns:
                 try:
@@ -1018,11 +1165,11 @@ class CodexSessions:
             for name in cached[1]:
                 path = os.path.join(folder, name)
                 try:
-                    info = os.stat(path)
+                    info = os.lstat(path)
                 except OSError:
                     continue
                 if info.st_mtime < cutoff or not stat.S_ISREG(info.st_mode):
-                    continue
+                    continue  # old, or not a plain file (a symlink is never followed)
                 seen_paths.add(path)
                 with self._lock:
                     record = self._files.get(path)
@@ -1047,48 +1194,92 @@ class CodexSessions:
 
     def _update(self, record: _CodexFile, info: os.stat_result) -> None:
         if not record.head_read:
-            data, whole = _read_head(record.path)
-            items = _records(data, partial_last=not whole)
-            if not items or items[0].get("type") != "session_meta":
-                record.head_read = whole or bool(items)
+            first, record.title_at, settled = _codex_meta(record.path)
+            if first is None:
+                record.head_read = settled
                 return
-            meta = _dict(items[0].get("payload"))
+            meta = _dict(first.get("payload"))
             kept = _codex_kept(meta)
             record.head_read = True
             record.keep = kept is not None
             record.desktop = kept is True
             record.thread_id = str(meta.get("id") or meta.get("session_id") or "").strip()
             record.cwd = str(meta.get("cwd") or "") or None
-            record.started_at = _epoch(meta.get("timestamp") or items[0].get("timestamp"))
-            for item in items[1:]:
-                if item.get("type") in ("event_msg", "response_item"):
-                    said = _codex_user_text(_dict(item.get("payload")))
-                    if said and not _CODEX_INJECTED.match(said) and _typed(_codex_clean(said)):
-                        record.first_prompt = _typed_line(_codex_clean(said))
-                        break
+            record.started_at = _epoch(meta.get("timestamp") or first.get("timestamp"))
         if not record.keep:
             return
         key = (info.st_mtime_ns, info.st_size)
         record.mtime = info.st_mtime
         if key == record.key:
             return
+        if not record.title_done:
+            self._find_title(record)
         data, partial = _read_tail(record.path, info.st_size, TAIL_BYTES)
+        items = _records(data, partial_first=partial)
+        if partial and not record.turn and not any(
+                _dict(item.get("payload")).get("type") in _CODEX_TURN_EVENTS for item in items):
+            # No turn seen yet and none in the tail (Codex Desktop writes a settings event each time a thread is
+            # looked at): further back, until one is.
+            data, partial = _read_tail(record.path, info.st_size, DETAIL_BYTES)
+            items = _records(data, partial_first=partial)
         record.key = key
-        self._read_tail(record, _records(data, partial_first=partial))
+        self._read_tail(record, items)
+
+    @staticmethod
+    def _find_title(record: _CodexFile) -> None:
+        """The first thing Samin typed, looked for on from where the last look stopped (a thread just started may not
+        have it yet) and given up ``CODEX_TITLE_BYTES`` in: Codex Desktop writes about 100 KB of instructions and
+        context first. Whole records only; one longer than ``CODEX_LINE_BYTES`` (a pasted image) gives the first
+        typed words it starts with, else is skipped."""
+        with _open_file(record.path) as handle:
+            handle.seek(record.title_at)
+            while record.title_at < CODEX_TITLE_BYTES:
+                line = handle.readline(CODEX_LINE_BYTES)
+                if not line.endswith(b"\n"):
+                    if len(line) < CODEX_LINE_BYTES:
+                        return  # the end of what is written so far: on from here next time
+                    prompt = _codex_cut_prompt(line)
+                    if prompt:
+                        record.first_prompt, record.title_done = prompt, True
+                        return
+                    skipped, ended = _skip_line(handle, CODEX_TITLE_BYTES - record.title_at - len(line))
+                    if not ended:
+                        record.title_done = record.title_at + len(line) + skipped >= CODEX_TITLE_BYTES
+                        return  # still being written (from its start next time), or past the limit
+                    record.title_at += len(line) + skipped
+                    continue
+                record.title_at += len(line)
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "turn_context" and record.approval_policy is None:
+                    _codex_policy(record, item)  # the first turn's, until the tail has a newer one
+                prompt = _codex_prompt(_codex_said(item))
+                if prompt:
+                    record.first_prompt, record.title_done = prompt, True
+                    return
+        record.title_done = True  # nothing typed that far in: the thread keeps its generic title
 
     @staticmethod
     def _read_tail(record: _CodexFile, items: List[Dict[str, Any]]) -> None:
-        turn, error, pending, last_text, last_at = record.turn, None, None, "", 0.0
-        calls: Dict[str, bool] = {}
+        turn, error, pending, last_text, last_at = record.turn, record.error, None, "", 0.0
+        calls: Dict[str, Dict[str, str]] = {}
         events_text = any(item.get("type") == "event_msg" and _dict(item.get("payload")).get("type") ==
                           "agent_message" for item in items)
         for item in items:
             last_at = max(last_at, _epoch(item.get("timestamp")))
             payload = _dict(item.get("payload"))
             kind = payload.get("type")
+            if item.get("type") == "turn_context":
+                _codex_policy(record, item)
+                continue
             if item.get("type") == "response_item":
-                if kind in ("function_call", "custom_tool_call", "local_shell_call"):
-                    calls[str(payload.get("call_id") or payload.get("id") or len(calls))] = True
+                if kind in _CODEX_CALLS:
+                    call = _codex_call(payload)
+                    calls[call["id"] if call["id"] != "codex" else str(len(calls))] = call
                 elif kind in ("function_call_output", "custom_tool_call_output"):
                     calls.pop(str(payload.get("call_id") or ""), None)
                     pending = None
@@ -1102,12 +1293,14 @@ class CodexSessions:
             if kind in _CODEX_STARTS:
                 turn, error, pending, calls = "open", None, None, {}
             elif kind in _CODEX_ENDS:
-                turn, pending, calls = "done", None, {}
+                # A failed turn ends too: ``error: {message, codex_error_info}`` and no last answer.
+                error = _codex_error(payload.get("error"))
+                turn, pending, calls = ("failed" if error else "done"), None, {}
                 said = payload.get("last_agent_message")
                 if isinstance(said, str) and said.strip():
                     last_text = said
-            elif kind == "turn_aborted":
-                turn, pending, calls = "aborted", None, {}
+            elif kind == "turn_aborted":  # Esc: whatever went wrong before is over
+                turn, error, pending, calls = "aborted", None, None, {}
             elif kind in _CODEX_APPROVALS:
                 pending = {"kind": "approval", "type": kind, "payload": payload}
             elif kind in _CODEX_QUESTIONS:
@@ -1127,6 +1320,7 @@ class CodexSessions:
         record.error = error
         record.pending = pending
         record.open_calls = len(calls)
+        record.open_call = list(calls.values())[-1] if calls else None
         record.last_text = last_text or record.last_text
         record.last_at = last_at or record.last_at
 
@@ -1220,8 +1414,11 @@ class InboxService:
         self._lock = threading.RLock()
         self._refresh_lock = threading.Lock()
         self._changed = threading.Condition(threading.Lock())
-        self._state = _State(0, -1e12, [], {}, {"needsYou": 0, "working": 0, "total": 0})
-        self._digest = ""
+        # The revision starts from the time (in ms), so a bridge started again never answers a dock's ``after`` from
+        # before with a list that changed meanwhile: it is always past every revision an earlier run gave out.
+        self._state = _State(int(clock() * 1000), -1e12, [], {}, {"needsYou": 0, "working": 0, "total": 0})
+        self._digest = ""  # "" until the first list is built
+        self._launched: Dict[str, float] = {}  # item id -> when a Terminal window was opened to resume it
         self._t3_details: Dict[str, Tuple[str, Any, str]] = {}  # thread id -> (updatedAt, PendingRequests, answer)
         self._t3_threads: Dict[str, Dict[str, Any]] = {}  # the last snapshot's threads (for seen markers)
         self._live: Tuple[float, Dict[str, Dict[str, Any]]] = (-1e12, {})  # (read at, Claude Code's registry)
@@ -1353,7 +1550,7 @@ class InboxService:
         state = self._state
         if self._monotonic() - state.built_at < REUSE_SECONDS:
             return state
-        return self.refresh(blocking=state.revision == 0)  # a slow T3 never holds up a list that exists
+        return self.refresh(blocking=not self._digest)  # a slow T3 never holds up a list that exists
 
     def _demand(self) -> None:
         idle = self._monotonic() - self._demand_at > DEMAND_SECONDS
@@ -1576,11 +1773,13 @@ class InboxService:
     def _claude_item(self, record: _ClaudeFile, now: float,
                      owners: Tuple[Dict[str, Tuple[Optional[Dict[str, Any]], int]], bool]) -> Dict[str, Any]:
         owner = owners[0].get(record.session_id)
-        is_live: Optional[bool] = True if owner is not None else (False if owners[1] else None)
-        status, label, summary, pending = _claude_state(record, now, is_live, owner[0] if owner else None)
         item_id = "claude:" + record.session_id
+        is_live: Optional[bool] = True if owner is not None or self._just_launched(item_id) else (
+            False if owners[1] else None)
+        status, label, summary, pending = _claude_state(record, now, is_live, owner[0] if owner else None)
         updated = iso_utc(_updated(record))
         unread = status not in (WORKING, IDLE) and t3.is_unread(updated, self.seen.get(item_id))
+        status = _settled(status, unread)
         if status in (NEEDS_APPROVAL, NEEDS_INPUT):
             can = ["open"]  # the CLI owns its prompt: only the terminal can answer it
         else:
@@ -1607,12 +1806,13 @@ class InboxService:
 
     def _codex_item(self, record: _CodexFile, now: float,
                     owners: Tuple[Dict[str, Tuple[Optional[Dict[str, Any]], int]], bool]) -> Dict[str, Any]:
-        is_live: Optional[bool] = False if record.desktop else (
-            True if record.thread_id in owners[0] else (False if owners[1] else None))
-        status, label, summary, pending = _codex_state(record, now, is_live)
         item_id = "codex:" + record.thread_id
+        is_live: Optional[bool] = False if record.desktop else (
+            True if record.thread_id in owners[0] or self._just_launched(item_id) else (False if owners[1] else None))
+        status, label, summary, pending = _codex_state(record, now, is_live)
         updated = iso_utc(_updated(record))
         unread = status not in (WORKING, IDLE) and t3.is_unread(updated, self.seen.get(item_id))
+        status = _settled(status, unread)
         if record.desktop:
             can = ["open"]  # the app owns its threads
         elif status in (NEEDS_APPROVAL, NEEDS_INPUT) or is_live:
@@ -1943,9 +2143,14 @@ class InboxService:
                 self.launcher.app(TERMINAL_BUNDLE_ID)
             _LOG.info("inbox opened a live %s session", source)
             return {"opened": True, "how": "terminal", **dry}
+        if self._just_launched(source + ":" + key):  # its Terminal window is still starting: never a second CLI
+            self.launcher.app(TERMINAL_BUNDLE_ID)
+            _LOG.info("inbox opened a %s session just resumed", source)
+            return {"opened": True, "how": "terminal", **dry}
         cwd = self._folder_of(item)
         argv = [self._tool("claude"), "--resume", key] if source == "claude" else [self._tool("codex"), "resume", key]
         self.launcher.terminal(cwd, argv)
+        self._launched_now(source + ":" + key)
         _LOG.info("inbox resumed a %s session in Terminal", source)
         return {"opened": True, "how": "terminal", **dry}
 
@@ -1957,14 +2162,33 @@ class InboxService:
             record = self.codex.find(key)
             if record is not None and record.desktop:
                 raise _unsupported("Codex Desktop owns this thread: open it there to reply.")
-        if item.get("live") or self._owner(source, key) is not None:
+        if item.get("live") or self._just_launched(source + ":" + key) or self._owner(source, key) is not None:
             raise InboxError(409, "session_live", "It's open in a terminal: open it to answer there.")
         cwd = self._folder_of(item)
-        argv = [self._tool("claude"), "--resume", key, text] if source == "claude" else \
-            [self._tool("codex"), "resume", key, text]
+        # ``--`` ends the options: a reply that starts with "-" (a list, "-p ...") is the prompt, never a flag.
+        argv = [self._tool("claude"), "--resume", key, "--", text] if source == "claude" else \
+            [self._tool("codex"), "resume", key, "--", text]
         self.launcher.terminal(cwd, argv)
+        self._launched_now(source + ":" + key)
         _LOG.info("inbox continued a %s session in Terminal", source)
         return 202, {"ok": True, "how": "terminal", **({"dryRun": True} if self.launcher.dry_run else {})}
+
+    def _launched_now(self, item_id: str) -> None:
+        if self.launcher.dry_run:
+            return  # nothing was opened
+        with self._lock:
+            now = self._monotonic()
+            self._launched = {key: at for key, at in self._launched.items() if now - at < LAUNCH_GRACE_SECONDS}
+            self._launched[item_id] = now
+        self._changed_now()
+
+    def _just_launched(self, item_id: str) -> bool:
+        """A Terminal window was opened to resume this session moments ago: until its CLI shows in ``ps`` (Terminal
+        starting, the login shell, the script) it counts as live, so a second press never starts a second CLI on
+        the same session file."""
+        with self._lock:
+            at = self._launched.get(item_id)
+            return at is not None and self._monotonic() - at < LAUNCH_GRACE_SECONDS
 
     def _owner(self, source: str, key: str) -> Optional[int]:
         """The pid of the CLI that owns a Claude or Codex session right now (looked up again: Samin may just have
@@ -2136,6 +2360,12 @@ def _needs_you(item: Dict[str, Any]) -> bool:
     return item["status"] in NEEDS_YOU or (item["status"] == DONE and bool(item.get("unread")))
 
 
+def _settled(status: str, unread: bool) -> str:
+    """A Claude Code or Codex session that failed needs Samin until he saw it (nothing else can settle it, unlike a
+    T3 thread): then it is idle, its label still saying it hit an error. A new error makes it unread again."""
+    return IDLE if status == ERROR and not unread else status
+
+
 def _family(driver: str, model: str) -> Optional[str]:
     """``claude`` or ``codex`` for a T3 provider driver / instance (or, failing that, a model id), else None."""
     name = driver.lower()
@@ -2304,19 +2534,23 @@ def _codex_state(record: _CodexFile, now: float, live: Optional[bool]) -> Tuple[
         summary = questions[0]["question"] if questions else _clip(payload.get("message") or "Codex has a question",
                                                                     240)
         return NEEDS_INPUT, "Has a question " + where, summary, pending
-    if record.error and record.turn != "done":
+    if record.error:  # a failed turn (or an error nothing ended yet); a finished or stopped turn clears it
         return ERROR, "Hit an error", record.error, pending
     if record.turn == "done":
         return DONE, "Finished", record.last_text, pending
     if record.turn == "aborted":
         return IDLE, "Stopped", record.last_text or "Stopped", pending
     if record.turn == "open":
+        # Codex writes no approval request into its rollouts: a tool call with no output yet that went quiet may be
+        # one, unless approvals are off for the turn ("never": it is running) or it is one of Codex's own tools.
+        call = record.open_call
+        if call is not None and call["name"] not in _CODEX_SELF_RUNNING and record.approval_policy != "never" and \
+                (record.desktop or live is True) and idle > CODEX_ASK_SECONDS:
+            pending["approvals"] = [{"requestId": call["id"], "kind": call["kind"], "detail": call["detail"],
+                                     "options": []}]
+            return NEEDS_APPROVAL, "May be waiting for you " + where, call["detail"], pending
         if idle <= CODEX_QUIET_SECONDS:
             return WORKING, "Working", record.last_text or "Working", pending
-        if live and record.open_calls and not record.desktop:
-            pending["approvals"] = [{"requestId": "codex", "kind": "command", "detail": "Waiting in the terminal",
-                                     "options": []}]
-            return NEEDS_APPROVAL, "Waiting for you in the terminal", "Waiting in the terminal", pending
         return IDLE, "Quiet", record.last_text or "", pending
     if idle <= WORKING_SECONDS:
         return WORKING, "Working", record.last_text or "Working", pending
@@ -2406,7 +2640,7 @@ def _number(query: Dict[str, List[str]], key: str) -> Optional[int]:
     value = values[0].strip() if values else ""
     if not value:
         return None
-    if not value.isdigit() or len(value) > 12:
+    if not value.isdigit() or len(value) > 16:  # a revision is a time in ms (13 digits) and on
         raise _bad("invalid_query", f"{key} must be a whole number.")
     return int(value)
 

@@ -79,7 +79,7 @@ class FakeProcesses:
     def cwd(self, process: inbox.Process) -> Optional[str]:
         return self.cwds.get(process.pid)
 
-    def app_of(self, pid: int) -> Optional[str]:
+    def app_of(self, pid: int, table: Optional[Dict[int, inbox.Process]] = None) -> Optional[str]:
         return self.apps.get(pid)
 
 
@@ -147,6 +147,49 @@ def codex_event(at: float, kind: str, **payload: Any) -> Dict[str, Any]:
     return codex_line("event_msg", at, {"type": kind, **payload})
 
 
+def desktop_head(at: float, thread_id: str, *, policy: str = "never") -> List[Dict[str, Any]]:
+    """How Codex Desktop (ChatGPT 26.1007) starts a rollout today: about 100 KB (its instructions in the meta, a
+    developer message, the world state, the turn context, AGENTS.md and the environment) before anything typed."""
+    return [
+        codex_meta(at, thread_id, originator="Codex Desktop", source="vscode",
+                   base_instructions={"text": "You are Codex. " + "i" * 22_000}),
+        codex_line("response_item", at, {"type": "message", "role": "developer", "content": [
+            {"type": "input_text",
+             "text": "<permissions instructions>" + "p" * 60_000 + "</permissions instructions>"}]}),
+        {"timestamp": iso(at), "type": "world_state", "payload": {"apps": "w" * 24_000}},
+        codex_line("turn_context", at, {"cwd": CWD, "approval_policy": policy, "model": "gpt-6",
+                                        "sandbox_policy": {"type": "danger-full-access"}}),
+        codex_line("response_item", at, {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "# AGENTS.md instructions for " + CWD + "\n\n<INSTRUCTIONS>be brief"
+                                           "</INSTRUCTIONS>"},
+            {"type": "input_text",
+             "text": "<environment_context>\n  <cwd>" + CWD + "</cwd>\n</environment_context>"}]})]
+
+
+def desktop_turn(at: float, text: Optional[str], answer: Optional[str] = None, *,
+                 error: Optional[str] = None) -> List[Dict[str, Any]]:
+    """One turn as Codex Desktop writes it now: ``item_completed`` events next to the response items, and a failure
+    inside ``task_complete`` (no ``error`` event, no last answer)."""
+    records = [codex_event(at, "task_started", turn_id="turn-" + str(int(at)))]
+    if text is not None:
+        records += [codex_line("response_item", at, {"type": "message", "role": "user", "content": [
+                        {"type": "input_text", "text": text}]}),
+                    codex_event(at, "item_completed", item={"type": "UserMessage", "id": "u-" + str(int(at)),
+                                                            "content": [{"type": "text", "text": text}]})]
+    records.append(codex_event(at, "thread_settings_applied", settings={"model": "gpt-6"}))
+    if answer is not None:
+        records += [codex_event(at + 5, "item_completed", item={"type": "AgentMessage", "id": "a-" + str(int(at)),
+                                                                "phase": "final_answer",
+                                                                "content": [{"type": "Text", "text": answer}]}),
+                    codex_line("response_item", at + 5, {"type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": answer}]})]
+    end: Dict[str, Any] = {"turn_id": "turn-" + str(int(at)), "last_agent_message": answer}
+    if error is not None:
+        end["error"] = {"message": error, "codex_error_info": "response_stream_disconnected"}
+    records.append(codex_event(at + 6, "task_complete", **end))
+    return records
+
+
 class InboxBase(MobileBase):
     """``MobileBase`` with the desktop inbox reading a synthetic HOME (the bridge's own inbox is replaced)."""
 
@@ -206,6 +249,11 @@ class InboxBase(MobileBase):
         path.write_text("".join(json.dumps(record) + "\n" for record in records))
         os.utime(path, (NOW - age, NOW - age))
         return path
+
+    def append(self, path: Path, records: List[Dict[str, Any]], *, age: float) -> None:
+        with open(path, "a") as handle:
+            handle.write("".join(json.dumps(record) + "\n" for record in records))
+        os.utime(path, (NOW - age, NOW - age))
 
     def register(self, pid: int, name: str, status: str, waiting_for: Optional[str] = None) -> None:
         entry = {"pid": pid, "sessionId": IDS[name], "cwd": CWD, "startedAt": int(NOW * 1000), "kind": "interactive",
@@ -406,7 +454,9 @@ class ListTest(InboxBase):
             {"id": "0", "header": "Database", "question": "Which database should I use?",
              "options": ["SQLite", "Postgres"], "allowCustom": True, "multiSelect": False}]}],
             asks["pending"]["inputs"])
-        self.assertEqual(("error", "Hit an error"), (claude["failed"]["status"], claude["failed"]["statusLabel"]))
+        self.assertEqual(("idle", "Hit an error", "API Error: rate limited"),
+                         (claude["failed"]["status"], claude["failed"]["statusLabel"], claude["failed"]["summary"]),
+                         "an error from before the first look is seen like the rest: the dock starts quiet")
         # Codex
         desk = codex["desk"]
         self.assertEqual(("done", "Draft the release notes", "Here are the release notes.", "codex", ["open"], False),
@@ -418,8 +468,9 @@ class ListTest(InboxBase):
         self.assertEqual([{"requestId": "call_9", "kind": "command", "detail": "Wants to run: psql -f migrate.sql",
                            "options": []}], wait["pending"]["approvals"])
         self.assertEqual("working", codex["cli_open"]["status"])
-        self.assertEqual(("error", "stream disconnected"),
-                         (codex["cli_error"]["status"], codex["cli_error"]["summary"]))
+        self.assertEqual(("idle", "Hit an error", "stream disconnected"),
+                         (codex["cli_error"]["status"], codex["cli_error"]["statusLabel"],
+                          codex["cli_error"]["summary"]))
         self.assertEqual(("done", "bump the version", ["reply", "open"]),
                          (codex["cli_done"]["status"], codex["cli_done"]["title"], codex["cli_done"]["can"]),
                          "a session filed under an older day is still read")
@@ -564,6 +615,33 @@ class CodexIsolationTest(InboxBase):
         for name in ("auth.json", "config.toml", "session_index.jsonl"):
             self.assertEqual(0, stat.S_IMODE(os.lstat(self.codex_root / name).st_mode), "still chmod 000: unread")
 
+    def test_a_symlink_is_never_followed_out_of_sessions(self) -> None:
+        outside = self.root / "elsewhere"
+        outside.mkdir()
+
+        def rollout(folder: Path, name: str) -> Path:
+            path = folder / f"rollout-2026-10-08T14-00-00-{IDS[name]}.jsonl"
+            path.write_text("".join(json.dumps(record) + "\n" for record in (
+                codex_meta(NOW - 100, IDS[name], originator="codex_cli_rs"),
+                codex_event(NOW - 99, "user_message", message="from outside"),
+                codex_event(NOW - 98, "task_complete", last_agent_message="ok"))))
+            return path
+
+        day = self.codex_root / "sessions" / "2026" / "10" / "08"
+        day.mkdir(parents=True)
+        link = day / f"rollout-2026-10-08T15-00-00-{IDS['cli_open']}.jsonl"
+        link.symlink_to(rollout(outside, "cli_open"))  # a "rollout" that is really another file
+        rollout(outside, "cli_wait")
+        (self.codex_root / "sessions" / "2026" / "10" / "09").symlink_to(outside, target_is_directory=True)
+        self.codex_session("cli_done", [codex_meta(NOW - 100, IDS["cli_done"], originator="codex_cli_rs"),
+                                        codex_event(NOW - 99, "user_message", message="bump the version")])
+        items = self.by_id(self.fresh())
+        self.assertIn("codex:" + IDS["cli_done"], items, "a real rollout is read")
+        self.assertNotIn("codex:" + IDS["cli_open"], items, "a symlinked rollout is not")
+        self.assertNotIn("codex:" + IDS["cli_wait"], items, "nor a symlinked day folder")
+        with self.assertRaises(OSError):
+            inbox._read_head(str(link))  # noqa: SLF001 - opened without following, even when asked for
+
 
 # ====================================================================== revisions and the long poll
 
@@ -581,6 +659,27 @@ class RevisionTest(InboxBase):
         moved = self.fresh()
         self.assertEqual(first["revision"] + 1, moved["revision"])
         self.assertEqual("Working · step 3/4", self.by_id(moved)["t3:t-running"]["statusLabel"])
+
+    def test_a_bridge_started_again_is_past_every_revision_it_gave_out(self) -> None:
+        self.build_world()
+        first = self.fresh()
+        self.assertGreater(first["revision"], int(NOW * 1000), "it starts from the time in ms")
+        for number in range(3):
+            self.claude_session("done", [claude_user(NOW - 10 + number, f"step {number}", session=IDS["done"])],
+                                age=10 - number)
+            self.fresh()
+        before = self.get_inbox()["revision"]
+        self.assertEqual(first["revision"] + 3, before)
+        self.clock.advance(2)
+        again = self.make_inbox()
+        self.addCleanup(again.close)
+        again.attach(self.server)
+        self.server.inbox = again
+        began = time.monotonic()
+        value = self.get_inbox(f"?after={before}&wait=20")
+        self.assertLess(time.monotonic() - began, 2.0, "a dock still waiting on the old bridge's revision gets the "
+                                                       "new list at once, never a stale wait")
+        self.assertGreater(value["revision"], before)
 
     def test_a_long_poll_wakes_up_when_something_changes(self) -> None:
         self.build_world()
@@ -795,16 +894,65 @@ class SessionActionTest(InboxBase):
         self.assertEqual(["/usr/bin/open", "-a", "Terminal"], call[:3])
         self.assertTrue(call[3].endswith(".command"))
         folder, argv = self.script_argv()
-        self.assertEqual((CWD, ["/opt/test/bin/claude", "--resume", IDS["done"], REPLY]), (folder, argv))
+        self.assertEqual((CWD, ["/opt/test/bin/claude", "--resume", IDS["done"], "--", REPLY]), (folder, argv),
+                         "-- ends the options: the reply is always the prompt")
         status, value = self.act("codex:" + IDS["cli_done"], "reply", {"text": REPLY})
         self.assertEqual(202, status, value)
         folder, argv = self.script_argv()
-        self.assertEqual((CWD, ["/opt/test/bin/codex", "resume", IDS["cli_done"], REPLY]), (folder, argv))
+        self.assertEqual((CWD, ["/opt/test/bin/codex", "resume", IDS["cli_done"], "--", REPLY]), (folder, argv))
         status, value = self.act("codex:" + IDS["desk"], "reply", {"text": REPLY})
         self.assertEqual((409, "unsupported_action"), (status, value["error"]["code"]), "Codex Desktop owns it")
         status, value = self.act("claude:" + IDS["done"], "approve", {"decision": "accept"})
         self.assertEqual((409, "unsupported_action"), (status, value["error"]["code"]))
         self.assert_log_clean(REPLY, "5521", CWD)
+
+    def test_a_reply_that_looks_like_an_option_is_still_the_prompt(self) -> None:
+        for text in ("-p --dangerously-skip-permissions", "- also add a test"):
+            with self.subTest(text=text):
+                status, value = self.act("claude:" + IDS["failed"], "reply", {"text": text})
+                self.assertEqual(202, status, value)
+                _folder, argv = self.script_argv()
+                self.assertEqual(["/opt/test/bin/claude", "--resume", IDS["failed"], "--", text], argv)
+                self.clock.advance(inbox.LAUNCH_GRACE_SECONDS + 1)
+        status, value = self.act("codex:" + IDS["cli_done"], "reply", {"text": "-m gpt-0 do it"})
+        self.assertEqual(202, status, value)
+        self.assertEqual(["/opt/test/bin/codex", "resume", IDS["cli_done"], "--", "-m gpt-0 do it"],
+                         self.script_argv()[1])
+
+    def test_a_session_just_resumed_is_never_started_twice(self) -> None:
+        item_id = "claude:" + IDS["done"]
+        status, value = self.act(item_id, "reply", {"text": REPLY})
+        self.assertEqual(202, status, value)
+        item = self.by_id(self.get_inbox())[item_id]
+        self.assertEqual((True, ["open"]), (item["live"], item["can"]),
+                         "its Terminal window is starting: live before ps can see the CLI")
+        status, value = self.act(item_id, "reply", {"text": REPLY})
+        self.assertEqual((409, "session_live"), (status, value["error"]["code"]), "a second press")
+        status, value = self.act(item_id, "open")
+        self.assertEqual((200, {"opened": True, "how": "terminal"}), (status, value))
+        self.assertEqual(["/usr/bin/open", "-b", "com.apple.Terminal"], self.recorder.calls[-1],
+                         "Open brings that window's Terminal forward instead of resuming it again")
+        self.assertEqual(1, len(self.recorder.scripts), "one CLI on the session file")
+        self.clock.advance(inbox.LAUNCH_GRACE_SECONDS + 1)
+        status, value = self.act(item_id, "open")
+        self.assertEqual(2, len(self.recorder.scripts), "later (nobody owns it in ps): resumed again")
+
+    def test_a_live_codex_cli_is_answered_where_it_runs(self) -> None:
+        self.processes.add(5100, "codex resume " + IDS["cli_done"], app="/Applications/Ghostty.app")
+        self.processes.add(5200, "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/"
+                                 "codex resume " + IDS["cli_error"], app="/Applications/ChatGPT.app")
+        items = self.by_id(self.fresh())
+        live = items["codex:" + IDS["cli_done"]]
+        self.assertEqual((True, ["open"]), (live["live"], live["can"]))
+        self.assertFalse(items["codex:" + IDS["cli_error"]]["live"], "the ChatGPT app's own codex is not a terminal")
+        status, value = self.act("codex:" + IDS["cli_done"], "reply", {"text": REPLY})
+        self.assertEqual((409, "session_live"), (status, value["error"]["code"]))
+        status, value = self.act("codex:" + IDS["cli_done"], "open")
+        self.assertEqual((200, {"opened": True, "how": "terminal"}), (status, value))
+        self.assertEqual([["/usr/bin/open", "-a", "/Applications/Ghostty.app"]], self.recorder.calls,
+                         "the app its terminal runs in")
+        status, value = self.act("codex:" + IDS["cli_error"], "reply", {"text": REPLY})
+        self.assertEqual(202, status, value)
 
     def test_a_folder_that_is_gone_is_said_so(self) -> None:
         import shutil
@@ -1107,6 +1255,163 @@ class ParsingTest(InboxBase):
         finally:
             inbox._read_tail = real  # noqa: SLF001
         self.assertEqual(0, sum(1 for path in reads if IDS["sdk"] in path), "a T3 session is never read past its head")
+
+
+class CodexFormatTest(InboxBase):
+    """Rollouts as the Codex installed on this Mac writes them today (no ``user_message`` / ``agent_message`` /
+    ``error`` / approval events at all)."""
+
+    def test_the_title_lies_past_a_hundred_kb_of_instructions(self) -> None:
+        t = NOW
+        path = self.codex_session("desk", desktop_head(t - 700, IDS["desk"]) +
+                                  desktop_turn(t - 690, "Draft the release notes", "Here are the release notes."),
+                                  age=600)
+        self.assertGreater(path.read_bytes().find(b"Draft the release notes"), inbox.HEAD_BYTES,
+                           "like the real thing: what he typed starts past the old head")
+        # A thread being written: only the instructions are there yet; what he typed comes next.
+        fresh = self.codex_session("cli_open", desktop_head(t - 20, IDS["cli_open"]), age=19)
+        # A first message bigger than a record is read (a pasted image after the words) ...
+        self.codex_session("cli_wait", desktop_head(t - 300, IDS["cli_wait"]) + [
+            codex_event(t - 290, "task_started"),
+            codex_line("response_item", t - 290, {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "Make the logo bigger"},
+                {"type": "input_image", "image_url": "data:image/png;base64," + "Q" * 400_000}]}),
+            codex_event(t - 280, "task_complete", last_agent_message="Done.")], age=280)
+        # ... and one whose words come after the image: the item_completed event has them (the image as a path).
+        self.codex_session("cli_done", desktop_head(t - 400, IDS["cli_done"]) + [
+            codex_event(t - 390, "task_started"),
+            codex_line("response_item", t - 390, {"type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64," + "Q" * 400_000},
+                {"type": "input_text", "text": "Crop this screenshot"}]}),
+            codex_event(t - 390, "item_completed", item={"type": "UserMessage", "id": "u", "content": [
+                {"type": "local_image", "path": "/tmp/shot.png"}, {"type": "text", "text": "Crop this screenshot"}]}),
+            codex_event(t - 380, "task_complete", last_agent_message="Cropped.")], age=380)
+        items = self.by_id(self.get_inbox())
+        desk = items["codex:" + IDS["desk"]]
+        self.assertEqual(("Draft the release notes", "done", "Finished", "Here are the release notes.", ["open"]),
+                         (desk["title"], desk["status"], desk["statusLabel"], desk["summary"], desk["can"]))
+        self.assertEqual("Codex thread", items["codex:" + IDS["cli_open"]]["title"], "nothing typed yet")
+        self.assertEqual("Make the logo bigger", items["codex:" + IDS["cli_wait"]]["title"])
+        self.assertEqual("Crop this screenshot", items["codex:" + IDS["cli_done"]]["title"])
+        self.append(fresh, desktop_turn(t - 10, "Rename the config flag"), age=9)
+        items = self.by_id(self.fresh())
+        self.assertEqual("Rename the config flag", items["codex:" + IDS["cli_open"]]["title"],
+                         "the search goes on where it stopped once the thread has more")
+        reads: List[int] = []
+        real = inbox._open_file  # noqa: SLF001
+
+        def counting(path: str) -> Any:
+            reads.append(1)
+            return real(path)
+
+        inbox._open_file = counting  # noqa: SLF001
+        try:
+            self.fresh()
+        finally:
+            inbox._open_file = real  # noqa: SLF001
+        self.assertEqual([], reads, "found once, never looked for again")
+
+    def test_a_failed_turn_needs_him_until_he_saw_it(self) -> None:
+        t = NOW
+        path = self.codex_session("desk", desktop_head(t - 900, IDS["desk"]) +
+                                  desktop_turn(t - 890, "Draft the release notes", "Here they are."), age=880)
+        cli = self.codex_session("cli_error", [
+            codex_meta(t - 900, IDS["cli_error"], originator="codex_cli_rs"),
+            codex_event(t - 899, "user_message", message="deploy it"),
+            codex_event(t - 898, "task_complete", last_agent_message="Deployed.")], age=898)
+        self.get_inbox()  # the first look
+        self.append(path, desktop_turn(t - 100, "And the changelog", error="stream disconnected before completion"),
+                    age=94)
+        self.append(cli, [codex_event(t - 60, "user_message", message="and roll it back"),
+                          codex_event(t - 59, "task_started"),
+                          codex_event(t - 50, "error", message="sandbox denied"),
+                          codex_event(t - 40, "turn_aborted", reason="interrupted")], age=40)
+        value = self.fresh()
+        desk = self.by_id(value)["codex:" + IDS["desk"]]
+        self.assertEqual(("error", "Hit an error", "stream disconnected before completion", True),
+                         (desk["status"], desk["statusLabel"], desk["summary"], desk["unread"]),
+                         "a task_complete with an error is a failure, not Finished")
+        self.assertEqual(["open", "seen"], desk["can"])
+        self.assertTrue(inbox._needs_you(desk))  # noqa: SLF001
+        stopped = self.by_id(value)["codex:" + IDS["cli_error"]]
+        self.assertEqual(("idle", "Stopped"), (stopped["status"], stopped["statusLabel"]),
+                         "Esc after an error: the turn is over, nothing is left to fix")
+        needs = value["counts"]["needsYou"]
+        status, answer = self.act("codex:" + IDS["desk"], "seen")
+        self.assertEqual((200, {"ok": True}), (status, answer))
+        value = self.fresh()
+        desk = self.by_id(value)["codex:" + IDS["desk"]]
+        self.assertEqual(("idle", "Hit an error", False, ["open"]),
+                         (desk["status"], desk["statusLabel"], desk["unread"], desk["can"]),
+                         "seen: it no longer needs him, and still says what happened")
+        self.assertEqual(needs - 1, value["counts"]["needsYou"])
+        # Claude Code too: an API error stops needing him once seen; a new one needs him again.
+        claude = self.claude_session("failed", [claude_user(t - 900, "summarize the logs", session=IDS["failed"]),
+                                                claude_text(t - 890, "Summary.", session=IDS["failed"])], age=890)
+        self.fresh()
+        self.append(claude, [claude_user(t - 80, "and the errors?", session=IDS["failed"]),
+                             claude_record("assistant", t - 79, session=IDS["failed"], isApiErrorMessage=True,
+                                           message={"id": "e", "role": "assistant", "model": "<synthetic>",
+                                                    "content": [{"type": "text", "text": "API Error: overloaded"}],
+                                                    "stop_reason": "stop_sequence"})], age=79)
+        item = self.by_id(self.fresh())["claude:" + IDS["failed"]]
+        self.assertEqual(("error", True), (item["status"], item["unread"]))
+        self.assertIn("seen", item["can"])
+        self.act(item["id"], "seen")
+        item = self.by_id(self.fresh())["claude:" + IDS["failed"]]
+        self.assertEqual(("idle", "Hit an error", "API Error: overloaded"),
+                         (item["status"], item["statusLabel"], item["summary"]))
+
+    def test_a_quiet_tool_call_may_be_a_prompt_only_when_approvals_are_on(self) -> None:
+        t = NOW
+
+        def calling(name: str, at: float, **call: Any) -> List[Dict[str, Any]]:
+            return desktop_turn(at, "Run the migration")[:-1] + [codex_line("response_item", at + 1, {
+                "type": call.pop("kind", "custom_tool_call"), "name": name, "call_id": "call_" + name, **call})]
+
+        self.codex_session("desk", desktop_head(t - 100, IDS["desk"], policy="on-request") +
+                           calling("exec", t - 90, input="psql -f migrate.sql", status="in_progress"), age=60)
+        self.codex_session("cli_done", desktop_head(t - 100, IDS["cli_done"], policy="never") +
+                           calling("exec", t - 90, input="make all", status="in_progress"), age=60)
+        self.codex_session("cli_open", desktop_head(t - 100, IDS["cli_open"], policy="on-request") +
+                           calling("wait_agent", t - 90, kind="function_call", arguments='{"timeout_ms": 60000}'),
+                           age=60)
+        self.codex_session("cli_error", desktop_head(t - 100, IDS["cli_error"], policy="on-request") +
+                           calling("exec", t - 90, input="ls", status="in_progress"), age=10)
+        self.codex_session("cli_wait", [
+            codex_meta(t - 100, IDS["cli_wait"], originator="codex_cli_rs"),
+            codex_line("turn_context", t - 99, {"cwd": CWD, "approval_policy": "on-request"}),
+            codex_event(t - 99, "user_message", message="migrate it"),
+            codex_event(t - 98, "task_started"),
+            codex_line("response_item", t - 97, {"type": "function_call", "name": "shell", "call_id": "call_s",
+                                                 "arguments": json.dumps({"command": ["psql", "-f", "x.sql"]})})],
+            age=60)
+        self.processes.add(5100, "codex resume " + IDS["cli_wait"], app="/Applications/Ghostty.app")
+        items = self.by_id(self.get_inbox())
+        desk = items["codex:" + IDS["desk"]]
+        self.assertEqual(("needs-approval", "May be waiting for you in Codex", "Wants to run a command"),
+                         (desk["status"], desk["statusLabel"], desk["summary"]),
+                         "Codex writes no approval request: a quiet open call, approvals on")
+        self.assertEqual([{"requestId": "call_exec", "kind": "command", "detail": "Wants to run a command",
+                           "options": []}], desk["pending"]["approvals"])
+        self.assertEqual("working", items["codex:" + IDS["cli_done"]]["status"], "approvals off: it runs")
+        self.assertEqual("working", items["codex:" + IDS["cli_open"]]["status"], "Codex's own wait never asks")
+        self.assertEqual("working", items["codex:" + IDS["cli_error"]]["status"], "not quiet long enough yet")
+        cli = items["codex:" + IDS["cli_wait"]]
+        self.assertEqual(("needs-approval", "May be waiting for you in the terminal", "Wants to run: psql -f x.sql",
+                          True, ["open"]),
+                         (cli["status"], cli["statusLabel"], cli["summary"], cli["live"], cli["can"]))
+        self.assertNotIn("psql", json.dumps(desk), "the code a tool runs is never shown")
+
+    def test_a_tail_of_settings_events_looks_further_back(self) -> None:
+        t = NOW
+        self.codex_session("desk", desktop_head(t - 900, IDS["desk"]) +
+                           desktop_turn(t - 890, "Draft the release notes", "Here are the release notes.") +
+                           [codex_event(t - 800 + index, "thread_settings_applied", settings={"pad": "s" * 2000})
+                            for index in range(60)], age=740)
+        desk = self.by_id(self.get_inbox())["codex:" + IDS["desk"]]
+        self.assertEqual(("done", "Here are the release notes."), (desk["status"], desk["summary"]),
+                         "Codex Desktop writes a settings event each time a thread is looked at")
 
 
 if __name__ == "__main__":

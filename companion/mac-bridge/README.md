@@ -614,13 +614,22 @@ the token, 403 from any other machine, even with it).
   permissions are bypassed or for a subagent's `Task`), text that ended its turn is `done`, a file written in the last
   15 s is `working`, an API error message is `error`, else `idle`.
 - **Codex**: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` and **nothing else under `~/.codex`** (never `auth.json`,
-  `config.toml` or `session_index.jsonl`: the walk starts inside `sessions/`), written in the last 3 days, also when
-  filed under an older day. Codex Desktop (originator `Codex Desktop`) and the CLI (`codex_cli_rs`, `codex-tui`);
-  never T3's own Codex threads (originator `T3 Code`: they are T3 items), `codex exec`, subagents or Codex's reviewers.
-  The title is the first message Samin typed (what Codex injects into it is left out). Status from the tail's events:
-  an `exec_approval_request` / `apply_patch_approval_request` / `request_permissions` nothing answered yet
-  (`needs-approval`), `request_user_input` (`needs-input`), `error` in the open turn, `task_complete` (`done`),
-  `turn_aborted` (`idle`, "Stopped"), an open turn written in the last 2 minutes (`working`).
+  `config.toml` or `session_index.jsonl`: the walk starts inside `sessions/`, and a symlinked folder or file is never
+  followed or opened), written in the last 3 days, also when filed under an older day. Codex Desktop (originator
+  `Codex Desktop`) and the CLI (`codex_cli_rs`, `codex-tui`); never T3's own Codex threads (originator `T3 Code`: they
+  are T3 items), `codex exec`, subagents or Codex's reviewers. The title is the first message Samin typed (what Codex
+  injects into it is left out): Codex Desktop writes about 100 KB of instructions and context before it, so it is
+  looked for record by record up to 4 MB in, once (a thread still being written: on from where the last look stopped;
+  a record over 256 KiB, a pasted image, gives the first typed words it starts with). Status from the tail's events,
+  as the Codex installed today writes them (`task_started`, `task_complete`, `turn_aborted`, `item_completed`,
+  `thread_settings_applied`, `token_count`; a tail of nothing but settings events is read further back):
+  `task_complete` (`done`) or, with an `error: {message, …}` in it, `error`; `turn_aborted` (`idle`, "Stopped"; it
+  also ends an error); an open turn written in the last 2 minutes (`working`). Codex writes no approval request into
+  its rollouts any more, so a tool call with no output that went quiet for 30 s is `needs-approval`, "May be waiting
+  for you in Codex" (a live CLI: "… in the terminal"), unless the turn runs with approvals off (`approval_policy:
+  never`, the turn context's) or the call is one of Codex's own (`wait_agent`, `sleep`, …). Older Codex's
+  `exec_approval_request` / `apply_patch_approval_request` / `request_permissions` (`needs-approval`),
+  `request_user_input` (`needs-input`) and `error` events are still read.
 - **SamRabbit chats**: the sync store's 6 most recent conversations (R1, Watch, iPhone, Mac), `working` while the
   assistant is answering one (or an R1 reply is still being written), else `idle`.
 
@@ -634,14 +643,14 @@ or mtime changed, a session that is not a terminal one never past its head; a re
 
 | Route | Answer |
 |---|---|
-| `GET /v1/desktop/inbox?after=<revision>&wait=<0..25>` | `{revision, updatedAt, counts: {needsYou, working, total}, sources: {t3: {connected, reason?}, claude: {available, reason?}, codex: {available, reason?}, samrabbit: {available}}, items}`. With `after` equal to the current revision it waits up to `wait` s for a change (long poll). `revision` grows by one whenever what the list shows changes (a hash of it). A background refresher keeps it fresh: about every 2 s while a client waits, every 15 s while one asked in the last ten minutes, asleep otherwise |
+| `GET /v1/desktop/inbox?after=<revision>&wait=<0..25>` | `{revision, updatedAt, counts: {needsYou, working, total}, sources: {t3: {connected, reason?}, claude: {available, reason?}, codex: {available, reason?}, samrabbit: {available}}, items}`. With `after` equal to the current revision it waits up to `wait` s for a change (long poll). `revision` grows by one whenever what the list shows changes (a hash of it); it starts from the time in ms, so a bridge started again is always past every revision it gave out before (a dock's long poll from before answers at once). A background refresher keeps it fresh: about every 2 s while a client waits, every 15 s while one asked in the last ten minutes, asleep otherwise |
 | `GET /v1/desktop/inbox/items/<id>` | `{item, messages: [{role: user\|assistant, text (≤ 4000 characters), at}]}`, the last 12 (tool steps and what Codex injects left out). A T3 item is read from T3 at that moment (its open requests too) |
 | `POST /v1/desktop/inbox/items/<id>/approve {requestId, decision}` | T3: `thread.approval.respond` (`decision`: one of the request's options, or `approve` / `deny`, mapped as for the phone) |
 | `POST /v1/desktop/inbox/items/<id>/answer {requestId, answers: {questionId: answer \| [answers]}}` | T3: `thread.user-input.respond` (option labels become the values T3 expects) |
-| `POST /v1/desktop/inbox/items/<id>/reply {text}` | `202 {ok, how}`: T3 `thread.turn.start` (`how: "t3"`); a Claude or Codex CLI session nobody owns: a new Terminal window running `claude --resume <id> <text>` / `codex resume <id> <text>` in its folder, so the CLI's own permission prompts stay (`how: "terminal"`). A live session: 409 `session_live` ("open it to answer there"); Codex Desktop's threads and chats: 409 `unsupported_action` |
+| `POST /v1/desktop/inbox/items/<id>/reply {text}` | `202 {ok, how}`: T3 `thread.turn.start` (`how: "t3"`); a Claude or Codex CLI session nobody owns: a new Terminal window running `claude --resume <id> -- <text>` / `codex resume <id> -- <text>` in its folder (`--`: a reply that starts with `-` is the prompt, never an option), so the CLI's own permission prompts stay (`how: "terminal"`). A live session, or one resumed from here in the last 15 s (its CLI not in `ps` yet): 409 `session_live` ("open it to answer there"); Codex Desktop's threads and chats: 409 `unsupported_action` |
 | `POST /v1/desktop/inbox/items/<id>/stop` | T3: `thread.turn.interrupt` (with the active turn), nothing when it is not working |
 | `POST /v1/desktop/inbox/items/<id>/seen` | `{ok}`: unread clears. T3 uses the R1's seen markers (a thread is unread when it finished or started needing him after he last looked); the others the time of what he saw |
-| `POST /v1/desktop/inbox/items/<id>/open` | `{opened: true, how}`: T3 → activates T3 Code (`how: "app"`; its `t3code://` scheme opens only sign-in and settings pages in 0.0.45, no thread); a live Claude / Codex CLI → the app its terminal runs in, found by walking the process's parents (Terminal, iTerm, Ghostty, T3 Code, an editor; Terminal itself when there is none, e.g. tmux); one nobody owns → a Terminal window running `claude --resume <id>` / `codex resume <id>` (`how: "terminal"`); Codex Desktop → `codex://threads/<id>`, the ChatGPT app's own deep link (`how: "deeplink"`); a chat → `{how: "desktop", conversationId}` (the app shows it itself) |
+| `POST /v1/desktop/inbox/items/<id>/open` | `{opened: true, how}`: T3 → activates T3 Code (`how: "app"`; its `t3code://` scheme opens only sign-in and settings pages in 0.0.45, no thread); a live Claude / Codex CLI → the app its terminal runs in, found by walking the process's parents (Terminal, iTerm, Ghostty, T3 Code, an editor; Terminal itself when there is none, e.g. tmux); one resumed from here in the last 15 s → Terminal; one nobody owns → a Terminal window running `claude --resume <id>` / `codex resume <id>` (`how: "terminal"`); Codex Desktop → `codex://threads/<id>`, the ChatGPT app's own deep link (`how: "deeplink"`); a chat → `{how: "desktop", conversationId}` (the app shows it itself) |
 | `GET /v1/desktop/inbox/targets` | `{projects: [{id, title, lastActiveAt}], agents: [{id: "claude"\|"codex", label, models: [{id, label}]}], default: {projectId, agent, model}}`: T3's projects (most recently active first, no scratch project) and the Claude and Codex providers it offers, from T3's `server.getConfig` (only its WebSocket RPC answers it: one call with the bridge's token, cached 10 minutes; providers that are not set up and legacy models are left out; without it, what the threads use). The default is the most recently active thread's provider and model |
 | `POST /v1/desktop/inbox/new {text, projectId?, agent?, model?, title?}` | `202 {itemId: "t3:<threadId>", threadId, title, projectId, projectName, placement, agent?, model?}`: `thread.create` + `thread.turn.start` as from the phone (without `projectId` the phone's placement). `agent` picks the provider instance its most recent thread used (else T3's default, else the first one that is set up), `model` one it offers (400 `invalid_model`), neither: the project's last model, as from the phone |
 
@@ -653,7 +662,9 @@ updatedAt, unread, pending: {approvals: [{requestId, kind, detail, options: [{de
 questions: [{id, header, question, options, allowCustom, multiSelect}]}]}, can, live, progress, phase}`. `can` is what
 the item supports now: `approve` / `answer` / `stop` only for T3; `reply` for T3 and for CLI sessions nobody owns;
 `seen` only while it is unread; a Claude or Codex prompt waiting in a terminal can only be opened. "Needs you" =
-needs-approval, needs-input, error, and done-and-unread. Order: needs-approval, needs-input, error, done and unread,
+needs-approval, needs-input, error, and done-and-unread. A Claude or Codex session that failed is `error` until Samin
+marks it seen (nothing else can settle it, unlike a T3 thread); then it is `idle`, its label still "Hit an error", until
+a new error. Order: needs-approval, needs-input, error, done and unread,
 working, then the rest, newest first in each; at most 60 items (`counts` are over all of them).
 
 What Samin has seen is `~/Library/Application Support/SamRabbit/inbox/inbox-state.json` (0600; `--inbox-dir`). The
@@ -793,7 +804,10 @@ launched): the desktop-token auth (401, 403 from the LAN or a foreign Origin), e
 is left out, the order, the cap and the counts, revisions and the long poll (woken by a change, by the refresher, or
 after its wait), seen and unread (kept across restarts), each action's dispatch body, `session_live`, what `open` and
 `reply` would run, targets with and without T3's provider list, new tasks with a project, agent and model, a dev
-copy's dry run, incremental reads, and that nothing about an item reaches the log. `tests/test_desktop_assistant.py`
+copy's dry run, incremental reads, rollouts in the format the installed Codex Desktop writes (a ~100 KB head before the
+first typed message, `item_completed` events, a failed `task_complete`, no approval events), symlinks that must not be
+followed, a live Codex CLI, a reply that starts with `-`, a session resumed twice in a row, a bridge started again,
+and that nothing about an item reaches the log. `tests/test_desktop_assistant.py`
 drives `/v1/desktop/assistant/*` with the watch assistant's fakes: the auth, the "Mac" conversation in the sync store
 (and that the Mac and the watch never share one), the Mac's prompt and time line, warm-up, cancel, end and
 announcements, and a streamed realtime turn with the Mac addendum.
