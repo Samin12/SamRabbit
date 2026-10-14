@@ -4,10 +4,14 @@ The R1 reads the user's Google Calendar from its secret iCal address, which is r
 cancel an event it asks this bridge, which runs the signed-in Composio CLI (managed Google auth):
 
     composio execute GOOGLECALENDAR_CREATE_EVENT | GOOGLECALENDAR_PATCH_EVENT | GOOGLECALENDAR_DELETE_EVENT -d -
+        --account <connection>
 
-with the JSON arguments on stdin (never on argv), one call at a time, 30 s each, no shell, a small child
-environment, and the process group killed on timeout. ``GOOGLECALENDAR_EVENTS_LIST`` (read-only) turns an
-iCal UID that is not ``<eventId>@google.com`` into the event id.
+through the bridge's shared Composio runner (``samrabbit_composio``: an allow-list of tool slugs, the JSON arguments
+on stdin, never on argv, a private working folder and ``TMPDIR`` per call, wiped after it), one call at a time, 30 s
+each, no shell, a small child environment, and the process group killed on timeout. ``GOOGLECALENDAR_EVENTS_LIST``
+(read-only) turns an iCal UID that is not ``<eventId>@google.com`` into the event id. ``--account`` is always the
+connection that is samin@aianswer.us (``DEFAULT_CONNECTION``; ``SAMRABBIT_CALENDAR_CONNECTION`` to change it), never
+Composio's own pick among several Google Calendar connections.
 
 Routes (bearer token and a loopback/private-LAN peer, like ``/v1/mac/*``):
 
@@ -29,12 +33,16 @@ import json
 import logging
 import os
 import re
-import shutil
-import signal
-import subprocess
+import sys
 import tempfile
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.append(_HERE)
+
+import samrabbit_composio as composio  # noqa: E402
 
 _LOG = logging.getLogger("samrabbit-bridge.calendar")
 
@@ -44,11 +52,14 @@ CREATE_ROUTE = "/v1/calendar/events"
 UPDATE_ROUTE = "/v1/calendar/events/update"
 DELETE_ROUTE = "/v1/calendar/events/delete"
 ROUTES = (STATUS_ROUTE, CREATE_ROUTE, UPDATE_ROUTE, DELETE_ROUTE)
-CLI_TIMEOUT_SECONDS = 30.0
+CLI_TIMEOUT_SECONDS = composio.CLI_TIMEOUT_SECONDS
 LOCK_WAIT_SECONDS = 15.0
-MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_CALENDAR_ID = "primary"
-FALLBACK_COMPOSIO = ("~/.local/bin/composio", "/opt/homebrew/bin/composio", "/usr/local/bin/composio")
+FALLBACK_COMPOSIO = composio.FALLBACK_COMPOSIO
+# The Composio connection the bridge reads and writes Google Calendar with. Two connections are ACTIVE, both
+# samin@aianswer.us (checked 2026-10-14 with a read-only GOOGLECALENDAR_EVENTS_LIST: the primary calendar's name is
+# the account's email); neither has an alias and the CLI cannot add one without linking again, so the word id is used.
+DEFAULT_CONNECTION = "googlecalendar_awest-hug"
 MAX_TITLE_CHARS = 300
 MAX_DESCRIPTION_CHARS = 8000
 MAX_LOCATION_CHARS = 500
@@ -77,126 +88,34 @@ _HTTP_STATUS = re.compile(r"\b([45]\d\d) (?:Client|Server) Error|status(?:_code|
                           re.IGNORECASE)
 
 
-class CalendarError(Exception):
+class CalendarError(composio.ComposioError):
     """An answer of ``{"error": {"code", "message", "retryable", "written"[, "fix"]}}``."""
-
-    def __init__(self, status: int, code: str, message: str, *, retryable: bool = False, written: Any = False,
-                 fix: Optional[str] = None) -> None:
-        super().__init__(message)
-        self.status = status
-        self.code = code
-        self.message = message
-        self.retryable = retryable
-        self.written = written
-        self.fix = fix
-
-    def payload(self) -> Dict[str, Any]:
-        error: Dict[str, Any] = {"code": self.code, "message": self.message, "retryable": self.retryable,
-                                 "written": self.written}
-        if self.fix:
-            error["fix"] = self.fix
-        return {"error": error}
 
 
 def _bad(code: str, message: str) -> CalendarError:
     return CalendarError(400, code, message)
 
 
-def _child_env() -> Dict[str, str]:
-    """A small, predictable environment for the CLI (no inherited tokens or tool settings)."""
-    env = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL")
-           if os.environ.get(key)}
-    env.setdefault("HOME", os.path.expanduser("~"))
-    env["PATH"] = os.environ.get("PATH") or "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    return env
-
-
-def _kill_group(process: subprocess.Popen) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        try:
-            process.kill()
-        except OSError:
-            pass
-
-
 # --------------------------------------------------------------------------- the CLI
 
 
-class ComposioCli:
-    """Runs ``composio execute <slug> -d -``. Output is parsed, never logged."""
+class ComposioCli(composio.ComposioCli):
+    """The shared runner (``samrabbit_composio``) with Google Calendar's words, slugs and connection
+    (``--account``): ``account`` when given, else ``SAMRABBIT_CALENDAR_CONNECTION``, else ``DEFAULT_CONNECTION``."""
 
-    def __init__(self, executable: Optional[str] = None, *, timeout: float = CLI_TIMEOUT_SECONDS) -> None:
-        self._explicit = executable
-        self._timeout = timeout
-        self._workdir = tempfile.mkdtemp(prefix="samrabbit-calendar-")  # 0700; the CLI's working folder
+    def __init__(self, executable: Optional[str] = None, *, timeout: float = CLI_TIMEOUT_SECONDS,
+                 account: Optional[str] = None) -> None:
+        super().__init__(executable, toolkit=CALENDAR, timeout=timeout,
+                         workdir=tempfile.mkdtemp(prefix="samrabbit-calendar-"))  # 0700; the calls' folders go inside
+        self.account = account or os.environ.get("SAMRABBIT_CALENDAR_CONNECTION") or DEFAULT_CONNECTION
 
-    def close(self) -> None:
-        shutil.rmtree(self._workdir, ignore_errors=True)
+    def _fallbacks(self) -> Tuple[str, ...]:
+        return FALLBACK_COMPOSIO  # this module's, read now (a test may point it at a missing file)
 
-    def executable(self) -> Optional[str]:
-        """``--composio`` when given (and nothing else, so tests never reach a real CLI); otherwise the path
-        install.sh recorded (``SAMRABBIT_COMPOSIO``), ``PATH``, then the usual install folders."""
-        candidates: List[str] = []
-        if self._explicit:
-            candidates.append(os.path.expanduser(self._explicit))
-        else:
-            if os.environ.get("SAMRABBIT_COMPOSIO"):
-                candidates.append(os.path.expanduser(os.environ["SAMRABBIT_COMPOSIO"]))
-            found = shutil.which("composio")
-            if found:
-                candidates.append(found)
-            candidates += [os.path.expanduser(path) for path in FALLBACK_COMPOSIO]
-        for path in candidates:
-            if os.path.isfile(path) and os.access(path, os.X_OK):
-                return path
-        return None
-
-    def execute(self, slug: str, arguments: Dict[str, Any], *, writing: bool) -> Dict[str, Any]:
+    def execute(self, slug: str, arguments: Dict[str, Any], *, writing: bool,
+                account: Optional[str] = None) -> Dict[str, Any]:
         """The tool's ``data`` on success; a ``CalendarError`` otherwise."""
-        unknown: Any = "unknown" if writing else False
-        executable = self.executable()
-        if executable is None:
-            raise CalendarError(503, "composio_missing", "The Composio CLI is not installed on the Mac, so Google "
-                                "Calendar can't be changed from the R1.", written=False)
-        os.makedirs(self._workdir, mode=0o700, exist_ok=True)
-        try:
-            process = subprocess.Popen([executable, "execute", slug, "-d", "-"], stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_env(),
-                                       cwd=self._workdir, start_new_session=True)
-        except OSError:
-            raise CalendarError(503, "composio_missing", "The Composio CLI could not be started on the Mac.",
-                                written=False) from None
-        try:
-            out, _err = process.communicate(json.dumps(arguments, ensure_ascii=False).encode("utf-8"),
-                                            timeout=self._timeout)
-        except subprocess.TimeoutExpired:
-            _kill_group(process)
-            process.communicate()
-            raise CalendarError(504, "calendar_timeout", "Google Calendar did not answer in time.",
-                                retryable=not writing, written=unknown) from None
-        if len(out) > MAX_OUTPUT_BYTES:
-            raise CalendarError(502, "calendar_bad_answer", "The Composio CLI sent too much at once.", written=unknown)
-        text = out.decode("utf-8", errors="replace").strip()
-        if not text:
-            if process.returncode == 0:  # what a signed-out CLI does
-                raise CalendarError(503, "composio_signed_out", "The Composio CLI on the Mac gave no answer. Check "
-                                    "that it is signed in (composio login) and that Google Calendar is linked.",
-                                    written=False, fix="Run on the Mac: composio login, then composio link "
-                                    "googlecalendar")
-            raise CalendarError(502, "composio_failed", "The Composio CLI failed on the Mac.", written=unknown)
-        try:
-            value = json.loads(text)
-        except ValueError:
-            value = None
-        if not isinstance(value, dict):
-            raise CalendarError(502, "calendar_bad_answer", "The Composio CLI answered with something unreadable.",
-                                written=unknown)
-        if value.get("successful") is True:
-            data = value.get("data")
-            return data if isinstance(data, dict) else {}
-        raise _failure(value, writing)
+        return super().execute(slug, arguments, writing=writing, account=account or self.account)
 
 
 def _failure(value: Dict[str, Any], writing: bool) -> CalendarError:
@@ -248,6 +167,15 @@ def _failure(value: Dict[str, Any], writing: bool) -> CalendarError:
         return CalendarError(422, "calendar_rejected", "Google Calendar refused those details (an event must "
                              "end after it starts).", written=False)
     return CalendarError(502, "calendar_rejected", "Google Calendar did not accept that change.", written=False)
+
+
+CALENDAR = composio.Toolkit(
+    label="Google Calendar", code_prefix="calendar", slugs=composio.CALENDAR_SLUGS, error=CalendarError,
+    missing="The Composio CLI is not installed on the Mac, so Google Calendar can't be changed from the R1.",
+    signed_out="The Composio CLI on the Mac gave no answer. Check that it is signed in (composio login) and that "
+               "Google Calendar is linked.",
+    signed_out_fix="Run on the Mac: composio login, then composio link googlecalendar",
+    failure=lambda value, writing: _failure(value, writing))
 
 
 # --------------------------------------------------------------------------- requests
@@ -371,7 +299,8 @@ class CalendarWriter:
         with self._state_lock:
             account, last_error, last_ok = self._account, self._last_error, self._last_ok_at
         return {"available": executable is not None, "composio": executable is not None, "path": executable,
-                "calendarId": self.calendar_id, "account": account, "lastError": last_error, "lastOkAt": last_ok}
+                "calendarId": self.calendar_id, "account": account, "connection": getattr(self.cli, "account", None),
+                "lastError": last_error, "lastOkAt": last_ok}
 
     # ------------------------------------------------------------------ operations
     def create(self, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -605,7 +534,7 @@ class UnavailableWriter:
 
     def capabilities(self) -> Dict[str, Any]:
         return {"available": False, "composio": False, "path": None, "calendarId": None, "account": None,
-                "lastError": self.code, "lastOkAt": None}
+                "connection": None, "lastError": self.code, "lastOkAt": None}
 
     def route(self, handler: Any, method: str, route: str) -> Tuple[int, Dict[str, Any]]:
         if route == STATUS_ROUTE and method == "GET":

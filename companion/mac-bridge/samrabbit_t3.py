@@ -1819,10 +1819,14 @@ class T3Hub:
         return {"ok": True, "threadId": str(thread["id"]), "wasWorking": True}
 
     def create(self, text: Any, *, project_id: Optional[str] = None, title: Optional[str] = None,
-               model_selection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               model_selection: Optional[Dict[str, Any]] = None, thread_id: Optional[str] = None) -> Dict[str, Any]:
         """``thread.create`` + ``thread.turn.start``. The model: ``model_selection`` when given (the desktop inbox's
-        chosen provider instance and model), else the project's most recent thread's, else the project default."""
+        chosen provider instance and model), else the project's most recent thread's, else the project default.
+        ``thread_id``: the new thread's id chosen by the caller (a voice note saves it before dispatching, so a retry
+        after a crash can look for that thread instead of making a second one)."""
         prompt = _prompt(text, "Say what the new task should do.")
+        if thread_id is not None:
+            thread_id = _thread_id(thread_id)
         snapshot = self.snapshot(max_age=10.0)
         records = snapshot.records
         if project_id:
@@ -1846,7 +1850,7 @@ class T3Hub:
         mode = str(recent.get("runtimeMode")) if recent is not None and recent.get("runtimeMode") in RUNTIME_MODES \
             else DEFAULT_RUNTIME_MODE
         name = " ".join(str(title or "").split())[:80] or title_from_prompt(prompt)
-        thread_id = self.commands.new_id()
+        thread_id = thread_id or self.commands.new_id()
         self._dispatch(self.commands.create_thread(thread_id=thread_id, project_id=chosen["id"], title=name,
                                                    model_selection=selection, runtime_mode=mode))
         try:
