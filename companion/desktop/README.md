@@ -255,7 +255,9 @@ T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, 
   right-click → Dismiss, or X. The row leaves at once (the selection moves to the next one, so X X X clears a run), the
   counts drop with it, and "Dismissed · <title> · Undo" shows for five seconds (Undo, or ⌘Z outside a field, brings it
   back as it was). The bridge keeps it out of the list until it changes — a new status, a new request, something it did
-  — and then it comes back by itself; a dismissal the bridge refused puts the row back and the toast says why. The compose bar at the bottom sends a new prompt to a T3 project
+  — and then it comes back by itself; a dismissal the bridge refused puts the row back and the toast says why. An item's
+  dismissals and undos go to the bridge one after the other, in the order they were made (dismiss, Undo, dismiss again
+  ends dismissed), and only the last one's answer moves the row (the window does the same). The compose bar at the bottom sends a new prompt to a T3 project
   with a chosen agent and model (`/targets`, `/new`); its project and agent menus open upward over the list (the panel
   grows to fit them, and a long list scrolls).
 - **Keys** (when the list has the keys and no field does — Esc leaves a field): J/K or ↓/↑, ↩ open a row (↩ again:

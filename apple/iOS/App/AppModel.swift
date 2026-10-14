@@ -78,8 +78,15 @@ final class AppModel {
     private var rows: [InboxItem] = []
     /// Tasks dismissed (or brought back) from here, until the Mac's list says the same (`InboxDismissals`).
     private(set) var dismissals = InboxDismissals()
-    /// A dismissal on its way (an undo waits for it: the Mac must never get them the other way round). true = it worked.
-    private var dismissCalls: [String: Task<Bool, Never>] = [:]
+    /// The last dismiss / undismiss call for a task. Each waits for the one before it, so the Mac gets them in the
+    /// order they were made (dismiss, Undo, dismiss again ends dismissed); its value is whether the Mac keeps the task
+    /// dismissed after it. Only the latest call (its `token`) changes the rows.
+    private struct DismissCall {
+        let token: UUID
+        let task: Task<Bool, Never>
+    }
+
+    private var dismissCalls: [String: DismissCall] = [:]
     /// "Dismissed · Undo" while it shows.
     var undoOffer: UndoOffer?
     /// The T3 rows in `tasks` are the last ones, kept while T3 Code isn't answering: shown read-only, counted nowhere.
@@ -671,19 +678,23 @@ final class AppModel {
         dismissals.dismiss(item)
         updateTasks()
         undoOffer = UndoOffer(item: item)
-        dismissCalls[item.id] = Task { [weak self] () -> Bool in
+        let before = dismissCalls[item.id]?.task
+        let token = UUID()
+        let call = Task { [weak self] () -> Bool in
+            _ = await before?.value  // after the call before it (an undo still on its way)
             do {
                 let result = try await client.inboxDismiss(item.id)
                 guard let self else { return true }
-                self.dismissCalls[item.id] = nil
-                self.dismissals.confirmed(item.id, revision: result.revision, current: self.inbox?.revision ?? 0)
-                self.updateTasks()
+                // Undone or dismissed again meanwhile: the rows are the later call's.
+                if self.finishDismissCall(item.id, token: token) {
+                    self.dismissals.confirmed(item.id, revision: result.revision, current: self.inbox?.revision ?? 0)
+                    self.updateTasks()
+                }
                 return true
             } catch {
                 guard let self else { return false }
-                self.dismissCalls[item.id] = nil
                 // Undone meanwhile: nothing to put back, nothing to say.
-                if self.dismissals.failed(item.id) {
+                if self.finishDismissCall(item.id, token: token), self.dismissals.failed(item.id) {
                     self.updateTasks()
                     if self.undoOffer?.item.id == item.id { withAnimation(.smooth) { self.undoOffer = nil } }
                     self.couldNot("Couldn't dismiss it", error)
@@ -691,6 +702,14 @@ final class AppModel {
                 return false
             }
         }
+        dismissCalls[item.id] = DismissCall(token: token, task: call)
+    }
+
+    /// A dismiss / undismiss call is answered: forgets it unless a later one took its place. Whether it was the latest.
+    private func finishDismissCall(_ id: String, token: UUID) -> Bool {
+        guard dismissCalls[id]?.token == token else { return false }
+        dismissCalls[id] = nil
+        return true
     }
 
     /// The Undo of "Dismissed · Undo": the task is back at once (as it was: unread stays unread), then
@@ -702,25 +721,37 @@ final class AppModel {
         Haptics.tap()
         dismissals.undo(item)
         updateTasks()
-        let pending = dismissCalls[item.id]
-        Task { [weak self] in
-            if let pending, await pending.value == false {
-                self?.dismissals.undoNotNeeded(item.id)  // it never was dismissed
-                self?.updateTasks()
-                return
+        let before = dismissCalls[item.id]?.task
+        let token = UUID()
+        let call = Task { [weak self] () -> Bool in
+            if let before, await before.value == false {
+                // The dismissal it undoes failed (or it is back already): nothing to undo, the Mac's row stays.
+                guard let self else { return false }
+                if self.finishDismissCall(item.id, token: token) {
+                    self.dismissals.undoNotNeeded(item.id)
+                    self.updateTasks()
+                }
+                return false
             }
             do {
                 let result = try await client.inboxUndismiss(item.id)
-                guard let self else { return }
-                self.dismissals.undoConfirmed(item.id, revision: result.revision, current: self.inbox?.revision ?? 0)
-                self.updateTasks()
+                guard let self else { return false }
+                if self.finishDismissCall(item.id, token: token) {
+                    self.dismissals.undoConfirmed(item.id, revision: result.revision, current: self.inbox?.revision ?? 0)
+                    self.updateTasks()
+                }
+                return false
             } catch {
-                guard let self else { return }
-                self.dismissals.undoFailed(item.id)
-                self.updateTasks()
-                self.couldNot("Couldn't bring it back", error)
+                guard let self else { return true }
+                if self.finishDismissCall(item.id, token: token) {
+                    self.dismissals.undoFailed(item.id)
+                    self.updateTasks()
+                    self.couldNot("Couldn't bring it back", error)
+                }
+                return true
             }
         }
+        dismissCalls[item.id] = DismissCall(token: token, task: call)
     }
 
     /// Lets go of dismissals nothing settled (the Mac's list never came): its own rows again.

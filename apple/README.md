@@ -101,7 +101,7 @@ dismissals and undos, new tasks, refusals).
 ## Tests
 
 ```sh
-cd apple/Shared/SamRabbitKit && swift test          # 227 tests on macOS, including the client against the fake bridge
+cd apple/Shared/SamRabbitKit && swift test          # 228 tests on macOS, including the client against the fake bridge
 # the same suite (minus the fake-bridge tests) on the watch simulator, and compiled for the watch's hardware:
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination 'platform=watchOS Simulator,name=Apple Watch Series 12 (46mm)' test)
 (cd apple/Shared/SamRabbitKit && xcodebuild -scheme SamRabbitKit -destination generic/platform=watchOS \
@@ -439,7 +439,9 @@ count every agent.
   once, "Dismissed · <title> · Undo" shows above the tab bar for five seconds, and `POST /inbox/items/<id>/dismiss`
   hides it on the Mac too (dock and window) until it changes: a new state, a new request, something it did. Then it
   comes back by itself. Undo brings it back as it was (`undismiss`, after the dismissal's own call if that is still on
-  its way); a refusal puts it back with "Couldn't dismiss it" and why. `InboxDismissals` keeps a dismissed row hidden
+  its way; a task's dismissals and undos always reach the Mac in the order they were made, and only the last one's
+  answer moves the row); a refusal puts it back with "Couldn't dismiss it" and why. The summary's `t3` and
+  `/t3/threads` (the watch, background alerts, the list used when the inbox fails) leave dismissed threads out too. `InboxDismissals` keeps a dismissed row hidden
   until the inbox at the revision the Mac's yes gave, and an undone one shown until the inbox carries it again.
   Nothing reaches T3, Claude Code or Codex.
 - **Live**: besides the 20 s refresh, the app follows the inbox's long-poll (`?after=<revision>&wait=25`) while it is

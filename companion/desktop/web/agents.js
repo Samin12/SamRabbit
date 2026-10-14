@@ -30,7 +30,9 @@ export class AgentInbox {
     this.composeBusy = false;
     this.composeNote = null;
     this.watched = null;
-    this.dismissCalls = new Map(); // id -> promise of whether the dismissal worked (an undo waits for it)
+    // id -> the last dismiss / undismiss call for it: a promise of whether the bridge keeps the item dismissed after
+    // it. Each call waits for the one before (dismissCall), so the bridge gets them in the order they were made.
+    this.dismissCalls = new Map();
     this.lastDismissed = null; // {item, at}: what ⌘Z brings back for a few seconds
     this.listeners = new Set();
     this.poller = poll ? new InboxPoller({
@@ -245,24 +247,25 @@ export class AgentInbox {
     this.notes.delete(item.id);
     this.lastDismissed = { item, at: this.now() };
     this.emit({ inbox: true, item: item.id, dismissed: item.id });
-    const call = (async () => {
+    return this.dismissCall(item.id, async (_before, latest) => {
       try {
         const reply = await this.api.act(item.id, 'dismiss', {});
-        this.store.confirmDismiss(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
+        // Undone (or dismissed again) meanwhile: the rows are the later call's.
+        if (latest()) this.store.confirmDismiss(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
         this.poller?.poke();
-        return { ok: true, problem: null };
+        return { dismissed: true, result: { ok: true, problem: null } };
       } catch (error) {
-        const shown = this.store.failDismiss(item.id);
-        if (this.lastDismissed && this.lastDismissed.item.id === item.id) this.lastDismissed = null;
+        let shown = false;
+        if (latest()) {
+          shown = this.store.failDismiss(item.id);
+          if (this.lastDismissed && this.lastDismissed.item.id === item.id) this.lastDismissed = null;
+        }
         // Undone meanwhile: nothing to say.
-        return { ok: false, problem: shown ? dismissProblem(error) : null };
+        return { dismissed: false, result: { ok: false, problem: shown ? dismissProblem(error) : null } };
       } finally {
-        this.dismissCalls.delete(item.id);
         this.emit({ inbox: true, item: item.id });
       }
-    })();
-    this.dismissCalls.set(item.id, call.then((result) => result.ok));
-    return call;
+    });
   }
 
   /**
@@ -274,23 +277,46 @@ export class AgentInbox {
     if (this.lastDismissed && this.lastDismissed.item.id === item.id) this.lastDismissed = null;
     this.store.undo(item, this.now());
     this.emit({ inbox: true, item: item.id, undone: item.id });
-    const pending = this.dismissCalls.get(item.id);
-    if (pending && !(await pending)) {
-      this.store.undoNotNeeded(item.id);
-      this.emit({ inbox: true, item: item.id });
-      return { ok: true, problem: null };
-    }
-    try {
-      const reply = await this.api.act(item.id, 'undismiss', {});
-      this.store.confirmUndo(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
-      this.poller?.poke();
-      return { ok: true, problem: null };
-    } catch (error) {
-      this.store.failUndo(item.id, this.now());
-      return { ok: false, problem: dismissProblem(error, { undo: true }) };
-    } finally {
-      this.emit({ inbox: true, item: item.id });
-    }
+    return this.dismissCall(item.id, async (before, latest) => {
+      if (before === false) {
+        // The dismissal it undoes failed (or it is back already): nothing to undo, the inbox's own row stays.
+        if (latest()) this.store.undoNotNeeded(item.id);
+        this.emit({ inbox: true, item: item.id });
+        return { dismissed: false, result: { ok: true, problem: null } };
+      }
+      try {
+        const reply = await this.api.act(item.id, 'undismiss', {});
+        if (latest()) this.store.confirmUndo(item.id, reply && Number.isFinite(reply.revision) ? reply.revision : undefined);
+        this.poller?.poke();
+        return { dismissed: false, result: { ok: true, problem: null } };
+      } catch (error) {
+        const mine = latest();
+        if (mine) this.store.failUndo(item.id, this.now());
+        return { dismissed: true, result: { ok: false, problem: mine ? dismissProblem(error, { undo: true }) : null } };
+      } finally {
+        this.emit({ inbox: true, item: item.id });
+      }
+    });
+  }
+
+  /**
+   * Runs one dismiss / undismiss call for `id` after the one before it, so the bridge gets them in the order they
+   * were made (dismiss, Undo, dismiss again ends dismissed). `run(before, latest)` gets whether the bridge kept the
+   * item dismissed after that call (undefined: none) and `latest()`, true while no later call for `id` was made
+   * (only the latest one changes the rows: an earlier one's answer is the later one's to settle). It resolves to
+   * {dismissed, result}; this resolves to `result`.
+   */
+  dismissCall(id, run) {
+    const before = this.dismissCalls.get(id);
+    let tail = null;
+    const latest = () => this.dismissCalls.get(id) === tail;
+    const call = (async () => run(before ? await before : undefined, latest))();
+    tail = call.then((outcome) => outcome.dismissed, () => false);
+    this.dismissCalls.set(id, tail);
+    tail.then(() => {
+      if (this.dismissCalls.get(id) === tail) this.dismissCalls.delete(id);
+    });
+    return call.then((outcome) => outcome.result);
   }
 
   /** What ⌘Z would bring back (the last dismissal, for as long as its toast shows), or null. */

@@ -254,6 +254,36 @@ test('an undo pressed while the dismissal is on its way waits for it (the bridge
   assert.ok(inbox.item(item.id));
 });
 
+test('dismiss, Undo, dismiss again before the first answer: the bridge gets the three in order and keeps it dismissed', async () => {
+  let release;
+  const hold = { action: 'dismiss', promise: new Promise((resolve) => { release = resolve; }) };
+  const api = fakeApi({ hold });
+  const inbox = loaded(api);
+  const item = inbox.item('t3:th_release_notes');
+  const id = item.id;
+  const first = inbox.dismiss(item);
+  const undo = inbox.undoDismiss(item);
+  const again = inbox.dismiss(item);
+  assert.equal(inbox.item(id), null, 'hidden: the last thing he did');
+  await Promise.resolve();
+  assert.deepEqual(api.calls.filter((c) => c[0] === 'act').map((c) => c[2]), ['dismiss'], 'the others wait');
+  release();
+  const done = { ok: true, problem: null };
+  assert.deepEqual(await Promise.all([first, undo, again]), [done, done, done]);
+  assert.deepEqual(api.log, [`act ${id} dismiss`, `done ${id} dismiss`, `act ${id} undismiss`, `done ${id} undismiss`,
+    `act ${id} dismiss`, `done ${id} dismiss`]);
+  assert.equal(inbox.dismissCalls.size, 0, 'nothing left to wait for');
+  // The bridge's list from after the undo (revision 3, the item in it) never shows it: the last dismissal settles at 4.
+  inbox.receive({ ...fixture.inbox, revision: 3 });
+  assert.equal(inbox.item(id), null);
+  inbox.receive({ ...fixture.inbox, revision: 4, items: fixture.inbox.items.filter((i) => i.id !== id) });
+  assert.equal(inbox.item(id), null);
+  assert.equal(inbox.store.isDismissed(id), false, 'the bridge\'s list decides from then on');
+  // And an undo now goes at once (nothing on its way to wait for).
+  assert.deepEqual(await inbox.undoDismiss(item), done);
+  assert.equal(api.log.at(-1), `done ${id} undismiss`);
+});
+
 test('a refused dismissal puts the row back and says why; a refused undo hides it again', async () => {
   const api = fakeApi({ fail: Object.assign(new ApiError(0, '', 'offline'), { only: 'dismiss' }) });
   const inbox = loaded(api);

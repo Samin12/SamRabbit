@@ -67,8 +67,15 @@ final class DockStore: ObservableObject {
 
     private var overlays: [String: Overlay] = [:]
     private var placeholders: [(item: DockItem, until: Date)] = []
-    /// A dismissal on its way (an undo waits for it: the bridge must never get the undo first). true = it worked.
-    private var dismissCalls: [String: Task<Bool, Never>] = [:]
+    /// The last dismiss / undismiss call for an item. Each waits for the one before it, so the bridge gets them in the
+    /// order they were made (dismiss, Undo, dismiss again ends dismissed); its value is whether the bridge keeps the
+    /// item dismissed after it. Only the latest call (its `token`) changes the rows.
+    private struct DismissCall {
+        let token: UUID
+        let task: Task<Bool, Never>
+    }
+
+    private var dismissCalls: [String: DismissCall] = [:]
     private var toastTimer: Timer?
     private var attention = DockAttention()
     private var pollTask: Task<Void, Never>?
@@ -389,25 +396,40 @@ final class DockStore: ObservableObject {
         rebuild()
         armToastTimer()
         guard live else { return }
+        let before = dismissCalls[item.id]?.task
+        let token = UUID()
         let call = Task { @MainActor [weak self] () -> Bool in
+            _ = await before?.value  // after the call before it (an undo still on its way)
             let result = await DockAPI.dismiss(item.id)
             guard let self else { return false }
-            self.dismissCalls[item.id] = nil
+            // Undone or dismissed again meanwhile: the rows are the later call's.
+            let latest = self.finishDismissCall(item.id, token: token)
             switch result {
             case .success(let reply):
                 Log.write("dock: dismiss ok")
-                self.dismissals.confirmed(item.id, revision: reply.revision ?? self.inbox.revision + 1, current: self.inbox.revision)
-                self.rebuild()
+                if latest {
+                    self.dismissals.confirmed(item.id, revision: reply.revision ?? self.inbox.revision + 1, current: self.inbox.revision)
+                    self.rebuild()
+                }
                 return true
             case .failure(let failure):
                 Log.write("dock: dismiss failed (HTTP \(failure.status)\(failure.code.map { " \($0)" } ?? ""))")
-                self.dismissals.failed(item.id, reason: Self.dismissProblem(failure, undo: false), now: Date())
-                self.rebuild()
-                self.armToastTimer()
+                if latest {
+                    self.dismissals.failed(item.id, reason: Self.dismissProblem(failure, undo: false), now: Date())
+                    self.rebuild()
+                    self.armToastTimer()
+                }
                 return false
             }
         }
-        dismissCalls[item.id] = call
+        dismissCalls[item.id] = DismissCall(token: token, task: call)
+    }
+
+    /// A dismiss / undismiss call is answered: forgets it unless a later one took its place. Whether it was the latest.
+    private func finishDismissCall(_ id: String, token: UUID) -> Bool {
+        guard dismissCalls[id]?.token == token else { return false }
+        dismissCalls[id] = nil
+        return true
     }
 
     /// The toast's Undo (or ⌘Z): the row is back at once, then `undismiss` (after the dismissal's own call, if it is
@@ -418,26 +440,40 @@ final class DockStore: ObservableObject {
         rebuild()
         armToastTimer()
         guard live else { return item }
-        let pending = dismissCalls[item.id]
-        Task { @MainActor [weak self] in
-            if let pending, await pending.value == false {
-                self?.dismissals.undoNotNeeded(item.id)  // it never was dismissed
-                self?.rebuild()
-                return
+        let before = dismissCalls[item.id]?.task
+        let token = UUID()
+        let call = Task { @MainActor [weak self] () -> Bool in
+            if let before, await before.value == false {
+                // The dismissal it undoes failed (or it is back already): nothing to undo, the inbox's row stays.
+                guard let self else { return false }
+                if self.finishDismissCall(item.id, token: token) {
+                    self.dismissals.undoNotNeeded(item.id)
+                    self.rebuild()
+                }
+                return false
             }
             let result = await DockAPI.undismiss(item.id)
-            guard let self else { return }
+            guard let self else { return false }
+            let latest = self.finishDismissCall(item.id, token: token)
             switch result {
             case .success(let reply):
                 Log.write("dock: undismiss ok")
-                self.dismissals.undoConfirmed(item.id, revision: reply.revision ?? self.inbox.revision + 1, current: self.inbox.revision)
+                if latest {
+                    self.dismissals.undoConfirmed(item.id, revision: reply.revision ?? self.inbox.revision + 1, current: self.inbox.revision)
+                    self.rebuild()
+                }
+                return false
             case .failure(let failure):
                 Log.write("dock: undismiss failed (HTTP \(failure.status)\(failure.code.map { " \($0)" } ?? ""))")
-                self.dismissals.undoFailed(item.id, reason: Self.dismissProblem(failure, undo: true), now: Date())
-                self.armToastTimer()
+                if latest {
+                    self.dismissals.undoFailed(item.id, reason: Self.dismissProblem(failure, undo: true), now: Date())
+                    self.armToastTimer()
+                    self.rebuild()
+                }
+                return true
             }
-            self.rebuild()
         }
+        dismissCalls[item.id] = DismissCall(token: token, task: call)
         return item
     }
 
