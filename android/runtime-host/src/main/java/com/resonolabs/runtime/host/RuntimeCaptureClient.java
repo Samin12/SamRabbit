@@ -14,7 +14,10 @@ public final class RuntimeCaptureClient implements AutoCloseable {
     public interface Callback {
         void onResult(JSONObject value);
 
-        /** {@code httpStatus} 0 = runtime not reachable; {@code code} is the runtime's error code. */
+        /**
+         * {@code httpStatus} 0 = no answer: {@code runtime_unavailable} (it never got the note) or
+         * {@code runtime_timeout} (it got the note, which it stores first, but answered too late).
+         */
         void onFailure(int httpStatus, String code);
     }
 

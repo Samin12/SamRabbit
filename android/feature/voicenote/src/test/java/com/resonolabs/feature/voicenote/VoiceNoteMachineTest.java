@@ -83,6 +83,45 @@ public final class VoiceNoteMachineTest {
         assertEquals(1_000L, machine.remainingMs(400L + cap - 1_000L, cap));
     }
 
+    @Test public void aSendingNoteGivesTheScreenBackAndStillGoes() {
+        VoiceNoteMachine machine = listening();
+        assertFalse("recording: a gesture finishes it instead", machine.toBackground(1_000L));
+        machine.onWords("make a new task fix the login", 2_000L);
+        assertEquals(Phase.SENDING, machine.phase());
+        assertEquals("Tap to close · it still sends", machine.hint());
+        assertTrue(machine.toBackground(2_100L));
+        assertEquals(Phase.IDLE, machine.phase());
+        assertFalse("the overlay is gone at once", machine.showing(2_100L));
+        assertFalse("no longer holding the screen or the mic service", machine.active());
+        machine.onSent("done", "Started a T3 task", 3_000L);
+        assertEquals("a late answer is the caller's chip, not a full-screen result", Phase.IDLE, machine.phase());
+        assertTrue("the next note can start right away", machine.start(3_100L));
+    }
+
+    @Test public void aFinishingNoteOffScreenStillSendsItsLastWords() {
+        VoiceNoteMachine machine = listening();
+        machine.finish(1_000L);
+        assertTrue(machine.toBackground(1_100L));
+        assertTrue(machine.background());
+        assertFalse(machine.showing(1_100L));
+        assertTrue("still active until the words are in", machine.active());
+        assertTrue("the words still go", machine.onWords("call the dentist", 1_600L));
+        assertEquals(Phase.IDLE, machine.phase());
+        assertFalse(machine.background());
+        assertFalse(machine.showing(1_600L));
+        VoiceNoteMachine quiet = listening();
+        quiet.finish(1_000L);
+        quiet.toBackground(1_100L);
+        assertFalse("nothing heard: nothing to send", quiet.onWords(" ", 1_500L));
+        assertEquals(Phase.IDLE, quiet.phase());
+        VoiceNoteMachine broken = listening();
+        broken.finish(1_000L);
+        broken.toBackground(1_100L);
+        broken.onFailure("Lost the connection. Try again.", 1_400L);
+        assertEquals(Phase.IDLE, broken.phase());
+        assertFalse(broken.showing(1_400L));
+    }
+
     @Test public void aTapClosesAResultEarly() {
         VoiceNoteMachine machine = listening();
         machine.onWords("x", 1_000L);

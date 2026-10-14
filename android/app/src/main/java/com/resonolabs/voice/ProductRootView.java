@@ -1,6 +1,7 @@
 package com.resonolabs.voice;
 
 import android.app.Activity;
+import android.os.PowerManager;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -88,6 +89,9 @@ final class ProductRootView extends FrameLayout {
     private String pendingNoteTrigger;
     private int pendingNoteTries;
     private final Runnable startPendingNote = this::startPendingNote;
+    /** Voice-note outcomes waiting for a moment they can be seen (acknowledged only once shown). */
+    private final LateChipQueue lateChips = new LateChipQueue();
+    private final Runnable showLateChip = this::showLateChip;
     /** Tells MainActivity's IdleScreenPolicy that something that keeps the screen on started or ended. */
     private Runnable busyListener = () -> { };
     /** A finished timer rings this long: the screen stays on meanwhile. */
@@ -196,6 +200,11 @@ final class ProductRootView extends FrameLayout {
         voiceNote = new VoiceNoteController(activity, voice::isInSession, new VoiceNoteController.Listener() {
             @Override public void onVoiceNoteChanged() {
                 noteOverlay.update();
+                if (!voiceNote.showing()) showLateChip(); // a result just closed: a waiting chip may show
+            }
+
+            @Override public void onVoiceNoteLater(String captureId, String line, boolean ok) {
+                queueLateChip(captureId, line, ok, 0L);
             }
 
             @Override public void onVoiceNoteActive(boolean active) {
@@ -487,17 +496,50 @@ final class ProductRootView extends FrameLayout {
 
     /**
      * A voice note's outcome that arrived after the note closed (it waited for the Mac): a chip at
-     * the top for a few seconds. {@code briefing.ready}: nothing to show here (the Cards board reads
-     * the brief itself). Never spoken, always acknowledged "seen".
+     * the top for a few seconds, acknowledged "seen" once it was really on screen (not under a note,
+     * not with the screen off). {@code briefing.ready}: nothing to show here (the Cards board reads
+     * the brief itself), acknowledged at once. Never spoken.
      */
     private void deliverSilently(JSONObject item) {
         String kind = text(item, "kind");
         JSONObject payload = item.optJSONObject("payload");
         String chip = AnnouncementRouting.captureChip(kind, text(payload, "say"), text(item, "text"));
-        if (!chip.isEmpty() && !voiceNote.showing()) {
-            noteOverlay.showChip(chip, AnnouncementRouting.captureOk(kind, text(payload, "state")));
+        long id = item.optLong("id", 0L);
+        if (chip.isEmpty()) {
+            announcements.ack(id, AnnouncementRouting.CHANNEL_SEEN);
+            return;
         }
-        announcements.ack(item.optLong("id", 0L), AnnouncementRouting.CHANNEL_SEEN);
+        queueLateChip(text(payload, "captureId"), chip, AnnouncementRouting.captureOk(kind, text(payload, "state")), id);
+    }
+
+    private void queueLateChip(String captureId, String line, boolean ok, long announcementId) {
+        for (long id : lateChips.add(new LateChipQueue.Chip(captureId, line, ok, announcementId))) {
+            announcements.ack(id, AnnouncementRouting.CHANNEL_SEEN);
+        }
+        showLateChip();
+    }
+
+    /**
+     * Shows the next waiting voice-note outcome once it can be seen: the screen on, no note on screen,
+     * no other chip up. Tried again when a note closes, a chip ends and the screen comes on.
+     */
+    void showLateChip() {
+        removeCallbacks(showLateChip);
+        if (lateChips.isEmpty()) return;
+        if (noteOverlay.chipShowing()) {
+            postDelayed(showLateChip, VoiceNoteOverlay.chipMs() + 300L);
+            return;
+        }
+        if (voiceNote.showing() || !screenOn()) return;
+        LateChipQueue.Chip chip = lateChips.next();
+        noteOverlay.showChip(chip.text, chip.ok);
+        if (chip.announcementId > 0) announcements.ack(chip.announcementId, AnnouncementRouting.CHANNEL_SEEN);
+        if (!lateChips.isEmpty()) postDelayed(showLateChip, VoiceNoteOverlay.chipMs() + 300L);
+    }
+
+    private boolean screenOn() {
+        PowerManager power = getContext().getSystemService(PowerManager.class);
+        return power == null || power.isInteractive();
     }
 
     private void deliverToVoice(JSONObject item) {
@@ -935,8 +977,8 @@ final class ProductRootView extends FrameLayout {
 
     boolean navigateBack() {
         if (voiceNote.showing()) {
-            // BACK cancels a recording (nothing is sent) or closes a result.
-            if (!voiceNote.cancel()) voiceNote.dismissResult();
+            // BACK cancels a recording (nothing is sent), lets a sending note go on off screen, or closes a result.
+            if (!voiceNote.cancel() && !voiceNote.sendInBackground()) voiceNote.dismissResult();
             return true;
         }
         if (controlCenter.isOpen()) return controlCenter.onInput(UiInputIntent.BACK);
@@ -963,11 +1005,14 @@ final class ProductRootView extends FrameLayout {
      * session starts. Returns true when a session was started.
      */
     boolean toggleVoiceFromSideButton() {
-        if (voiceNote.active()) {
+        if (voiceNote.recording()) {
             // Any side-button gesture finishes a recording note (and the mic stays with the note).
             voiceNote.finish();
             return false;
         }
+        // Finishing or sending: the note goes on off screen (its outcome comes as a chip) and the
+        // double press talks. A finishing dictation hands the microphone to the session (DictationSession).
+        if (voiceNote.active()) voiceNote.sendInBackground();
         if (voice.isInSession()) {
             stopVoiceSession();
             return false;
@@ -1016,6 +1061,13 @@ final class ProductRootView extends FrameLayout {
             return false;
         }
         if (voiceNote.active()) return false; // already sending
+        if (ComposeSheet.anyOpen() || DictationSession.anyActive()) {
+            // A text sheet is a window of its own above HOME: the note would record hidden behind it,
+            // BACK would close the sheet instead of cancelling, and its dictation would share the mic.
+            Log.i(SideButtonGesture.LOG_TAG, trigger + " -> no voice note (a text sheet is open)");
+            Toast.makeText(getContext(), "Close the text box to record a voice note.", Toast.LENGTH_SHORT).show();
+            return false;
+        }
         if (controlCenter.isOpen()) controlCenter.hide();
         if (voice.isInSession()) {
             stopVoiceSession();
@@ -1039,9 +1091,9 @@ final class ProductRootView extends FrameLayout {
         voiceNote.start(trigger);
     }
 
-    /** From start until the runtime answered (any side-button gesture then finishes it). */
-    boolean voiceNoteActive() {
-        return voiceNote.active();
+    /** Recording now: any side-button gesture finishes and sends it (later phases let a double press talk). */
+    boolean voiceNoteRecording() {
+        return voiceNote.recording();
     }
 
     /** Stop listening and send (a double press, a tap, the wheel). */
@@ -1049,13 +1101,16 @@ final class ProductRootView extends FrameLayout {
         return voiceNote.finish();
     }
 
-    /** The note's input while it is on screen: press/tap sends, BACK cancels, the wheel is ignored. */
+    /**
+     * The note's input while it is on screen: press/tap sends, BACK cancels, the wheel is ignored.
+     * While it sends, either gives the screen back (it still goes); on a result, either closes it.
+     */
     private void onVoiceNoteInput(UiInputIntent intent) {
         if (intent == UiInputIntent.ACTIVATE) {
             if (voiceNote.recording()) voiceNote.finish();
-            else if (!voiceNote.active()) voiceNote.dismissResult();
+            else if (!voiceNote.sendInBackground()) voiceNote.dismissResult();
         } else if (intent == UiInputIntent.BACK) {
-            if (!voiceNote.cancel()) voiceNote.dismissResult();
+            if (!voiceNote.cancel() && !voiceNote.sendInBackground()) voiceNote.dismissResult();
         }
     }
 
@@ -1138,6 +1193,7 @@ final class ProductRootView extends FrameLayout {
     void close() {
         removeCallbacks(flushDeferred);
         removeCallbacks(startPendingNote);
+        removeCallbacks(showLateChip);
         GenCardStore.get(getContext()).removeListener(timerWatch);
         voiceNote.close();
         // Voice first: ending its session turns deferred T3 updates into notifications and

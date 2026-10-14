@@ -76,6 +76,7 @@ public final class MainActivity extends Activity {
     private final BroadcastReceiver screenOn = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (idle != null) idle.onResume();
+            if (root != null) root.showLateChip(); // a voice-note outcome that came in the dark
         }
     };
     private final BroadcastReceiver screenOff = new BroadcastReceiver() {
@@ -218,8 +219,10 @@ public final class MainActivity extends Activity {
             Log.i(SideButtonGesture.LOG_TAG, "double press ignored (duplicate delivery)");
             return;
         }
-        if (root.voiceNoteActive()) {
-            // A voice note is recording: any side-button gesture finishes and sends it.
+        if (root.voiceNoteRecording()) {
+            // A voice note is recording: any side-button gesture finishes and sends it. (One that is
+            // already finishing or sending goes on off screen and this press talks: see
+            // ProductRootView.toggleVoiceFromSideButton.)
             sideButtonStartPending = false;
             root.post(() -> {
                 boolean sent = root.finishVoiceNote();

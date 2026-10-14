@@ -18,7 +18,8 @@ import com.resonolabs.ui.design.TextFit;
 /**
  * The voice note on screen, over whatever page is open: a big pulsing orb while it records ("Recording…
  * tap to send", the live words, a countdown near the 3-minute cap), then "Sent ✓ — Added to your journal"
- * for a moment. A tap finishes and sends; BACK (handled by the shell) cancels.
+ * for a moment. A tap finishes and sends; BACK (handled by the shell) cancels. While it sends, a tap
+ * gives the screen back (the note still goes; its outcome comes as a chip).
  *
  * <p>Between notes it can show a small chip at the top for an outcome that arrived later (a note that
  * waited for the Mac): touches outside the chip go through to the page below.
@@ -84,8 +85,14 @@ public final class VoiceNoteOverlay extends View {
         postDelayed(this::update, CHIP_MS + 50L);
     }
 
-    private boolean chipShowing() {
+    /** A chip is on screen now (the next late outcome waits for it). */
+    public boolean chipShowing() {
         return !chipText.isEmpty() && SystemClock.uptimeMillis() < chipUntil;
+    }
+
+    /** How long one chip stays up. */
+    public static long chipMs() {
+        return CHIP_MS;
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
@@ -105,7 +112,7 @@ public final class VoiceNoteOverlay extends View {
             case MotionEvent.ACTION_UP -> {
                 if (Math.abs(x - downX) < 40f && Math.abs(y - downY) < 40f) {
                     if (controller.recording()) controller.finish();
-                    else if (!controller.active()) controller.dismissResult();
+                    else if (!controller.sendInBackground()) controller.dismissResult();
                 }
             }
             default -> { }

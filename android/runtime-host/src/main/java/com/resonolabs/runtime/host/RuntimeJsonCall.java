@@ -27,7 +27,11 @@ final class RuntimeJsonCall implements AutoCloseable {
     interface Callback {
         void onResult(JSONObject value);
 
-        /** {@code httpStatus} 0 = runtime not reachable; {@code code} is the runtime's error code. */
+        /**
+         * {@code httpStatus} 0 = no answer: {@code runtime_unavailable} (never reached it) or
+         * {@code runtime_timeout} (it was reached and the request sent, but no answer came in time);
+         * otherwise {@code code} is the runtime's error code.
+         */
         void onFailure(int httpStatus, String code);
     }
 
@@ -59,6 +63,7 @@ final class RuntimeJsonCall implements AutoCloseable {
     private void perform(Context context, String method, String path, JSONObject body, int readTimeoutMs,
                          Callback callback) {
         HttpURLConnection connection = null;
+        boolean reached = false;
         try {
             String token = new RuntimeSecretStore(context).loadLocalApiToken();
             connection = (HttpURLConnection) new URL(BASE + path).openConnection();
@@ -67,11 +72,15 @@ final class RuntimeJsonCall implements AutoCloseable {
             connection.setReadTimeout(readTimeoutMs);
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setRequestProperty("Accept", "application/json");
-            if (body != null) {
-                byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            byte[] bytes = body == null ? null : body.toString().getBytes(StandardCharsets.UTF_8);
+            if (bytes != null) {
                 connection.setDoOutput(true);
                 connection.setRequestProperty("Content-Type", "application/json");
                 connection.setFixedLengthStreamingMode(bytes.length);
+            }
+            connection.connect(); // a connect timeout here means the runtime never got the request
+            reached = true;
+            if (bytes != null) {
                 try (OutputStream output = connection.getOutputStream()) {
                     output.write(bytes);
                 }
@@ -88,7 +97,7 @@ final class RuntimeJsonCall implements AutoCloseable {
         } catch (ConnectException refused) {
             fail(callback, 0, "runtime_unavailable");
         } catch (SocketTimeoutException timeout) {
-            fail(callback, 0, "runtime_timeout");
+            fail(callback, 0, reached ? "runtime_timeout" : "runtime_unavailable");
         } catch (Exception error) {
             fail(callback, 0, "runtime_unavailable");
         } finally {

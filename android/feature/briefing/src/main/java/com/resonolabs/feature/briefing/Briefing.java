@@ -90,7 +90,7 @@ public final class Briefing {
                 case "drafted": return "Drafted";
                 case "tasked": return "Task started";
                 case "blocked": return "Blocked";
-                case "snoozed": return "Later";
+                case "reminded", "snoozed": return "Later";
                 case "done": return "Done";
                 case "dismissed": return "Dismissed";
                 default: break;
@@ -109,7 +109,7 @@ public final class Briefing {
                 if (out.size() == 2) break;
                 if ("done".equals(action.type) || "dismiss".equals(action.type)) continue;
                 String after = stateAfter(action.type);
-                if (!"open".equals(after) && state.equals(after)) continue; // already drafted, tasked, blocked, snoozed
+                if (!"open".equals(after) && state.equals(after)) continue; // already drafted, tasked, blocked, reminded
                 out.add(action);
             }
             if (open()) {
@@ -275,13 +275,13 @@ public final class Briefing {
         }
     }
 
-    /** The state an action leaves an item in (open for Open). */
+    /** The state an action leaves an item in (open for Open), as the Mac bridge names it. */
     public static String stateAfter(String action) {
         switch (action == null ? "" : action) {
             case "draft_reply": return "drafted";
             case "make_task": return "tasked";
             case "block_time": return "blocked";
-            case "remind": return "snoozed";
+            case "remind": return "reminded";
             case "done": return "done";
             case "dismiss": return "dismissed";
             default: return "open";

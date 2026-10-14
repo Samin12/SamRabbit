@@ -77,12 +77,20 @@ final class SideButtonGesture {
         return TOGGLE_ALIAS.equals(className);
     }
 
-    /** The hold gesture: PWM's VOICE_ASSIST start, resolved to the {@code .SideButtonVoiceNote} alias. */
+    /**
+     * The hold gesture: PWM's VOICE_ASSIST start, resolved to the {@code .SideButtonVoiceNote} alias
+     * (the started intent carries the alias as its component). Only the alias counts: MainActivity
+     * itself is exported (it is HOME), so a bare VOICE_ASSIST action sent straight to it by any app
+     * must never open the microphone.
+     */
     static boolean isVoiceNote(Intent intent) {
         if (intent == null) return false;
         ComponentName component = intent.getComponent();
-        if (component != null && VOICE_NOTE_ALIAS.equals(component.getClassName())) return true;
-        return VOICE_ASSIST.equals(intent.getAction());
+        return component != null && isVoiceNoteClassName(component.getClassName());
+    }
+
+    static boolean isVoiceNoteClassName(String className) {
+        return VOICE_NOTE_ALIAS.equals(className);
     }
 
     /** {@code theater_mode_on} just became 1: the triple-press signal. */

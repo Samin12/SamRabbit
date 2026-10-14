@@ -19,4 +19,6 @@ dependencies {
     implementation(project(":feature:compose"))
     implementation(project(":runtime-host"))
     testImplementation("junit:junit:4.13.2")
+    // Android's org.json is a stub on the JVM; the kept-note encoding is tested with the reference jar.
+    testImplementation("org.json:json:20231013")
 }

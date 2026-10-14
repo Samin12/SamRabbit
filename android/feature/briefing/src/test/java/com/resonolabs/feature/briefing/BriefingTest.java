@@ -63,6 +63,14 @@ public final class BriefingTest {
         assertEquals(1, done.doFirst().size());
     }
 
+    @Test public void aRemindedItemSaysLaterAndOffersNoSecondReminder() throws Exception {
+        Briefing.Item dana = Briefing.parse(view("2026-10-14", "reminded")).find("bi_dana");
+        assertEquals("the Mac bridge's word for Remind me", "reminded", Briefing.stateAfter("remind"));
+        assertEquals("Later", dana.chip());
+        assertEquals(List.of("draft_reply", "done", "dismiss"), types(dana.buttons()));
+        assertTrue(dana.open());
+    }
+
     @Test public void theBoardShowsItOnlyThisMorningWhileSomethingIsOpen() throws Exception {
         Briefing brief = Briefing.parse(view("2026-10-14", "open"));
         assertTrue(brief.showOnBoard(EIGHT_AM, NEW_YORK, false));

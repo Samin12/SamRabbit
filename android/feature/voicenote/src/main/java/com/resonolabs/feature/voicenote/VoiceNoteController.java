@@ -15,6 +15,9 @@ import org.json.JSONObject;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 
@@ -24,6 +27,12 @@ import java.util.function.BooleanSupplier;
  * {@code POST /v1/capture}, which keeps an outbox and hands the words to the Mac bridge. The
  * capture id is made when recording starts, so a resend is always the same note. Main thread only.
  *
+ * <p>The words are never thrown away on the way: a runtime that doesn't answer (restarting, or slow
+ * because the Mac is) gets the note kept in the app ({@link PendingNoteStore}) and offered again
+ * with the same id every {@link NoteDelivery#RESEND_MS} until it takes it ({@link NoteDelivery}).
+ * Once recording is over the user may take the screen back ({@link #sendInBackground}): the note
+ * still goes, and its outcome comes later as a chip ({@link Listener#onVoiceNoteLater}).
+ *
  * <p>Never speaks and never asks anything back: the overlay shows the result for a moment.
  * Transcripts are never logged (lengths and states only).
  */
@@ -32,7 +41,10 @@ public final class VoiceNoteController implements AutoCloseable {
     public static final DictationMachine.Limits LIMITS =
             new DictationMachine.Limits(180_000L, 8_000L, 2_500L, 15_000L);
     private static final long TICK_MS = 250L;
-    private static final long[] RETRY_MS = {1_500L, 4_000L};
+    /** Notes kept from an earlier run are offered again shortly after HOME starts. */
+    private static final long FIRST_RESEND_MS = 5_000L;
+    static final String KEPT_LINE = "On the R1. It goes to your Mac by itself.";
+    static final String FAILED_LINE = "Couldn't save that note.";
 
     public interface Listener {
         /** Something on screen changed (phase, words, level). */
@@ -40,6 +52,22 @@ public final class VoiceNoteController implements AutoCloseable {
 
         /** Recording or sending started (true) or is over (false): hold the microphone service, keep the screen on. */
         void onVoiceNoteActive(boolean active);
+
+        /**
+         * The outcome of a note that is no longer on screen (sent off screen, or resent later):
+         * show it as a chip, never speak it. {@code ok} false for one that waits or failed.
+         */
+        void onVoiceNoteLater(String captureId, String line, boolean ok);
+    }
+
+    /** One note on its way to the runtime: its own copy (a new note may start meanwhile). */
+    private static final class Outgoing {
+        final PendingNote note;
+        int attempts;
+
+        Outgoing(PendingNote note) {
+            this.note = note;
+        }
     }
 
     private final Context context;
@@ -48,7 +76,13 @@ public final class VoiceNoteController implements AutoCloseable {
     private final VoiceNoteMachine machine = new VoiceNoteMachine();
     private final DictationSession dictation;
     private final RuntimeCaptureClient capture = new RuntimeCaptureClient();
+    private final PendingNoteStore kept;
+    /** Kept notes with a resend under way (never two at once for one note). */
+    private final Set<String> resending = new HashSet<>();
+    private final Runnable resend = this::resendKept;
     private final Runnable tick = this::tick;
+    /** The note whose answer the overlay is waiting for (null once it went off screen). */
+    private Outgoing foreground;
     private String words = "";
     private String captureId = "";
     private String capturedAt = "";
@@ -56,7 +90,6 @@ public final class VoiceNoteController implements AutoCloseable {
     private String resultKind = "";
     private boolean wasActive;
     private boolean previewing;
-    private int sendAttempt;
     private boolean closed;
 
     public VoiceNoteController(Context context, BooleanSupplier voiceSessionLive, Listener listener) {
@@ -77,6 +110,8 @@ public final class VoiceNoteController implements AutoCloseable {
                 ended(text == null ? "" : text, reason, message);
             }
         }, LIMITS);
+        kept = new PendingNoteStore(this.context);
+        if (!kept.isEmpty()) main.postDelayed(resend, FIRST_RESEND_MS);
     }
 
     public VoiceNoteMachine machine() {
@@ -128,10 +163,13 @@ public final class VoiceNoteController implements AutoCloseable {
         this.trigger = trigger == null ? "tap" : trigger;
         words = "";
         resultKind = "";
-        sendAttempt = 0;
         captureId = UUID.randomUUID().toString();
         capturedAt = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-        if (!dictation.start()) {
+        if (DictationSession.anyActive()) {
+            // A text sheet is dictating: two dictations would fight over the microphone.
+            machine.onFailure("Another dictation has the microphone.", now);
+            Log.i(TAG, "voice note not started (another dictation)");
+        } else if (!dictation.start()) {
             machine.onFailure(dictation.available() ? "Couldn't start recording. Try again."
                     : "Voice chat has the microphone.", now);
             Log.i(TAG, "voice note not started (" + (dictation.available() ? "busy" : "voice session") + ")");
@@ -190,48 +228,141 @@ public final class VoiceNoteController implements AutoCloseable {
         tick();
     }
 
+    /**
+     * Finishing or sending: give the screen back and let the note carry on (a double press to talk,
+     * a tap or BACK while it sends). Its outcome arrives as a chip. False while recording or idle.
+     */
+    public boolean sendInBackground() {
+        if (previewing) return false;
+        boolean sending = machine.phase() == VoiceNoteMachine.Phase.SENDING;
+        if (!machine.toBackground(SystemClock.elapsedRealtime())) return false;
+        if (sending) foreground = null; // its answer becomes a chip
+        Log.i(TAG, "voice note goes on off screen (" + (sending ? "sending" : "finishing") + ")");
+        changed();
+        return true;
+    }
+
     private void ended(String text, DictationMachine.Stop reason, String message) {
         long now = SystemClock.elapsedRealtime();
         if (reason == DictationMachine.Stop.CANCELLED) return;
+        boolean offScreen = machine.background();
         if (reason == DictationMachine.Stop.FAILED && text.isBlank()) {
             machine.onFailure(message, now);
             Log.i(TAG, "voice note failed to record");
+            if (offScreen) listener.onVoiceNoteLater(captureId, "Couldn't record it. Nothing was sent.", false);
             changed();
             return;
         }
         words = text;
         if (machine.onWords(text, now)) {
             Log.i(TAG, "voice note recorded reason=" + reason + " chars=" + text.length());
-            send();
+            Outgoing out = new Outgoing(new PendingNote(captureId, words, capturedAt, machine.durationMs(now), trigger,
+                    System.currentTimeMillis()));
+            foreground = offScreen ? null : out;
+            submit(out);
         } else {
             Log.i(TAG, "voice note: nothing heard");
+            if (offScreen) listener.onVoiceNoteLater(captureId, "I didn't catch anything. Nothing was sent.", false);
         }
         changed();
     }
 
-    private void send() {
-        long duration = machine.durationMs(SystemClock.elapsedRealtime());
-        capture.submit(context, captureId, words, capturedAt, duration, trigger, new RuntimeCaptureClient.Callback() {
-            @Override public void onResult(JSONObject value) {
-                String state = value.optString("state", "sent");
-                resultKind = value.optString("kind", "");
-                machine.onSent(state, value.optString("say", ""), SystemClock.elapsedRealtime());
-                Log.i(TAG, "voice note " + state + (resultKind.isEmpty() ? "" : " kind=" + resultKind));
-                changed();
-            }
+    private void submit(Outgoing out) {
+        PendingNote note = out.note;
+        capture.submit(context, note.id, note.text, note.capturedAt, note.durationMs, note.trigger,
+                new RuntimeCaptureClient.Callback() {
+                    @Override public void onResult(JSONObject value) { delivered(out, value); }
 
-            @Override public void onFailure(int httpStatus, String code) {
-                if (httpStatus == 0 && sendAttempt < RETRY_MS.length) {
-                    long delay = RETRY_MS[sendAttempt++];
-                    main.postDelayed(() -> { if (!closed) send(); }, delay);
-                    return;
-                }
-                Log.w(TAG, "voice note not handed over: " + httpStatus + " " + code);
-                machine.onSent("failed", httpStatus == 0 ? "The R1's assistant isn't ready. Note not saved."
-                        : "Couldn't save that note.", SystemClock.elapsedRealtime());
-                changed();
+                    @Override public void onFailure(int httpStatus, String code) { undelivered(out, httpStatus, code); }
+                });
+    }
+
+    private void delivered(Outgoing out, JSONObject value) {
+        kept.remove(out.note.id);
+        String state = value.optString("state", "sent");
+        String kind = value.optString("kind", "");
+        Log.i(TAG, "voice note " + state + (kind.isEmpty() ? "" : " kind=" + kind));
+        if (shown(out)) resultKind = kind;
+        finish(out, state, value.optString("say", ""));
+    }
+
+    private void undelivered(Outgoing out, int httpStatus, String code) {
+        switch (NoteDelivery.after(httpStatus, code, out.attempts)) {
+            case RETRY -> {
+                long delay = NoteDelivery.retryDelayMs(out.attempts++);
+                main.postDelayed(() -> { if (!closed) submit(out); }, delay);
             }
-        });
+            case KEEP -> {
+                // Not taken yet (the runtime is restarting, or took it and is still waiting on the Mac):
+                // keep the words here and offer them again with the same capture id.
+                boolean saved = kept.put(out.note);
+                Log.i(TAG, "voice note kept in the app: " + httpStatus + " " + code + (saved ? "" : " (not saved)"));
+                if (saved) {
+                    main.removeCallbacks(resend);
+                    main.postDelayed(resend, NoteDelivery.RESEND_MS);
+                    finish(out, "queued", KEPT_LINE);
+                } else {
+                    finish(out, "failed", FAILED_LINE);
+                }
+            }
+            case FAILED -> {
+                Log.w(TAG, "voice note not handed over: " + httpStatus + " " + code);
+                finish(out, "failed", FAILED_LINE);
+            }
+        }
+    }
+
+    /** The answer for {@code out}: on the overlay while it waits for it, else a chip. */
+    private void finish(Outgoing out, String state, String say) {
+        if (shown(out)) {
+            foreground = null;
+            machine.onSent(state, say, SystemClock.elapsedRealtime());
+            changed();
+            return;
+        }
+        String line = say == null || say.isBlank() ? ("failed".equals(state) ? FAILED_LINE : "Sent to your Mac.") : say;
+        listener.onVoiceNoteLater(out.note.id, line, "done".equals(state) || "sent".equals(state));
+    }
+
+    private boolean shown(Outgoing out) {
+        return out == foreground && machine.phase() == VoiceNoteMachine.Phase.SENDING;
+    }
+
+    /** Offers every kept note to the runtime again (same capture id: it keeps one note per id). */
+    private void resendKept() {
+        main.removeCallbacks(resend);
+        if (closed) return;
+        List<PendingNote> notes = kept.all();
+        if (notes.isEmpty()) return;
+        for (PendingNote note : notes) {
+            if (foreground != null && foreground.note.id.equals(note.id)) continue;
+            if (!resending.add(note.id)) continue;
+            capture.submit(context, note.id, note.text, note.capturedAt, note.durationMs, note.trigger,
+                    new RuntimeCaptureClient.Callback() {
+                        @Override public void onResult(JSONObject value) {
+                            resending.remove(note.id);
+                            kept.remove(note.id);
+                            String state = value.optString("state", "sent");
+                            Log.i(TAG, "kept voice note taken: " + state);
+                            // Waiting or sending: the runtime announces the outcome itself later.
+                            if (value.has("finishedAt") && NoteDelivery.worthAChip(state)) {
+                                String say = value.optString("say", "");
+                                boolean ok = "done".equals(state);
+                                listener.onVoiceNoteLater(note.id, !say.isBlank() ? say : ok ? "Saved" : FAILED_LINE, ok);
+                            }
+                        }
+
+                        @Override public void onFailure(int httpStatus, String code) {
+                            resending.remove(note.id);
+                            if (NoteDelivery.after(httpStatus, code, Integer.MAX_VALUE) == NoteDelivery.Next.FAILED) {
+                                kept.remove(note.id);
+                                Log.w(TAG, "kept voice note refused: " + httpStatus + " " + code);
+                                listener.onVoiceNoteLater(note.id, FAILED_LINE, false);
+                            }
+                        }
+                    });
+        }
+        main.postDelayed(resend, NoteDelivery.RESEND_MS);
     }
 
     private void tick() {

@@ -11,6 +11,11 @@ package com.resonolabs.feature.voicenote;
  *
  * A result stays on screen for a moment ({@link #RESULT_MS}), then the machine is idle again.
  * Nothing here ever speaks: the note is one shot, no back and forth.
+ *
+ * <p>Once it is no longer recording, the user can have the screen back ({@link #toBackground}: a
+ * double press to talk, a tap or BACK while it sends): a sending note is idle at once (its send goes
+ * on and the answer becomes a chip), a finishing one still settles its last words and is sent, then
+ * goes idle without a full-screen result.
  */
 public final class VoiceNoteMachine {
     public enum Phase { IDLE, STARTING, LISTENING, FINISHING, SENDING, SENT, QUEUED, NOTHING_HEARD, FAILED, CANCELLED }
@@ -29,6 +34,8 @@ public final class VoiceNoteMachine {
     private long endedAt;
     private long resultUntil;
     private String line = "";
+    /** Finishing off screen: the words are still sent, but no full-screen result follows. */
+    private boolean background;
 
     public Phase phase() {
         return phase;
@@ -44,9 +51,34 @@ public final class VoiceNoteMachine {
         return recording() || phase == Phase.FINISHING || phase == Phase.SENDING;
     }
 
-    /** Active, or a result still on screen. */
+    /** Active, or a result still on screen (never for a note finishing off screen). */
     public boolean showing(long now) {
+        if (background) return false;
         return active() || (phase != Phase.IDLE && now < resultUntil);
+    }
+
+    /** Finishing off screen ({@link #toBackground} while FINISHING): its outcome is a chip, later. */
+    public boolean background() {
+        return background;
+    }
+
+    /**
+     * Gives the screen back while the note finishes or sends (it is never cancelled by this). SENDING:
+     * idle at once, the caller treats the send under way as off screen. FINISHING: the last words
+     * still settle and go ({@link #onWords} answers true), with no full-screen result. False while
+     * recording or idle.
+     */
+    public boolean toBackground(long now) {
+        if (phase == Phase.SENDING) {
+            phase = Phase.IDLE;
+            resultUntil = 0L;
+            return true;
+        }
+        if (phase == Phase.FINISHING) {
+            background = true;
+            return true;
+        }
+        return false;
     }
 
     /** The result or failure line under the title ("Added to your journal"). */
@@ -62,6 +94,7 @@ public final class VoiceNoteMachine {
         endedAt = 0L;
         resultUntil = 0L;
         line = "";
+        background = false;
         return true;
     }
 
@@ -84,6 +117,13 @@ public final class VoiceNoteMachine {
     public boolean onWords(String words, long now) {
         if (phase != Phase.STARTING && phase != Phase.LISTENING && phase != Phase.FINISHING) return false;
         if (endedAt == 0L) endedAt = now;
+        if (background) {
+            // Off screen: idle now; the caller sends the words (if any) and shows the outcome as a chip.
+            background = false;
+            phase = Phase.IDLE;
+            resultUntil = 0L;
+            return words != null && !words.isBlank();
+        }
         if (words == null || words.isBlank()) {
             show(Phase.NOTHING_HEARD, "Nothing was sent.", now, LONG_RESULT_MS);
             return false;
@@ -95,6 +135,13 @@ public final class VoiceNoteMachine {
     /** Dictation could not start or broke (no microphone, no OpenAI, no network). */
     public void onFailure(String message, long now) {
         if (!active()) return;
+        if (background) {
+            background = false;
+            phase = Phase.IDLE;
+            resultUntil = 0L;
+            line = message == null ? "" : message;
+            return;
+        }
         show(Phase.FAILED, message == null || message.isBlank() ? "Couldn't record. Try again." : message, now,
                 LONG_RESULT_MS);
     }
@@ -167,7 +214,8 @@ public final class VoiceNoteMachine {
     public String hint() {
         return switch (phase) {
             case STARTING, LISTENING -> "Tap or press to send · Back to cancel";
-            case FINISHING, SENDING -> "";
+            case FINISHING -> "";
+            case SENDING -> "Tap to close · it still sends";
             default -> "Tap to close";
         };
     }
@@ -181,6 +229,7 @@ public final class VoiceNoteMachine {
      * shown for a minute or until {@link #dismiss}; null goes back to IDLE.
      */
     public void debugPreview(Phase target, String text, long now) {
+        background = false;
         if (target == null || target == Phase.IDLE) {
             phase = Phase.IDLE;
             resultUntil = 0L;
@@ -195,6 +244,7 @@ public final class VoiceNoteMachine {
     }
 
     private void show(Phase result, String text, long now, long durationMs) {
+        background = false;
         phase = result;
         line = text;
         resultUntil = now + durationMs;

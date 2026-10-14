@@ -36,6 +36,16 @@ public final class SideButtonGestureTest {
         assertFalse(SideButtonGesture.isToggle(null));
     }
 
+    /** HOME (MainActivity) is exported: only the system-guarded hold alias may start a voice note. */
+    @Test public void onlyTheHoldAliasClassIsAVoiceNote() {
+        assertTrue(SideButtonGesture.isVoiceNoteClassName("com.resonolabs.voice.SideButtonVoiceNote"));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName("com.resonolabs.voice.MainActivity"));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName("com.resonolabs.voice.SideButtonToggle"));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName(SideButtonGesture.VOICE_ASSIST));
+        assertFalse(SideButtonGesture.isVoiceNoteClassName(null));
+        assertFalse(SideButtonGesture.isVoiceNote(null));
+    }
+
     @Test public void overlayTargetKeepsTheUnsuffixedClassName() {
         assertEquals("com.resonolabs.voice.engineering/com.resonolabs.voice.SideButtonToggle",
                 SideButtonGesture.overlayTargetFor("com.resonolabs.voice.engineering"));
