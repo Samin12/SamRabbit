@@ -20,8 +20,8 @@ final class VoiceHotKey {
     private var lastPress = Date.distantPast
 
     /// Registers `keyCode` + `modifiers` (Carbon values; `description` names them in the log); nil when the system
-    /// refused it (another app has it). `exclusive` (the dock's Settings): no other app can register it meanwhile, and
-    /// one that holds it so already makes this fail.
+    /// refused it (another app has it). `exclusive` (the dock's Settings): an app holding it exclusively already makes
+    /// this fail, and one asking for it exclusively later is refused.
     init?(keyCode: UInt32 = UInt32(kVK_Space), modifiers: UInt32 = UInt32(controlKey | optionKey), id: UInt32 = 1,
           description: String = VoiceHotKey.shortcutDescription, exclusive: Bool = false,
           action: @escaping @MainActor () -> Void) {

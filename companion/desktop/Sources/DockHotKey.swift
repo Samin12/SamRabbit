@@ -21,8 +21,8 @@ final class DockHotKey {
 
     /// nil when the combination is taken by another app (or Carbon refused it); the reason is logged unless `quiet`
     /// (keys held only for a moment, like the dock's size keys while the pointer is on it). `exclusive`: Carbon refuses
-    /// it while another app holds it exclusively, and refuses it to others while SamRabbit holds it (a combination
-    /// registered without that is shared, and nobody is told).
+    /// it while another app holds it exclusively too, and refuses such an app while SamRabbit holds it (a registration
+    /// without exclusivity, ours or another app's, is never refused: the combination is shared and nobody is told).
     init?(keyCode: Int, modifiers: Int, name: String, quiet: Bool = false, exclusive: Bool = false, action: @escaping () -> Void) {
         Self.installHandler()
         id = Self.nextId

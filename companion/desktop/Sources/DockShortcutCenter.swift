@@ -6,7 +6,8 @@ import SwiftUI
 /// show / hide, ⌃⌥M minimize / expand, or what Settings recorded instead (UserDefaults `AgentDockShortcuts`, only the
 /// changed ones, as "⌃⌥D"). Carbon `RegisterEventHotKey`, so no Accessibility permission: the dock's three through
 /// DockHotKey, the talk one through `MacVoice.setShortcut` (the voice owns its hot key). Each is registered
-/// exclusively, so Carbon refuses one another app holds that way; one of macOS's own shortcuts (Keyboard Shortcuts,
+/// exclusively, so Carbon refuses one another app holds that way (and refuses it to such an app while SamRabbit holds
+/// it); one of macOS's own shortcuts (Keyboard Shortcuts,
 /// CopySymbolicHotKeys) isn't registered at all, since macOS takes it first. (An app that registered a combination
 /// without exclusivity can't be seen: Carbon then shares it.) Settings and the menus say why one isn't working, and a
 /// newly recorded one that is refused leaves the old one working.
