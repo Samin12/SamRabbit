@@ -208,6 +208,12 @@ public struct ConversationMachine: Sendable {
         /// The app is in front again (wrist raised, reopened): continues a paused conversation, or keeps one whose
         /// reply was still playing going.
         case resume
+        /// Words typed instead of said (the iPhone's keyboard): sent as a `{text}` turn. While a reply is on its
+        /// way or playing it is interrupted first, like a tap.
+        case typed(String)
+        /// The microphone was muted (the iPhone's mute button) or unmuted. The app stops hearing; the machine only
+        /// keeps the quiet end from ending a conversation while muted, and counts the quiet from the unmute.
+        case muted(Bool)
     }
 
     /// One exchange, for the captions and the scrollable history.
@@ -256,6 +262,8 @@ public struct ConversationMachine: Sendable {
     /// Noise never moves it, so a café, a car or a TV can't keep the microphone open forever.
     public private(set) var lastActivity: Date = .distantPast
     public private(set) var expectReply = false
+    /// The microphone is muted (`muted(true)`): nothing is heard, and the quiet end waits.
+    public private(set) var micMuted = false
     public var idleTimeout: TimeInterval
     /// A conversation that stopped because the app left (or the audio was taken) is resumed within this long.
     public var resumeWindow: TimeInterval = 180
@@ -413,7 +421,39 @@ public struct ConversationMachine: Sendable {
             if phase.inConversation { return keepGoing() }
             guard canContinue(at: now) else { return [] }
             return start(at: now)
+        case .typed(let text):
+            return typed(text, at: now)
+        case .muted(let on):
+            micMuted = on
+            // Unmuted: the quiet end counts from now (not from the last words before the mute).
+            if !on, phase.inConversation { lastActivity = now }
+            return []
         }
+    }
+
+    /// A typed turn: sent at once while listening (an utterance being heard is dropped); a reply on its way or
+    /// playing is interrupted first. Nothing while starting, idle or saying a fatal failure.
+    private mutating func typed(_ text: String, at now: Date) -> [Effect] {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty, !endAfterPlayback else { return [] }
+        var effects: [Effect] = []
+        switch phase {
+        case .idle, .starting:
+            return []
+        case .listening, .hearing:
+            break
+        case .thinking, .speaking:
+            if let current, current.kind == .bridge, current.done == nil || playing {
+                effects.append(.cancel(turnId: current.id, conversationId: conversationId))
+            }
+            update { $0.interrupted = true }
+            effects.append(.stopPlayback)
+        }
+        lastActivity = now
+        effects += send(.text(words), kind: .utterance)
+        current?.accepted = true
+        update { $0.heard = words }
+        return effects
     }
 
     /// Back in front while the reply still plays: it no longer pauses afterwards.
@@ -431,7 +471,7 @@ public struct ConversationMachine: Sendable {
             if !queue.isEmpty, now.timeIntervalSince(listeningSince) >= Self.announceAfterQuiet {
                 return announce(queue.removeFirst(), at: now)
             }
-            guard now.timeIntervalSince(lastActivity) >= idleTimeout else { return [] }
+            guard !micMuted, now.timeIntervalSince(lastActivity) >= idleTimeout else { return [] }
             return finish(at: now, problem: nil, haptic: .stop, tellMac: true)
         case .hearing:
             guard now.timeIntervalSince(hearingSince) >= Self.hearingLimit else { return [] }

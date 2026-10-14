@@ -79,6 +79,10 @@ public enum AppLink: Sendable, Equatable {
     case tab(String)
     /// `mac`, `mac/screenshot`: the Mac tab (a screenshot is a read, shown only on this phone).
     case mac(screenshot: Bool)
+    /// `talk` (also `voice`, `assistant`): the live conversation with SamRabbit, started at once, like the watch's
+    /// complications. The link itself writes nothing: what is said does, and the assistant asks before it approves,
+    /// denies, stops or deletes anything.
+    case talk
 
     public enum Composer: String, Sendable {
         case ask, note, generate, openOnMac
@@ -129,6 +133,8 @@ public enum AppLink: Sendable, Equatable {
         case "tab":
             guard let name = parts.first?.lowercased() else { return nil }
             self = .tab(name)
+        case "talk", "voice", "assistant":
+            self = .talk
         case "mac":
             switch parts.first?.lowercased() {
             case "open":
