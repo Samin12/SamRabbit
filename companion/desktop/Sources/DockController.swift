@@ -244,6 +244,18 @@ final class DockController: NSObject {
         refresh()
     }
 
+    /// Dev runs: leave the dock at `spot` on the screen it is on, as a drag ending there would (nil: forget every
+    /// spot, as "Move Back to the Middle").
+    func devPlace(_ spot: DockSpot?) {
+        guard let screen else { return }
+        place = spot.map { DockPlacement.remember($0, on: screen, in: place) }
+        chooseScreen()
+        placePill()
+    }
+
+    /// Dev runs: the screen it is on, and the frame it rests at there (without the "–").
+    var devState: (screen: DockScreen?, rest: CGRect) { (screen, restFrame) }
+
     // MARK: start
 
     func start() {
@@ -318,6 +330,7 @@ final class DockController: NSObject {
         if enabled { store.start() }
         refresh()
         if let directory = ProcessInfo.processInfo.environment["SAMRABBIT_DOCK_SMOKE"] { DockSmoke.run(self, directory: directory) }
+        if ProcessInfo.processInfo.environment["SAMRABBIT_DOCK_SMOKE_PLACES"] == "1" { DockSmoke.runPlaces(self) }
     }
 
     // MARK: visibility

@@ -495,6 +495,82 @@ enum DockSmoke {
         }
     }
 
+    /// `SAMRABBIT_DOCK_SMOKE_PLACES=1` (CONTRACTS-WAVE7 §B2): leaves the dock at the top left of its screen and opens its
+    /// list, folds it to the orb, opens the list over the orb, unfolds it, leaves it in the bottom-right corner as the
+    /// orb with its list, hides and shows it (⌃⌥D's path) and puts it back in the middle, logging the screen, the
+    /// resting frame and what AppKit says about both windows at each step, plus what the four shortcuts registered as.
+    /// Reads only; the same guard as above (the fake server, never port 3780).
+    static func runPlaces(_ controller: DockController) {
+        if let reason = DockSmokeGuard.refusal(base: Config.baseURL, isDefaultBase: Config.isDefaultBase) {
+            Log.write("dock places smoke refused: \(reason)")
+            return
+        }
+        Task { @MainActor in
+            guard await isFakeServer() else {
+                Log.write("dock places smoke refused: the server is not dev/fake_sync_server.py (no /dev/inbox/fake)")
+                return
+            }
+            places(controller)
+        }
+    }
+
+    private static func places(_ controller: DockController) {
+        let shortcuts = DockShortcutCenter.shared
+        let registered = DockShortcutAction.allCases.map { action in
+            "\(action.rawValue) \(shortcuts.shortcut(action).display): \(shortcuts.unavailable[action] ?? "registered")"
+        }
+        Log.write("dock places smoke: shortcuts " + registered.joined(separator: "; "))
+        let topLeft = DockSpot(corner: .topLeft, dx: DockMetrics.edgeGap, dy: DockMetrics.edgeGap)
+        let corner = DockSpot(corner: .bottomRight, dx: DockMetrics.edgeGap, dy: DockMetrics.bottomGap)
+        let steps: [(TimeInterval, String, () -> Void)] = [
+            (2.5, "rest", {}),
+            (3.5, "top-left", { controller.devPlace(topLeft) }),
+            (4.5, "top-left-list", { controller.summon(focusCompose: false) }),
+            (5.5, "orb", {
+                controller.perform(.collapsePanel)
+                controller.setMinimized(true)
+            }),
+            (6.5, "orb-list", { controller.summon(focusCompose: false) }),
+            (7.5, "expanded", {
+                controller.perform(.collapsePanel)
+                controller.toggleMinimized()
+            }),
+            (8.5, "corner-orb", {
+                controller.devPlace(corner)
+                controller.setMinimized(true)
+            }),
+            (9.5, "corner-orb-list", { controller.summon(focusCompose: false) }),
+            (10.5, "hidden", {
+                controller.perform(.collapsePanel)
+                controller.toggleShown()
+            }),
+            (11.5, "shown", { controller.toggleShown() }),
+            (12.5, "back", {
+                controller.setMinimized(false)
+                controller.devPlace(nil)
+            }),
+        ]
+        for (at, name, body) in steps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + at) {
+                body()
+                // Let the windows measure and move first (well before the next step).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    func frame(_ rect: CGRect) -> String { "\(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))x\(Int(rect.height))" }
+                    func describe(_ window: NSWindow?) -> String {
+                        guard let window else { return "none" }
+                        return "\(window.isVisible ? "visible" : "hidden") \(frame(window.frame))"
+                    }
+                    let state = controller.devState
+                    let screen = state.screen.map { "visible \(frame($0.visibleFrame))" } ?? "none"
+                    Log.write("dock places smoke \(name): screen \(screen); rest \(frame(state.rest)); pill \(describe(controller.pill));"
+                              + " list \(describe(controller.list)); minimized=\(controller.ui.minimized) listBelow=\(controller.ui.listBelow)"
+                              + " shown=\(controller.ui.shown) expanded=\(controller.ui.expanded)")
+                    if name == "back" { Log.write("dock places smoke done") }
+                }
+            }
+        }
+    }
+
     /// `GET /dev/inbox/fake` → `{"fake": true}`: only the fake server says so.
     private static func isFakeServer() async -> Bool {
         guard let request = Config.request(Config.api("/dev/inbox/fake"), timeout: 5),

@@ -202,9 +202,12 @@ T3 Code threads, Claude Code and Codex sessions and the recent SamRabbit chats, 
   until pressed again; pressed while the dock is on another screen it comes to yours; it lifts a hide for a while,
   "off" and stepping aside for the main window), **⌃⌥M** orb ↔ pill. Each can be recorded anew in **Agent Dock
   Settings…** (the dock's menu, the menu bar extra, the app menu): click it and press the new keys (Esc cancels; the
-  four are let go meanwhile so the keys reach the recorder). Keys you type with, macOS's own shortcuts and duplicates
-  are refused with why; one another app already has says "Not available — taken by another app" (there, in the menus,
-  and the old one keeps working). The talk shortcut goes through `MacVoice.setShortcut`.
+  four are let go meanwhile so the keys reach the recorder). Keys you type with, macOS's well-known shortcuts and
+  duplicates are refused with why. Each is registered exclusively: one another app holds that way says "Not available —
+  taken by another app", and one of macOS's own (System Settings › Keyboard Shortcuts, read with
+  `CopySymbolicHotKeys`) "Not available — macOS uses it" (there and in the menus; a newly recorded one that is refused
+  leaves the old one working). An app that registered the same combination without exclusivity can't be detected:
+  Carbon then shares it. The talk shortcut goes through `MacVoice.setShortcut`.
 - **When it shows:** whenever the main window is minimised, closed or hidden, or another app is in front; it steps
   aside while you are in the main window. Right-click (or "…"): Minimize to Orb, Hide the Dock (⌃⌥D), Hide for 1 Hour,
   Hide Until Tomorrow (both come back by themselves), Turn Off the Dock (until **Show Agent Dock** in the menu bar extra
@@ -247,6 +250,11 @@ SAMRABBIT_NO_NOTIFICATIONS=1 SAMRABBIT_DESKTOP_LOG=/tmp/dock/app.log \
   back without any synthetic click, logs what AppKit says about the windows at each step and draws each live state.
   It approves and creates a task, so it refuses to run unless the app points at the fake server: not the default
   address, not port 3780, and the server must answer `GET /dev/inbox/fake`.
+- `SAMRABBIT_DOCK_SMOKE_PLACES=1` (same guard, reads only) leaves a running dev copy at the top left of its screen and
+  opens the list, folds it to the orb and back, leaves it as the orb in the bottom-right corner with its list,
+  hides and shows it as ⌃⌥D does and puts it back in the middle, logging the frames of both windows and what each of
+  the four shortcuts registered as. Give the dev copy other shortcuts first (`defaults write <dev bundle id>
+  AgentDockShortcuts -dict talk "⌃⌥⇧F17" compose "⌃⌥⇧F18"`) so it never shares the installed app's.
 - `SAMRABBIT_DOCK_FIXTURE_WAKE=1` makes the voice placeholder report the wake listener as armed (the mic's dot).
 
 ## Developing the UI

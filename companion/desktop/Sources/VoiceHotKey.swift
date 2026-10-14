@@ -20,9 +20,11 @@ final class VoiceHotKey {
     private var lastPress = Date.distantPast
 
     /// Registers `keyCode` + `modifiers` (Carbon values; `description` names them in the log); nil when the system
-    /// refused it (another app has it).
+    /// refused it (another app has it). `exclusive` (the dock's Settings): no other app can register it meanwhile, and
+    /// one that holds it so already makes this fail.
     init?(keyCode: UInt32 = UInt32(kVK_Space), modifiers: UInt32 = UInt32(controlKey | optionKey), id: UInt32 = 1,
-          description: String = VoiceHotKey.shortcutDescription, action: @escaping @MainActor () -> Void) {
+          description: String = VoiceHotKey.shortcutDescription, exclusive: Bool = false,
+          action: @escaping @MainActor () -> Void) {
         self.id = id
         self.action = action
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -41,7 +43,8 @@ final class VoiceHotKey {
         }, 1, &spec, context, &handler)
         guard installed == noErr else { return nil }
         let hotKeyId = EventHotKeyID(signature: Self.signature, id: id)
-        let registered = RegisterEventHotKey(keyCode, modifiers, hotKeyId, GetApplicationEventTarget(), 0, &hotKey)
+        let registered = RegisterEventHotKey(keyCode, modifiers, hotKeyId, GetApplicationEventTarget(),
+                                             exclusive ? OptionBits(kEventHotKeyExclusive) : 0, &hotKey)
         guard registered == noErr else {
             if let handler { RemoveEventHandler(handler) }
             Log.write("voice: the shortcut \(description) is taken (\(registered))")

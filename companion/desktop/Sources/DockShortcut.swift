@@ -132,6 +132,15 @@ enum DockShortcutAction: String, CaseIterable, Identifiable {
     }
 }
 
+/// One of macOS's own keyboard shortcuts (System Settings › Keyboard › Keyboard Shortcuts) as Carbon's
+/// CopySymbolicHotKeys lists it: the key code, Carbon modifier bits (with the fn bit on F keys and arrows), and
+/// whether it is on. macOS takes such a combination before any app sees it.
+struct DockSystemShortcut: Equatable {
+    let keyCode: UInt32
+    let modifiers: UInt32
+    let enabled: Bool
+}
+
 /// The rules over the four shortcuts: which combinations can be one, and how they are kept.
 enum DockShortcuts {
     static let defaults: [DockShortcutAction: DockShortcut] =
@@ -178,6 +187,11 @@ enum DockShortcuts {
             return "\(shortcut.display) is already “\(other.label)”."
         }
         return nil
+    }
+
+    /// macOS has `shortcut` itself and it is on (the fn bit and any bits that aren't ⌃⌥⇧⌘ don't count).
+    static func takenBySystem(_ shortcut: DockShortcut, _ system: [DockSystemShortcut]) -> Bool {
+        system.contains { $0.enabled && DockShortcut(keyCode: $0.keyCode, modifiers: $0.modifiers) == shortcut }
     }
 
     /// The saved shortcuts (UserDefaults keeps only the changed ones, as "⌃⌥D"); anything unreadable is the default.

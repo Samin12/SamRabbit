@@ -11,6 +11,7 @@ enum ShortcutTests {
         ("recordedKeys", recordedKeys),
         ("rules", rules),
         ("keptOnlyWhenChanged", keptOnlyWhenChanged),
+        ("macOSOwnShortcuts", macOSOwnShortcuts),
         ("menuKeys", menuKeys),
     ]
 
@@ -133,6 +134,31 @@ enum ShortcutTests {
         var expected = DockShortcuts.defaults
         expected[.compose] = DockShortcut(keyCode: 38, modifiers: controlOption)
         expectEqual(DockShortcuts.load(odd), expected)
+    }
+
+    static func macOSOwnShortcuts() throws {
+        // As CopySymbolicHotKeys lists them (this Mac's: ⌥⌘D hides the Dock, ⌃⌥Space next input source is off, F-key
+        // and arrow ones carry the fn bit 0x20000).
+        let system = [
+            DockSystemShortcut(keyCode: 2, modifiers: 0x900, enabled: true),
+            DockSystemShortcut(keyCode: 49, modifiers: 0x1800, enabled: false),
+            DockSystemShortcut(keyCode: 96, modifiers: 0x21000, enabled: true),
+            DockSystemShortcut(keyCode: 123, modifiers: 0x21000, enabled: true),
+        ]
+        let c = DockShortcut.control, o = DockShortcut.option, cmd = DockShortcut.command
+        expect(DockShortcuts.takenBySystem(DockShortcut(keyCode: 2, modifiers: o | cmd), system), "⌥⌘D is macOS’s")
+        expect(!DockShortcuts.takenBySystem(DockShortcut(keyCode: 2, modifiers: c | o), system), "⌃⌥D isn’t")
+        expect(!DockShortcuts.takenBySystem(DockShortcuts.defaults[.talk]!, system), "a shortcut turned off is free")
+        expect(DockShortcuts.takenBySystem(DockShortcut(keyCode: 96, modifiers: c), system), "⌃F5 (fn bit ignored)")
+        expect(DockShortcuts.takenBySystem(DockShortcut(keyCode: 123, modifiers: c), system), "⌃←")
+        expect(!DockShortcuts.takenBySystem(DockShortcut(keyCode: 96, modifiers: 0), system), "F5 alone isn’t")
+        expect(!DockShortcuts.takenBySystem(DockShortcut(keyCode: 2, modifiers: o | cmd), []))
+        // The defaults are free on a Mac with the input-source shortcuts off.
+        for action in DockShortcutAction.allCases {
+            expect(!DockShortcuts.takenBySystem(action.defaultShortcut, system), "\(action)")
+        }
+        // With "Select next source in Input menu" on (macOS's default), ⌃⌥Space is macOS's.
+        expect(DockShortcuts.takenBySystem(DockShortcuts.defaults[.talk]!, [DockSystemShortcut(keyCode: 49, modifiers: 0x1800, enabled: true)]))
     }
 
     static func menuKeys() throws {

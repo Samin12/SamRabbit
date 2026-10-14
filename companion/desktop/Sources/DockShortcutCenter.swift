@@ -5,13 +5,16 @@ import SwiftUI
 /// The dock's four global shortcuts, registered (CONTRACTS-WAVE7 §B2): ⌃⌥Space talk, ⌃⌥K the list on compose, ⌃⌥D
 /// show / hide, ⌃⌥M minimize / expand, or what Settings recorded instead (UserDefaults `AgentDockShortcuts`, only the
 /// changed ones, as "⌃⌥D"). Carbon `RegisterEventHotKey`, so no Accessibility permission: the dock's three through
-/// DockHotKey, the talk one through `MacVoice.setShortcut` (the voice owns its hot key). A combination another app
-/// already has is refused by the system: Settings and the menus say so, and a newly recorded one that is refused
-/// leaves the old one working.
+/// DockHotKey, the talk one through `MacVoice.setShortcut` (the voice owns its hot key). Each is registered
+/// exclusively, so Carbon refuses one another app holds that way; one of macOS's own shortcuts (Keyboard Shortcuts,
+/// CopySymbolicHotKeys) isn't registered at all, since macOS takes it first. (An app that registered a combination
+/// without exclusivity can't be seen: Carbon then shares it.) Settings and the menus say why one isn't working, and a
+/// newly recorded one that is refused leaves the old one working.
 @MainActor
 final class DockShortcutCenter: ObservableObject {
     static let shared = DockShortcutCenter()
     static let takenMessage = "Not available — taken by another app"
+    static let systemMessage = "Not available — macOS uses it (Keyboard Shortcuts)"
 
     enum Outcome: Equatable {
         case saved
@@ -113,21 +116,41 @@ final class DockShortcutCenter: ObservableObject {
     private func register(_ action: DockShortcutAction) -> Bool {
         guard live else { return false }
         let shortcut = self.shortcut(action)
-        let ok: Bool
-        var taken = true
+        var problem: String?
+        if DockShortcuts.takenBySystem(shortcut, Self.systemShortcuts()) {
+            problem = Self.systemMessage
+            Log.write("shortcut \(shortcut.display) is one of macOS’s own: not registered")
+        }
         switch action {
         case .talk:
-            ok = MacVoice.shared.setShortcut(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers, description: shortcut.display)
+            let voiceProblem = problem.map { _ in "\(shortcut.display) is one of macOS’s own shortcuts" }
+            if !MacVoice.shared.setShortcut(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers, description: shortcut.display,
+                                            unavailable: voiceProblem) {
+                problem = problem ?? Self.takenMessage
+            }
         case .compose, .showHide, .minimize:
+            guard problem == nil else { break }
             let handler = handlers[action] ?? {}
-            let key = DockHotKey(keyCode: Int(shortcut.keyCode), modifiers: Int(shortcut.modifiers), name: shortcut.display, action: handler)
+            let key = DockHotKey(keyCode: Int(shortcut.keyCode), modifiers: Int(shortcut.modifiers), name: shortcut.display,
+                                 exclusive: true, action: handler)
             keys[action] = key
-            ok = key != nil
-            taken = DockHotKey.lastStatus == OSStatus(eventHotKeyExistsErr)
+            if key == nil {
+                problem = DockHotKey.lastStatus == OSStatus(eventHotKeyExistsErr) ? Self.takenMessage : "Not available — macOS didn’t accept it"
+            }
         }
-        let problem: String? = ok ? nil : (taken ? Self.takenMessage : "Not available — macOS didn’t accept it")
         if unavailable[action] != problem { unavailable[action] = problem }
-        return ok
+        return problem == nil
+    }
+
+    /// macOS's own keyboard shortcuts as they are set right now (read each time: Samin may change them meanwhile).
+    private static func systemShortcuts() -> [DockSystemShortcut] {
+        var list: Unmanaged<CFArray>?
+        guard CopySymbolicHotKeys(&list) == noErr, let array = list?.takeRetainedValue() as? [[String: Any]] else { return [] }
+        return array.compactMap { item in
+            guard let code = (item[kHISymbolicHotKeyCode] as? NSNumber)?.uint32Value,
+                  let modifiers = (item[kHISymbolicHotKeyModifiers] as? NSNumber)?.uint32Value else { return nil }
+            return DockSystemShortcut(keyCode: code, modifiers: modifiers, enabled: (item[kHISymbolicHotKeyEnabled] as? NSNumber)?.boolValue ?? false)
+        }
     }
 
     private func unregister(_ action: DockShortcutAction) {
