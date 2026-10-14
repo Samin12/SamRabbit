@@ -17,9 +17,9 @@ Routes (the same handlers under three prefixes, each with its own auth):
   {kind: journal | task | event | note | nothing | failed, title, detail, threadId?, eventId?, noteId?, journalDate?},
   suggestion?: {action, label, startsAt?}, say}``; ``wait`` holds the answer until it is done or failed.
 * ``GET …/captures?limit=`` (newest first) and ``POST …/captures/<id>/act {action}``: ``task`` / ``journal`` /
-  ``event`` / ``note`` (do it as that instead; a calendar event it made is removed first), ``undo`` (a calendar event:
-  removed; a note: dismissed; a journal line or a task: 409 ``cannot_undo``), ``dismiss``, ``seen``, ``retry`` (a failed
-  one). Only on Samin's tap.
+  ``event`` / ``note`` (do it as that instead; a calendar event it made is removed once that worked), ``undo`` (a
+  calendar event: removed; a note: dismissed; a journal line or a task: 409 ``cannot_undo``), ``dismiss``, ``seen``,
+  ``retry`` (a failed one). Only on Samin's tap.
 
 The work (one background worker, in order; a crash or a restart picks up where it stopped):
 
@@ -30,16 +30,20 @@ The work (one background worker, in order; a crash or a restart picks up where i
    "journal: …", "make a new task …", "remind me … at 3 pm", "block 30 minutes …"); otherwise Claude Haiku in an
    isolated ``claude -p`` (``samrabbit_claude``: no tools, no settings, no session) as a classifier only. The bridge
    decides what is allowed: the journal only with an explicit journal cue, the words after it verbatim, stamped with
-   the capture time; a T3 task (confidence ≥ 0.75 or a cue) with the transcript, verbatim, as its prompt, placed as a
-   phone's new task; a calendar event only with a parsed future time and confidence ≥ 0.8 (its description carries the
-   capture id); anything else is **saved as a note** with a suggestion. Nothing is ever approved, stopped, deleted or
-   sent.
+   the capture time (a cue at the end counts only as its own request: never negated, "… but don't put this in the
+   journal", nor a question, "why did you put it in the journal?"); a T3 task (confidence ≥ 0.75 or a cue) with the
+   transcript, verbatim, as its prompt, placed as a phone's new task (the classifier's, and any that writes to someone,
+   in ``approval-required`` mode; a message to someone is never started by the classifier); a calendar event only with
+   a parsed future time and confidence ≥ 0.8 (its description carries the capture id); anything else is **saved as a
+   note** with a suggestion. Nothing is ever approved, stopped, deleted or sent.
 3. **Act**, crash-safe: each step is saved before and after it runs. A journal line that may have been written is
    looked for in the day's journal before writing it again; a T3 task's thread id is chosen and saved first, and a
-   retry looks for that thread; a calendar event is looked for by its capture id.
+   retry looks for that thread and sends its first message only if T3 doesn't have it; a calendar event is looked for
+   by its capture id.
 4. **Record**: the "Voice notes" conversation of the day in the sync store (``notes-YYYYMMDD``: what he said, then what
    was done, as a ``host.note``), an inbox item ``note:<id>`` for notes (``samrabbit_inbox``: ``can`` act / dismiss /
-   seen), and ``summary.captures {recent, failed, pending, notes}`` for widgets.
+   seen; one that failed needs him until seen), and ``summary.captures {recent, failed, pending, notes}`` for widgets
+   (``failed``: the inbox's failed notes he hasn't seen, the same count as ``/health``).
 
 Notes live in ``~/Library/Application Support/SamRabbit/capture/`` (0700; one 0600 JSON file per note, the audio next
 to it until it is heard; kept 30 days). Nothing is logged but the source, the kind of note, what it became and how
@@ -268,9 +272,16 @@ _JOURNAL_LEAD = re.compile(_LEAD + r"(?:put|add|write|save|log|note|jot)\s+(?:th
                            re.IGNORECASE | re.DOTALL)
 _JOURNAL_TAG = re.compile(r"^journal(?:\s+(?:entry|note))?\s*[:,;\-–—]\s*(?P<text>.+)$|"
                           r"^journal\s+(?:entry|note)\s+(?P<text2>.+)$", re.IGNORECASE | re.DOTALL)
-_JOURNAL_TAIL = re.compile(r"^(?P<text>.+?)" + _SEP + r"(?:(?:and\s+)?please\s+)?(?:put|add|write|save|log|note)\s+"
-                           r"(?:this|it|that)\s+(?:down\s+)?(?:in|into|to|on)\s+(?:my|the)\s+journal[\s.!]*$",
-                           re.IGNORECASE | re.DOTALL)
+# "… put it in the journal" at the end. A cue only when it is its own request: after a pause in the words (". , ; :
+# —") or "please" / "can you", never negated ("but don't put this in the journal") and never a question about it
+# ("why did you put it in the journal?"). ``journal_tail`` decides.
+_JOURNAL_TAIL = re.compile(r"(?:put|add|write|save|log|note)\s+(?:this|it|that)\s+(?:down\s+)?(?:in|into|to|on)\s+"
+                           r"(?:my|the)\s+journal(?:[\s,]+please)?[\s.!?]*$", re.IGNORECASE)
+_TAIL_JOINER = re.compile(r"(?:^|[\s,]+)(?P<word>and|so|then|also|now|just|please|ok|okay|"
+                          r"(?:can|could|would|will)\s+you)$", re.IGNORECASE)
+_NEGATION = re.compile(r"(?:\b(?:not|no|never|nor|nothing|dont|cannot|without|instead|rather|stop|avoid|forget|"
+                       r"skip|leave)\b|n['’]t\b)", re.IGNORECASE)
+_CLAUSE_MARKS = ".!?;:,—–"
 _TASK = re.compile(_LEAD + r"(?:(?:make|create|start|open|add|spin up|kick off)\s+(?:a\s+|an\s+)?(?:new\s+)?"
                    r"(?:t3\s+)?task|new\s+(?:t3\s+)?task)\b" + _SEP + r"(?:to\s+|for\s+|that\s+|which\s+)?"
                    r"(?P<text>.*)$", re.IGNORECASE | re.DOTALL)
@@ -278,6 +289,40 @@ _REMIND = re.compile(_LEAD + r"remind me\s+(?:to\s+|about\s+|that\s+)?(?P<what>.
 _BLOCK = re.compile(_LEAD + r"block\s+(?:off\s+|out\s+)?(?:the\s+next\s+)?(?P<n>\d{1,3}|half an?|an?|one|two|three|"
                     r"four|fifteen|twenty|thirty|forty-five|forty|fifty|sixty|ninety)\s*(?P<unit>minutes?|mins?|hours?|"
                     r"hrs?)\b" + _SEP + r"(?:for\s+|to\s+|of\s+)?(?P<what>.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def journal_tail(heard: str) -> Optional[Tuple[str, str]]:
+    """The journal cue at the end of a note: ``("journal", his words before it)``, ``("ask", "")`` (it may be a
+    request, it may be him talking about the journal: kept as a note offering the journal), ``("refused", "")`` (he said
+    not to: never the journal, nor the offer) or None (no cue at the end)."""
+    cue = _JOURNAL_TAIL.search(heard)
+    if cue is None or not heard[:cue.start()].strip():
+        return None  # nothing before it: the leading form's
+    before = heard[:cue.start()]
+    cut = max(before.rfind(mark) for mark in _CLAUSE_MARKS)
+    clause = before[cut + 1:]  # the words between the last pause and the cue
+    if _NEGATION.search(clause):
+        return "refused", ""
+    rest, joiners = clause.rstrip(), []
+    while True:
+        joiner = _TAIL_JOINER.search(rest)
+        if joiner is None:
+            break
+        joiners.append(joiner.group("word").lower())
+        rest = rest[:joiner.start()].rstrip()
+    request = any(word.endswith("you") for word in joiners)
+    if heard.rstrip().endswith("?") and not request:
+        return "ask", ""  # "put it in the journal?" asks
+    if rest.strip():
+        # His words run straight into the cue ("he told me to put it in the journal", "why would you put it in …"):
+        # only "… please put it in the journal" is a request without a pause.
+        if cut >= 0 or "please" not in joiners:
+            return "ask", ""
+        text = rest
+    else:
+        text = before[:cut] if cut >= 0 else ""
+    return "journal", text.strip(" ,;:-–—")
+
 
 ROUTER_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -309,8 +354,24 @@ kind:
   journal, event or none.
 
 confidence: 0 to 1, how sure you are of kind. title: at most 60 characters, starting with a verb, from his own words.
-Never approve, stop, delete, send or email anything; an email to write is a task.
+Never approve, stop, delete, send or email anything. An email, text or message to write or send to someone is a note
+with suggestion task, never a task.
 """
+
+APPROVAL_MODE = "approval-required"
+# A note about writing to someone: an email, a text, a message, a reply, "send …", "tell Dana …", "let Bob know …".
+# "text" and "message" are also nouns ("the text on the page"): only with a person after them.
+_SENDS = re.compile(r"(?i:\b(?:e-?mail(?:s|ed|ing)?|gmail|repl(?:y|ies|ied|ying)|respond(?:s|ed|ing)?\s+to|"
+                    r"write\s+(?:back|to)|forward(?:s|ed|ing)?|cc|bcc|dm|sms|imessage|whatsapp|send(?:s|ing)?|"
+                    r"let\s+(?:\w+\s+){1,3}know|(?:tell|ping|slack|notify)\s+(?!(?:me|it|this|that|claude|codex|t3|"
+                    r"the\s+(?:agent|tests?|build|code))\b)\w+)\b)|"
+                    r"\b(?i:text|message)\s+(?:(?i:him|her|them|back)\b|[A-Z][a-z]+\b)")
+
+
+def sends_something(heard: str) -> bool:
+    """Does the note ask for a message to someone (an email, a text, a reply, telling someone)? Such a note is never
+    started by the classifier, and a task made from it asks Samin before it acts."""
+    return bool(_SENDS.search(heard))
 
 
 class CaptureRouter:
@@ -327,24 +388,49 @@ class CaptureRouter:
     def route(self, heard: str, *, captured: datetime, now: datetime, zone_name: str,
               projects: Optional[List[str]] = None, source: str = "") -> Dict[str, Any]:
         heard = _clean_text(heard)
-        plan = self._rules(heard, captured=captured, now=now)
-        if plan is not None:
-            return plan
-        return self._classify(heard, captured=captured, now=now, zone_name=zone_name, projects=projects or [],
-                              source=source)
+        refused = False
+        plan = self._journal_rules(heard)
+        if plan == "refused":
+            refused, plan = True, None  # he said not to: the other rules and the classifier, never the journal
+        if plan is None:
+            plan = self._rules(heard, captured=captured, now=now)
+        if plan is None:
+            plan = self._classify(heard, captured=captured, now=now, zone_name=zone_name, projects=projects or [],
+                                  source=source)
+        if refused and plan.get("suggestion") == "journal":
+            plan.pop("suggestion")
+        if plan.get("kind") == "task" and (plan.get("by") != "rule" or sends_something(heard)):
+            # Words he did not type as an order for an agent (the classifier's reading, or a message to someone):
+            # the agent asks him before it acts.
+            plan["mode"] = APPROVAL_MODE
+        return plan
 
     # ------------------------------------------------------------------ explicit cues
-    def _rules(self, heard: str, *, captured: datetime, now: datetime) -> Optional[Dict[str, Any]]:
-        for pattern in (_JOURNAL_LEAD, _JOURNAL_TAG, _JOURNAL_TAIL):
+    @staticmethod
+    def _journal_rules(heard: str) -> Any:
+        """A journal plan, a note offering the journal, ``"refused"`` (a negated cue: also after a leading one, "put
+        this in my journal … no, don't put it in the journal") or None."""
+        text: Optional[str] = None
+        tail = journal_tail(heard)
+        if tail is not None and tail[0] == "refused":
+            return "refused"
+        for pattern in (_JOURNAL_LEAD, _JOURNAL_TAG):
             match = pattern.match(heard)
-            if match is None:
-                continue
-            text = (match.groupdict().get("text") or match.groupdict().get("text2") or "").strip()
-            text = text.strip(" ,;:-–—")
-            if text and in_order_slice(text, heard):
-                return {"kind": "journal", "by": "rule", "confidence": 1.0, "title": t3.title_from_prompt(text),
-                        "text": text}
-            return _note("rule", heard, "journal")  # only the cue, nothing to write: keep it, offer the journal
+            if match is not None:
+                text = (match.groupdict().get("text") or match.groupdict().get("text2") or "").strip(" ,;:-–—")
+                break
+        else:
+            if tail is None:
+                return None
+            if tail[0] == "ask":
+                return _note("rule", heard, "journal")  # maybe a request, maybe not: kept, the journal offered
+            text = tail[1]
+        if text and in_order_slice(text, heard):
+            return {"kind": "journal", "by": "rule", "confidence": 1.0, "title": t3.title_from_prompt(text),
+                    "text": text}
+        return _note("rule", heard, "journal")  # only the cue, nothing to write: keep it, offer the journal
+
+    def _rules(self, heard: str, *, captured: datetime, now: datetime) -> Optional[Dict[str, Any]]:
         match = _TASK.match(heard)
         if match is not None:
             rest = match.group("text").strip(" ,;:.-–—")
@@ -412,7 +498,9 @@ class CaptureRouter:
             # The journal only on his explicit ask: the rules would have seen the cue. Keep it and offer it.
             return _note("claude", heard, "journal", confidence=confidence)
         if kind == "task":
-            if confidence >= TASK_CONFIDENCE:
+            # A message to someone (an email, a text, "tell Dana …") is never started by the classifier: an agent
+            # with his accounts could send it. Kept as a note; his tap starts it (and the agent asks before acting).
+            if confidence >= TASK_CONFIDENCE and not sends_something(heard):
                 return {"kind": "task", "by": "claude", "confidence": confidence, "title": title}
             return _note("claude", heard, "task", confidence=confidence)
         if kind == "event":
@@ -650,7 +738,20 @@ class CaptureService:
         records = self.store.records()
         return {"available": True, "classifier": self.router.available(),
                 "pending": sum(1 for record in records if record.get("state") not in FINAL),
-                "failed": sum(1 for record in records if record.get("state") == FAILED and not record.get("dismissed"))}
+                "failed": self._failed(records, self._clock())}
+
+    @staticmethod
+    def _in_inbox(record: Dict[str, Any], now: float) -> bool:
+        """A note (or a note that failed) from the last ``NOTE_DAYS`` days that he did not dismiss."""
+        return not record.get("dismissed") and record.get("state") in FINAL and \
+            (record.get("outcome") or {}).get("kind") in ("note", "failed") and \
+            now - float(record.get("receivedEpoch") or 0) <= NOTE_DAYS * 86400
+
+    def _failed(self, records: List[Dict[str, Any]], now: float) -> int:
+        """Notes that failed and still need him: in the inbox (the same days) and not yet seen there. The summary, the
+        inbox's ``error`` items and ``/health`` all count these."""
+        return sum(1 for record in records if record.get("state") == FAILED and not record.get("seen") and
+                   self._in_inbox(record, now))
 
     # ------------------------------------------------------------------ wiring
     def _mobile(self) -> Any:
@@ -1054,6 +1155,7 @@ class CaptureService:
 
     def _fail(self, record: Dict[str, Any], code: str, message: str) -> Dict[str, Any]:
         record["state"] = FAILED
+        record["seen"] = False  # a new failure (a retry that failed again too) needs him again
         record["error"] = {"code": code, "message": message}
         record["outcome"] = {"kind": "failed", "title": "Voice note", "detail": "Couldn't save it: " +
                              message[:1].lower() + message[1:]}
@@ -1126,43 +1228,32 @@ class CaptureService:
         return hub
 
     def _do_task(self, record: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+        """A T3 task with his words as its first message, once. The thread id is saved before the first dispatch; a
+        retry (or his tap after a try that stopped half way) looks for that thread and sends the first message only
+        if T3 doesn't have it (``samrabbit_t3.start_task``): never a second thread, never an empty one called done."""
         hub = self._hub()
         steps = record.setdefault("steps", {})
         step = steps.get("task") or {}
         if step.get("state") == "done":
             return _task_outcome(step)
         thread_id = str(step.get("threadId") or uuid.uuid4())
-        if step.get("state") == "creating":
-            try:  # did the first try get through before the bridge stopped?
-                snapshot = hub.snapshot(max_age=0.0)
-            except t3.T3Error as error:
-                raise _Retry(error.code) from None
-            thread = snapshot.threads.get(thread_id)
-            if thread is not None:
-                step = {"state": "done", "threadId": thread_id, "title": str(thread.get("title") or plan.get("title")),
-                        "projectName": snapshot.titles.get(str(thread.get("projectId")), "") if
-                        isinstance(getattr(snapshot, "titles", None), dict) else ""}
-                steps["task"] = step
-                self._save(record)
-                return _task_outcome(step)
-        steps["task"] = {"state": "creating", "threadId": thread_id}
+        mode = plan.get("mode") if plan.get("mode") in t3.RUNTIME_MODES else None
+        tried = step.get("state") == "creating"  # an earlier try saved the id: T3 may have the thread already
+        steps["task"] = {"state": "creating", "threadId": thread_id, **({"mode": mode} if mode else {})}
         self._save(record)
         try:
-            value = hub.create(record["heard"], title=str(plan.get("title") or "") or None, thread_id=thread_id)
+            value = t3.start_task(hub, record["heard"], thread_id=thread_id,
+                                  title=str(plan.get("title") or "") or None, runtime_mode=mode, look_first=tried)
         except t3.T3Error as error:
-            if error.code == "t3_dispatch_failed":  # the thread is there; its first message is not
-                try:
-                    hub.send_message(thread_id, record["heard"])
-                    value = {"threadId": thread_id, "title": plan.get("title"), "projectName": ""}
-                except t3.T3Error:
-                    raise _Retry(error.code) from None
-            elif error.retryable or error.status >= 500 and error.code not in ("t3_dev_copy", "t3_unavailable"):
-                raise _Retry(error.code) from None
-            else:
-                raise _Instead(error.code, "T3 Code didn't take it, so it's kept as a note.") from None
+            if error.code == "t3_dispatch_failed" or error.retryable or \
+                    error.status >= 500 and error.code not in ("t3_dev_copy", "t3_unavailable"):
+                raise _Retry(error.code) from None  # the same thread id next time: found, not made again
+            raise _Instead(error.code, "T3 Code didn't take it, so it's kept as a note.") from None
         step = {"state": "done", "threadId": str(value.get("threadId") or thread_id),
                 "title": str(value.get("title") or plan.get("title") or "New task"),
                 "projectName": str(value.get("projectName") or ""), "placement": value.get("placement")}
+        if mode:
+            step["mode"] = mode
         steps["task"] = step
         self._save(record)
         service = self._mobile()
@@ -1300,7 +1391,10 @@ class CaptureService:
             plan = dict(record.get("plan") or {})
             if action == "event":
                 plan = self._event_plan(record, plan, body)
-            undone = self._remove_event(record) if outcome.get("kind") == "event" else False
+            had_event = outcome.get("kind") == "event"
+            # As a note: the event comes off first (nothing else to do). As a task or the journal: that first, and
+            # the event comes off only once it worked (T3 or Heptabase away: the event and the note stay as they are).
+            undone = self._remove_event(record) if had_event and action == "note" else False
             try:
                 if action == "journal":
                     words = str(plan.get("text") or record["heard"]) if plan.get("kind") == "journal" \
@@ -1308,6 +1402,9 @@ class CaptureService:
                     new = self._do_journal(record, words)
                 elif action == "task":
                     plan.setdefault("title", t3.title_from_prompt(record["heard"]))
+                    plan.pop("mode", None)  # his tap: as the phone's new task, unless it writes to someone
+                    if sends_something(record["heard"]):
+                        plan["mode"] = APPROVAL_MODE
                     new = self._do_task(record, plan)
                 elif action == "event":
                     record["plan"] = plan
@@ -1319,6 +1416,12 @@ class CaptureService:
                                    retryable=True) from None
             except _Instead as instead:
                 raise CaptureError(409, instead.code, instead.detail.split(",")[0] + ".") from None
+            if had_event and action != "note":
+                try:
+                    undone = self._remove_event(record)
+                except CaptureError:  # done as he asked; the event could not be taken off: say so, keep its id
+                    new = dict(new, eventKept=((record.get("steps") or {}).get("event") or {}).get("eventId"))
+                    new["detail"] = str(new.get("detail") or "Done.") + " The calendar event is still there."
             if undone:
                 new = dict(new, undone="event")
             record["actedAt"] = iso_utc(self._clock())
@@ -1435,13 +1538,13 @@ class CaptureService:
         items = []
         for record in self.store.records():
             outcome = record.get("outcome") or {}
-            if record.get("dismissed") or record.get("state") not in FINAL or \
-                    outcome.get("kind") not in ("note", "failed") or \
-                    moment - float(record.get("receivedEpoch") or 0) > NOTE_DAYS * 86400:
+            if not self._in_inbox(record, moment):
                 continue
             failed = record.get("state") == FAILED
             suggestion = record.get("suggestion") or None
-            status = "error" if failed else ("needs-input" if suggestion and not record.get("seen") else "idle")
+            # Needs him until he has seen it (as a Claude or Codex session that failed): then idle, still listed.
+            needs = not record.get("seen")
+            status = ("error" if failed else "needs-input" if suggestion else "idle") if needs else "idle"
             heard = str(record.get("heard") or "")
             items.append({
                 "id": "note:" + record["captureId"], "source": "note", "agent": None,
@@ -1481,8 +1584,9 @@ class CaptureService:
         return status, {"ok": True, "capture": value}
 
     def summary_part(self) -> Dict[str, Any]:
-        """``summary.captures``: the last three notes, how many failed (last 7 days, not dismissed), how many are still
-        on their way, and how many saved notes wait in the inbox."""
+        """``summary.captures``: the last three notes, how many failed and still need him (the inbox's ``error`` items:
+        the last ``NOTE_DAYS`` days, not dismissed, not yet seen), how many are still on their way, and how many saved
+        notes wait in the inbox."""
         records = self.store.records()
         now = self._clock()
         recent = [{"captureId": record["captureId"], "state": record.get("state"),
@@ -1490,11 +1594,9 @@ class CaptureService:
                    "title": (record.get("outcome") or {}).get("title"),
                    "say": (record.get("outcome") or {}).get("detail"), "at": record.get("capturedAt")}
                   for record in records[:3]]
-        return {"available": True, "recent": recent,
-                "failed": sum(1 for record in records if record.get("state") == FAILED and not record.get("dismissed")
-                              and now - float(record.get("receivedEpoch") or 0) < 7 * 86400),
+        return {"available": True, "recent": recent, "failed": self._failed(records, now),
                 "pending": sum(1 for record in records if record.get("state") not in FINAL),
-                "notes": len([item for item in self.inbox_items(now) if item["status"] != "error"])}
+                "notes": sum(1 for record in records if record.get("state") == DONE and self._in_inbox(record, now))}
 
 
 _INSTEAD_TEXT = {"journal": "The journal wasn't reachable, so it's kept as a note.",
@@ -1518,8 +1620,12 @@ def _journal_outcome(step: Dict[str, Any], captured: datetime) -> Dict[str, Any]
 def _task_outcome(step: Dict[str, Any]) -> Dict[str, Any]:
     title = str(step.get("title") or "New task")
     project = str(step.get("projectName") or "")
-    return {"kind": "task", "title": title, "threadId": step.get("threadId"), "projectName": project or None,
-            "detail": f"Started “{title}”" + (f" in {project}." if project else ".")}
+    value = {"kind": "task", "title": title, "threadId": step.get("threadId"), "projectName": project or None,
+             "detail": f"Started “{title}”" + (f" in {project}" if project else "") +
+             ("; it asks you before it acts." if step.get("mode") == APPROVAL_MODE else ".")}
+    if step.get("mode"):
+        value["runtimeMode"] = step["mode"]
+    return value
 
 
 def _event_outcome(step: Dict[str, Any], now: datetime) -> Dict[str, Any]:

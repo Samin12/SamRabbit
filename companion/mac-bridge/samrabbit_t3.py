@@ -1442,6 +1442,7 @@ class T3Hub:
         self._turn_requests: Dict[str, Tuple[float, Optional[str]]] = {}
         self._config: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None  # (read at, trimmed config or None)
         self._config_lock = threading.Lock()
+        self._chosen_modes: Dict[str, str] = {}  # thread id -> the runtime mode ``create`` was told (not inherited)
         self.shell_fetches = 0  # tests: how often the shell was read from T3
 
     # ------------------------------------------------------------------ snapshot
@@ -1819,11 +1820,14 @@ class T3Hub:
         return {"ok": True, "threadId": str(thread["id"]), "wasWorking": True}
 
     def create(self, text: Any, *, project_id: Optional[str] = None, title: Optional[str] = None,
-               model_selection: Optional[Dict[str, Any]] = None, thread_id: Optional[str] = None) -> Dict[str, Any]:
+               model_selection: Optional[Dict[str, Any]] = None, thread_id: Optional[str] = None,
+               runtime_mode: Optional[str] = None) -> Dict[str, Any]:
         """``thread.create`` + ``thread.turn.start``. The model: ``model_selection`` when given (the desktop inbox's
         chosen provider instance and model), else the project's most recent thread's, else the project default.
         ``thread_id``: the new thread's id chosen by the caller (a voice note saves it before dispatching, so a retry
-        after a crash can look for that thread instead of making a second one)."""
+        after a crash can look for that thread instead of making a second one). ``runtime_mode``: one of
+        ``RUNTIME_MODES`` (a task the bridge starts from words Samin did not type, e.g. ``approval-required``), else
+        the project's most recent thread's (never one that was given its own mode here), else ``full-access``."""
         prompt = _prompt(text, "Say what the new task should do.")
         if thread_id is not None:
             thread_id = _thread_id(thread_id)
@@ -1847,10 +1851,20 @@ class T3Hub:
         elif selection is None and _dict(chosen.get("defaultModelSelection")).get("model"):
             selection = dict(chosen["defaultModelSelection"])
         selection = selection or dict(DEFAULT_MODEL_SELECTION)
-        mode = str(recent.get("runtimeMode")) if recent is not None and recent.get("runtimeMode") in RUNTIME_MODES \
-            else DEFAULT_RUNTIME_MODE
+        if runtime_mode in RUNTIME_MODES:
+            mode = str(runtime_mode)
+        else:  # never from a thread the bridge gave its own mode (a voice note's approval-required task)
+            mine = self._chosen_modes
+            usual = next((thread for thread in siblings if str(thread.get("id")) not in mine), None)
+            mode = str(usual.get("runtimeMode")) if usual is not None and usual.get("runtimeMode") in \
+                RUNTIME_MODES else DEFAULT_RUNTIME_MODE
         name = " ".join(str(title or "").split())[:80] or title_from_prompt(prompt)
         thread_id = thread_id or self.commands.new_id()
+        if runtime_mode in RUNTIME_MODES:
+            with self._lock:
+                self._chosen_modes[thread_id] = mode
+                while len(self._chosen_modes) > 200:
+                    self._chosen_modes.pop(next(iter(self._chosen_modes)))
         self._dispatch(self.commands.create_thread(thread_id=thread_id, project_id=chosen["id"], title=name,
                                                    model_selection=selection, runtime_mode=mode))
         try:
@@ -1864,6 +1878,57 @@ class T3Hub:
         _LOG.info("t3 task created (%s)", reason)
         return {"threadId": thread_id, "title": name, "projectId": chosen["id"], "projectName": chosen["title"],
                 "placement": reason}
+
+
+def has_user_message(hub: Any, thread_id: str, thread: Optional[Dict[str, Any]] = None) -> bool:
+    """Has T3 got the thread's first message? The shell's own marks (``latestUserMessageAt``, a ``latestTurn``) when
+    it has them, else one fresh read of the thread for a user message. A T3Error when it can't tell."""
+    if thread is not None and (thread.get("latestUserMessageAt") or _dict(thread.get("latestTurn")).get("turnId")):
+        return True
+    detail = hub.detail(thread_id, turns=2, fresh=True)
+    return any(isinstance(message, dict) and message.get("role") == "user"
+               for message in _dict(detail.get("thread")).get("messages") or [])
+
+
+def start_task(hub: Any, text: str, *, thread_id: str, title: Optional[str] = None,
+               runtime_mode: Optional[str] = None, look_first: bool = True) -> Dict[str, Any]:
+    """A task whose thread id the caller saved before calling, started exactly once with ``text`` as its first message.
+
+    ``thread.create`` and ``thread.turn.start`` are two dispatches: a try can stop between them (the second failed, or
+    the bridge stopped). So when a thread with that id is in T3 already (``look_first``, and after a failed dispatch),
+    its first message is sent only if T3 doesn't have it, never a second thread and never the message twice. Raises
+    T3Error when T3 can't take it now (the caller tries again later with the same id). The answer is ``create``'s, with
+    ``created`` (False when the thread was found) and ``sent`` (False when T3 already had the message)."""
+    def existing() -> Optional[Tuple[Any, Dict[str, Any]]]:
+        snapshot = hub.snapshot(max_age=0.0)
+        thread = snapshot.threads.get(thread_id)
+        return (snapshot, thread) if thread is not None else None
+
+    def finish(found: Tuple[Any, Dict[str, Any]]) -> Dict[str, Any]:
+        snapshot, thread = found
+        sent = False
+        if not has_user_message(hub, thread_id, thread):
+            hub.send_message(thread_id, text)
+            sent = True
+        titles = snapshot.titles if isinstance(getattr(snapshot, "titles", None), dict) else {}
+        return {"threadId": thread_id, "title": str(thread.get("title") or title or ""),
+                "projectId": thread.get("projectId"), "projectName": titles.get(str(thread.get("projectId")), ""),
+                "placement": None, "created": False, "sent": sent}
+
+    if look_first:
+        found = existing()
+        if found is not None:
+            return finish(found)
+    try:
+        value = hub.create(text, title=title, thread_id=thread_id, runtime_mode=runtime_mode)
+    except T3Error as error:
+        if error.code != "t3_dispatch_failed":
+            raise
+        found = existing()  # ``thread.create`` may have gone through and only the first message failed
+        if found is None:
+            raise
+        return finish(found)
+    return dict(value, created=True, sent=True)
 
 
 def _thread_id(value: Any) -> str:

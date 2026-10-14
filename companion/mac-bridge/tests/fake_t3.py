@@ -146,6 +146,7 @@ class FakeT3:
         self.dispatched: List[Dict[str, Any]] = []
         self.requests: List[str] = []
         self.dispatch_status = 200
+        self.first_message_at: Dict[str, str] = {}  # threads made here that have no user message yet
         self.server_config: Any = default_server_config()
         self.ws_requests: List[str] = []
         self.ws_status = 101
@@ -330,7 +331,21 @@ class FakeT3:
                                       latest=None)
                     if isinstance(command.get("modelSelection"), dict):
                         created["modelSelection"] = dict(command["modelSelection"])
+                    if command.get("runtimeMode"):
+                        created["runtimeMode"] = command["runtimeMode"]
+                    self.first_message_at[created["id"]] = created["latestUserMessageAt"]
+                    created["latestUserMessageAt"] = None  # as T3: no user message until a turn starts
                     self.shell["threads"].append(created)
+                elif status == 200 and command.get("type") == "thread.turn.start":
+                    thread = next((item for item in self.shell["threads"] if item["id"] == command.get("threadId")),
+                                  None)
+                    if thread is not None and thread["id"] in self.first_message_at:  # made here: its first message
+                        thread["latestUserMessageAt"] = self.first_message_at.pop(thread["id"])
+                        detail = self.details.setdefault(thread["id"], {"messages": [], "activities": []})
+                        detail["messages"].append({"id": "u-" + str(command.get("commandId")), "role": "user",
+                                                   "text": (command.get("message") or {}).get("text") or "",
+                                                   "turnId": None, "streaming": False,
+                                                   "createdAt": thread["latestUserMessageAt"]})
             if status != 200:
                 return self._send(handler, status, {"code": "internal_error", "reason": "orchestration_dispatch_failed"})
             return self._send(handler, 200, {"sequence": 101 + len(self.dispatched)})

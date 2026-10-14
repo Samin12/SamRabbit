@@ -124,6 +124,9 @@ class CaptureBase(MobileBase):
         store = self.server.sync.store
         return [json.loads(payload) for _cursor, payload in store.events_after(0, 200, "notes-" + day)]
 
+    def composio_state(self) -> Dict[str, Any]:
+        return json.loads((self.composio_dir / "state.json").read_text())
+
     def created_events(self) -> List[Dict[str, Any]]:
         return [call for call in self.composio_calls() if call["slug"] == "GOOGLECALENDAR_CREATE_EVENT"]
 
@@ -278,6 +281,101 @@ class RouteTest(CaptureBase):
         self.assertEqual(("note", "journal"), (view["outcome"]["kind"], view["suggestion"]["action"]),
                          "a cue with nothing after it writes nothing")
         self.assertEqual({}, self.journal())
+
+    def test_a_negated_or_asked_journal_cue_never_writes_the_journal(self) -> None:
+        # The classifier is asked for the rest; it says "journal" each time and is held to the rules.
+        self.answers([{"mode": "ok", "output": {"kind": "journal", "confidence": 0.99, "title": "Keep it",
+                                                 "suggestion": "journal"}}])
+        refused = ["Don't put this in my journal", "Buy milk on the way home, but don't put this in the journal.",
+                   "I'm not sure I want to add this to my journal",
+                   "I was going to say we should never put that in the journal",
+                   "Please do not put that in the journal.",
+                   "Put this in my journal: the offsite. Actually no, don't put it in the journal."]
+        for heard in refused:
+            with self.subTest(heard=heard):
+                view = self.note(heard)
+                self.assertEqual(("done", "note", None), (view["state"], view["outcome"]["kind"], view["suggestion"]),
+                                 "he said not to: no journal, not even the offer")
+        asked = ["Why did you put it in the journal", "He told me to put it in the journal",
+                 "Did you put that in my journal?", "Why would you put it in the journal",
+                 "I ran 5k this morning. Put it in my journal?"]
+        for heard in asked:
+            with self.subTest(heard=heard):
+                view = self.note(heard)
+                self.assertEqual(("note", "journal"), (view["outcome"]["kind"], view["suggestion"]["action"]),
+                                 "maybe a request, maybe not: kept, the journal offered for his tap")
+        self.assertEqual({}, self.journal(), "nothing reached the journal")
+        written = {"I ran 5k this morning. Can you put that in my journal?": "I ran 5k this morning",
+                   "Talked to Dana about pricing, and please put it in the journal.": "Talked to Dana about pricing",
+                   "Talked to Ana please put it in the journal": "Talked to Ana",
+                   "No meetings on Friday. Put it in the journal": "No meetings on Friday"}
+        for heard, words in written.items():
+            with self.subTest(heard=heard):
+                view = self.note(heard)
+                self.assertEqual("journal", view["outcome"]["kind"])
+        self.assertEqual(["**14:36** " + words for words in written.values()], self.journal()["2026-10-08"],
+                         "his own request after a pause (or with please / can you): his words, verbatim")
+        self.assert_clean("milk", "Dana", "5k")
+
+    def test_a_message_to_someone_is_never_started_by_the_classifier(self) -> None:
+        self.answers([{"mode": "ok", "output": {"kind": "task", "confidence": 0.97, "title": "Tell Dana the SOW slips",
+                                                 "suggestion": "task"}}])
+        before = len(self.fake_t3.dispatched)
+        view = self.note("I need to tell Dana the SOW slips to Monday")
+        self.assertEqual(("note", "task"), (view["outcome"]["kind"], view["suggestion"]["action"]))
+        self.assertEqual(before, len(self.fake_t3.dispatched), "no agent was started")
+        # His tap starts it, and the agent asks him before it acts (it could send the email).
+        status, value = self.call("POST", f"/v1/captures/{view['captureId']}/act", {"action": "task"}, token=TOKEN)
+        self.assertEqual((200, "task", "approval-required"),
+                         (status, value["outcome"]["kind"], value["outcome"]["runtimeMode"]))
+        create, turn = self.fake_t3.dispatched[-2:]
+        self.assertEqual(("approval-required", "approval-required"), (create["runtimeMode"], turn["runtimeMode"]))
+        self.assertEqual("I need to tell Dana the SOW slips to Monday", turn["message"]["text"])
+        self.assertIn("it asks you before it acts", value["say"])
+        # A task the classifier starts (no message to anyone) also asks first; an explicit cue is the phone's new task.
+        self.answers([{"mode": "ok", "output": {"kind": "task", "confidence": 0.92, "title": "Look into the sync",
+                                                 "suggestion": "none"}}])
+        self.note("the sync service drops events after a restart, look into it")
+        self.assertEqual("approval-required", self.fake_t3.dispatched[-2]["runtimeMode"])
+        self.note("Make a new task to rename the widgets module")
+        self.assertEqual("full-access", self.fake_t3.dispatched[-2]["runtimeMode"], "inherited, as from the phone")
+        self.note("Make a new task to email Dana the release notes")
+        self.assertEqual("approval-required", self.fake_t3.dispatched[-2]["runtimeMode"],
+                         "an explicit task that writes to someone asks first")
+        self.assertIn("never a task", capture.ROUTER_PROMPT)
+        self.assertNotIn("an email to write is a task", capture.ROUTER_PROMPT)
+
+    def test_a_task_whose_first_message_failed_is_finished_not_reported_started(self) -> None:
+        hub = self.server.mobile.t3
+        real = hub._dispatch  # noqa: SLF001
+
+        def first_message_fails(command: Dict[str, Any]) -> None:
+            if command.get("type") == "thread.turn.start":
+                raise t3.T3Error(503, "t3_unavailable", "T3 Code is busy.", retryable=True)
+            real(command)
+
+        hub._dispatch = first_message_fails  # noqa: SLF001
+        status, value = self.submit("Make a new task to fix the flaky sync test")
+        capture_id = value["captureId"]
+        self.capture.process(capture_id)
+        record = self.capture.store.get(capture_id)
+        thread_id = record["steps"]["task"]["threadId"]
+        self.assertEqual(("transcribed", "creating"), (record["state"], record["steps"]["task"]["state"]),
+                         "the thread is there, its first message is not: not done")
+        self.assertEqual(["thread.create"], [command["type"] for command in self.fake_t3.dispatched
+                                             if command.get("threadId") == thread_id])
+        hub._dispatch = real  # noqa: SLF001
+        self.capture.process(capture_id)
+        view = self.capture.view(self.capture.store.get(capture_id))
+        self.assertEqual(("done", "task", thread_id), (view["state"], view["outcome"]["kind"],
+                                                       view["outcome"]["threadId"]))
+        mine = [command for command in self.fake_t3.dispatched if command.get("threadId") == thread_id]
+        self.assertEqual(["thread.create", "thread.turn.start"], [command["type"] for command in mine],
+                         "the same thread, its first message sent once")
+        self.assertEqual("Make a new task to fix the flaky sync test", mine[-1]["message"]["text"])
+        self.capture.process(capture_id)
+        self.assertEqual(2, len([command for command in self.fake_t3.dispatched
+                                 if command.get("threadId") == thread_id]), "done: nothing more")
 
     def test_make_a_new_task_starts_t3_with_the_verbatim_transcript(self) -> None:
         heard = "Make a new task to fix the failing unit tests in the sync module"
@@ -517,6 +615,41 @@ class ActTest(CaptureBase):
         status, value = self.call("POST", f"/v1/captures/{capture_id}/act", {"action": "teleport"}, token=TOKEN)
         self.assertEqual((400, "invalid_action"), (status, value["error"]["code"]))
 
+    def test_redo_keeps_the_event_until_the_new_action_worked(self) -> None:
+        view = self.note("Remind me to send the invoice at 4 pm")
+        capture_id = view["captureId"]
+        event_id = view["outcome"]["eventId"]
+        hub = self.server.mobile.t3
+        self.server.mobile.t3 = t3.UnavailableHub("t3_dev_copy", "not here")
+        status, value = self.call("POST", f"/v1/captures/{capture_id}/act", {"action": "task"}, token=TOKEN)
+        self.assertEqual((409, "t3_dev_copy"), (status, value["error"]["code"]))
+        (self.hepta_dir / "mode").write_text("down")
+        status, value = self.call("POST", f"/v1/captures/{capture_id}/act", {"action": "journal"}, token=TOKEN)
+        self.assertEqual(503, status, value)
+        self.assertNotIn("GOOGLECALENDAR_DELETE_EVENT", [call["slug"] for call in self.composio_calls()],
+                         "neither worked: the reminder is still on his calendar")
+        record = self.capture.store.get(capture_id)
+        self.assertEqual(("event", event_id, "done"), (record["outcome"]["kind"], record["outcome"]["eventId"],
+                                                       record["steps"]["event"]["state"]))
+        (self.hepta_dir / "mode").write_text("ok")
+        self.server.mobile.t3 = hub
+        status, value = self.call("POST", f"/v1/captures/{capture_id}/act", {"action": "task"}, token=TOKEN)
+        self.assertEqual((200, "task", "event"), (status, value["outcome"]["kind"], value["outcome"]["undone"]))
+        self.assertEqual("GOOGLECALENDAR_DELETE_EVENT", self.composio_calls()[-1]["slug"], "removed once it worked")
+        self.assertEqual("removed", self.capture.store.get(capture_id)["steps"]["event"]["state"])
+        # The new action worked but the event can't be removed: done, and it says the event is still there.
+        view = self.note("Remind me to call the bank at 5 pm")
+        state = self.composio_state()
+        state["scripted"] = {"GOOGLECALENDAR_DELETE_EVENT": {"stdout": json.dumps(
+            {"successful": False, "error": "Backend Error", "data": {"status_code": 500}})}}
+        self.write_calendar(state)
+        status, value = self.call("POST", f"/v1/captures/{view['captureId']}/act", {"action": "journal"},
+                                  token=TOKEN)
+        self.assertEqual((200, "journal", view["outcome"]["eventId"]),
+                         (status, value["outcome"]["kind"], value["outcome"]["eventKept"]))
+        self.assertTrue(value["say"].endswith("The calendar event is still there."))
+        self.assertEqual(["**14:36** Remind me to call the bank at 5 pm"], self.journal()["2026-10-08"])
+
     def test_undo_an_event_keeps_the_note_and_offers_it_again(self) -> None:
         view = self.note("Remind me to stretch in 20 minutes")
         status, value = self.call("POST", f"/v1/captures/{view['captureId']}/act", {"action": "undo"}, token=TOKEN)
@@ -572,6 +705,41 @@ class ActTest(CaptureBase):
         self.assertEqual(part["failed"], desktop["captures"]["failed"])
         status, value = self.call("GET", "/v1/desktop/captures?limit=2", desktop=True)
         self.assertEqual((200, 2, 1), (status, len(value["captures"]), value["pending"]))
+
+    def test_a_failed_note_counts_the_same_everywhere_and_settles_once_seen(self) -> None:
+        (self.voice_dir / "mode").write_text("audio")
+        status, value = self.submit(None, audio=wav(2))
+        self.capture.process(value["captureId"])
+        item_id = "note:" + value["captureId"]
+
+        def counts() -> Tuple[int, int, int, Optional[str], int]:
+            summary = self.call("GET", "/v1/mobile/summary", token=self.phone)[1]["captures"]
+            inbox_now = self.call("GET", "/v1/desktop/inbox", desktop=True)[1]
+            item = next((entry for entry in inbox_now["items"] if entry["id"] == item_id), None)
+            return (summary["failed"], self.capture.health()["failed"], inbox_now["counts"]["needsYou"],
+                    item["status"] if item else None, len([entry for entry in inbox_now["items"]
+                                                           if entry["source"] == "note"]))
+
+        failed, health, needs, status, listed = counts()
+        self.assertEqual((1, 1, "error", 1), (failed, health, status, listed))
+        self.assertEqual(200, self.call("POST", f"/v1/desktop/inbox/items/{item_id}/seen", {}, desktop=True)[0])
+        failed, health, needs_after, status, listed = counts()
+        self.assertEqual((0, 0, "idle", 1, needs - 1), (failed, health, status, listed, needs_after),
+                         "seen: it stays listed, idle, and no longer needs him (as a failed session)")
+        # One that failed four days ago: out of the inbox, and so out of every count.
+        (self.voice_dir / "mode").write_text("audio")
+        status, value = self.submit(None, audio=wav(2))
+        self.capture.process(value["captureId"])
+        record = self.capture.store.get(value["captureId"])
+        record["receivedEpoch"] -= 4 * 86400
+        self.capture.store.save(record)
+        self.server.inbox.refresh_soon()
+        failed, health, _needs, _status, listed = counts()
+        self.assertEqual((0, 0, 1), (failed, health, listed))
+        # A retry that fails again needs him again.
+        self.call("POST", f"/v1/captures/{item_id[5:]}/act", {"action": "retry"}, token=TOKEN)
+        self.capture.process(item_id[5:])
+        self.assertEqual((1, 1, "error"), counts()[:2] + (counts()[3],))
 
     def test_the_worker_answers_within_wait_and_finishes_what_a_stopped_bridge_left(self) -> None:
         self.clock.follow_real_time()
@@ -633,6 +801,20 @@ class ParseWhenTest(unittest.TestCase):
         self.assertEqual("note", route("journal is a thing I should start")["kind"])
         self.assertEqual(("block", 120), (route("block off two hours to prep")["kind"],
                                           route("block off two hours to prep")["minutes"]))
+        cases = {"Don't put this in my journal": ("refused", ""),
+                 "Buy milk, but don't put it in the journal.": ("refused", ""),
+                 "I'm not sure I want to add this to my journal": ("refused", ""),
+                 "Why did you put it in the journal": ("ask", ""), "Did you put that in my journal?": ("ask", ""),
+                 "He told me to put it in the journal": ("ask", ""),
+                 "Coffee with Ana. Put it in my journal.": ("journal", "Coffee with Ana"),
+                 "Coffee with Ana, put it in my journal please": ("journal", "Coffee with Ana"),
+                 "Coffee with Ana. Could you put it in my journal?": ("journal", "Coffee with Ana"),
+                 "journal is a thing I should start": None}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(expected, capture.journal_tail(text))
+                if expected and expected[0] != "journal":
+                    self.assertNotEqual("journal", route(text)["kind"])
         self.assertTrue(capture.in_order_slice("finished the deck", "I finished the deck today"))
         self.assertFalse(capture.in_order_slice("finished deck", "I finished the deck today"))
 
