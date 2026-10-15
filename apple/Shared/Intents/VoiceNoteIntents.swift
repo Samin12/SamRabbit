@@ -15,7 +15,7 @@ import SamRabbitKit
 /// in the background on iOS 26, and the microphone starts only for the app's own route (`PendingRoute.capture`).
 struct VoiceNoteIntent: AppIntent {
     static let title: LocalizedStringResource = "Voice Note"
-    static let description = IntentDescription("Records a quick voice note and sends it to your Mac, which files it: your journal when you ask for it, a T3 task, your calendar, or a saved note.",
+    static let description = IntentDescription("Records a quick voice note and sends it to your computer, which files it: your journal when you ask for it, a T3 task, your calendar, or a saved note.",
                                                categoryName: "Voice")
     static let supportedModes: IntentModes = .foreground(.immediate)
 
