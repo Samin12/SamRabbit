@@ -462,7 +462,18 @@ final class CaptureActivityController {
         pending = nil
         guard let id = activityId else { return }
         activityId = nil
-        Task { await Self.end([id], final: state, after: 4) }
+        let seconds = Self.lingers
+        Task { await Self.end([id], final: state, after: seconds) }
+    }
+
+    /// How long what the Mac did stays: 4 s. Debug builds: `-SamRabbitActivityLinger <seconds>` (a UI test reads the
+    /// Lock Screen only every few seconds).
+    private static var lingers: TimeInterval {
+        #if DEBUG
+        let asked = UserDefaults.standard.double(forKey: "SamRabbitActivityLinger")
+        if asked > 0 { return min(asked, 60) }
+        #endif
+        return 4
     }
 
     func end() {

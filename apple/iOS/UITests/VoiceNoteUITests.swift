@@ -226,7 +226,8 @@ final class VoiceNoteUITests: XCTestCase {
     /// Recording goes on with the phone locked: the Live Activity on the Lock Screen shows the timer and Stop, its
     /// Stop sends the note, and what the Mac did shows there without anything of what was said.
     func testTheLiveActivityStopsAndSends() throws {
-        try launch(voice: "hold")
+        // What the Mac did stays 4 s; reading the Lock Screen takes about 5 s a look, so here it stays longer.
+        try launch(voice: "hold", extra: ["-SamRabbitActivityLinger", "15"])
         homeTile("Voice note").tap()
         XCTAssertTrue(app.staticTexts["capture-timer"].waitForExistence(timeout: 8))
         XCUIDevice.shared.press(.home)
@@ -242,16 +243,21 @@ final class VoiceNoteUITests: XCTestCase {
         snap("phone-note-9-lock-screen", settle: 1)
         let before = (fakeGet("capture")["uploads"] as? [Any] ?? []).count
         stop.tap()
+        // What the Mac did, on the locked phone: where it went, never his words (a journal line is private). Read from
+        // the Lock Screen's whole tree: once the activity has ended, its view is another process's, which a query's
+        // existence check can't see into (the tree has it).
+        var tree = ""
+        XCTAssertTrue(waitUntil(timeout: 15) {
+            tree = self.springboard.debugDescription
+            return tree.contains("Added to your journal")
+        }, "the outcome on the Lock Screen")
+        let shown = tree.split(separator: "\n").filter { $0.contains("Added to your journal") }.joined(separator: "\n")
+        // (The fixtures' calendar has its own "dentist" in a Lock Screen widget: look for his words, the note's own.)
+        XCTAssertFalse(tree.contains("cleaning to Friday"), "nothing of what was said: \(shown)")
+        XCTAssertFalse(shown.contains("“"), shown)
+        snap("phone-note-10-lock-screen-sent", settle: 0.3)
         XCTAssertTrue(waitUntil(timeout: 20) { (self.fakeGet("capture")["uploads"] as? [Any] ?? []).count > before },
                       "sent from the Lock Screen")
-        // What the Mac did, on the locked phone: where it went, never his words (a journal line is private).
-        let outcome = springboard.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Added to your journal'"))
-        XCTAssertTrue(outcome.firstMatch.waitForExistence(timeout: 12), "the outcome on the Lock Screen")
-        snap("phone-note-10-lock-screen-sent", settle: 1.2) // past the text's transition, before it goes (4 s)
-        // (The fixtures' calendar has its own "dentist" in a Lock Screen widget: look for his words, the note's own.)
-        XCTAssertFalse(springboard.staticTexts.matching(NSPredicate(format: "label CONTAINS 'cleaning to Friday'"))
-                        .firstMatch.exists, "nothing of what was said: \(outcome.firstMatch.label)")
-        XCTAssertFalse(outcome.firstMatch.label.contains("“"), outcome.firstMatch.label)
         springboard.swipeUp()
         app.activate()
     }
