@@ -460,7 +460,7 @@ class T3Service:
             token = self._token
         client = self._client_factory(parse_server_url(record.server_url, verify_host=False), token)
         try:
-            self._verify(record, client)
+            self._verify(record, client.endpoint)
         except T3Unavailable as error:
             moved = self._rediscover(record, error)
             if moved is None:
@@ -470,14 +470,14 @@ class T3Service:
             return moved
         return record, client
 
-    def _verify(self, record: T3ConnectionRecord, client: T3HttpClient) -> None:
+    def _verify(self, record: T3ConnectionRecord, endpoint: T3Endpoint) -> None:
         """Allow the token at ``record.server_url`` only if our T3 environment answers there."""
         with self._lock:
             verified = self._verified
             expected = self._environment_id
         if verified is not None and verified[0] == record.server_url and time.monotonic() - verified[1] < VERIFY_TTL:
             return
-        descriptor = self._client_factory(client.endpoint, None).descriptor()
+        descriptor = self._client_factory(endpoint, None).descriptor()
         if not looks_like_t3(descriptor):
             raise T3Unavailable("Something other than T3 Code answers at the saved address.", NOT_T3)
         found = str(descriptor["environmentId"]).strip()
@@ -1060,10 +1060,12 @@ class T3Service:
         return thread
 
     def _write(self, record: T3ConnectionRecord, call: Callable[[], object]) -> dict[str, object]:
-        """One WebSocket RPC write, sent again once on a network failure (T3 dedupes by commandId)."""
+        """One WebSocket RPC write, sent again once on a network failure (T3 dedupes by commandId),
+        after the address is checked again: the failure cleared the identity check."""
         try:
             value = self._guard(record, call)
         except T3Unavailable:
+            self._verify(record, parse_server_url(record.server_url, verify_host=False))
             value = self._guard(record, call)
         return value if isinstance(value, dict) else {}
 

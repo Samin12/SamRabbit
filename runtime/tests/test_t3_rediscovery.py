@@ -7,8 +7,9 @@ import json
 import socket
 import threading
 import unittest
+from unittest import mock
 
-from sam_runtime.domains.t3.client import T3Unavailable
+from sam_runtime.domains.t3.client import T3HttpClient, T3Unavailable
 from sam_runtime.domains.t3.service import T3Service, nearby_ports
 from sam_runtime.security.credentials import ConnectionCredentialEnvelopes
 
@@ -167,6 +168,23 @@ class T3IdentityTest(unittest.TestCase):
         self.assertEqual(self.fake.url, self.repository.get().server_url)
         self.assertEqual([], other.authorized_requests())
         self.assertEqual("env-1", self._sealed()["environmentId"], "the id is stored once the token worked there")
+
+    def test_a_retried_write_checks_the_server_again_first(self) -> None:
+        self.service.connect(self.fake.url, PAIRING_CODE)
+        real = T3HttpClient.dispatch
+        calls = []
+
+        def flaky(client, command):
+            calls.append(len(self.fake.requests))
+            if len(calls) == 1:
+                raise T3Unavailable("dropped", "unreachable")
+            return real(client, command)
+
+        with mock.patch.object(T3HttpClient, "dispatch", flaky):
+            self.service.send_message("t-1", "Once more")
+        between = self.fake.requests[calls[0]:calls[1]]
+        self.assertEqual(["/.well-known/t3/environment"], [item["path"] for item in between])
+        self.assertEqual(1, len(self.fake.dispatched))
 
     def test_probes_are_rate_limited_and_never_run_for_an_asleep_mac(self) -> None:
         self.service.connect(self.fake.url, PAIRING_CODE)
