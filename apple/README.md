@@ -132,6 +132,10 @@ TEST_RUNNER_SAMRABBIT_FAKE_BRIDGE=127.0.0.1:3799 xcodebuild -project apple/SamRa
   -only-testing:SamRabbitWatchUITests/WatchVoiceNoteTests
 ```
 
+The iPhone UI tests pair only an app that says "Not paired yet". A simulator whose app is still paired with another
+bridge (an older fake bridge on another port, or the live one) fails every test at its first step, with nothing reaching
+this fake bridge: run once with `TEST_RUNNER_SAMRABBIT_FAKE_PAIR=1` (it pairs again before every test).
+
 `VoiceNoteUITests` (iPhone, the made-up voice, real taps, nothing played): Home's Voice note records at once and sends
 itself after a pause ("Sent ✓ — Added to your journal", his words after the cue in the fake journal, the m4a with
 the note's id, time and source, Home's voice-notes line); Stop & send of a note the Mac only saved, waiting in Tasks
