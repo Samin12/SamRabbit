@@ -1,4 +1,4 @@
-"""T3 shell poll cadence: 2 s for real turns or requests, 5 s for background-only work, 15 s otherwise."""
+"""T3 shell poll cadence: 2 s for live runs or requests, 5 s for background-only work, 15 s otherwise."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ from sam_runtime.domains.t3.sync import T3SyncWorker
 from t3_fixtures import PAIRING_CODE, FakeT3Server, make_service, thread
 
 
-def _background(thread_id: str = "bg", liveness: str = "working") -> dict[str, object]:
-    # The parent session of long background tasks: provider session idle, T3 says background-live.
-    return thread(thread_id, "Rabbit R1 device access", session_status="ready", background=liveness)
+def _background(thread_id: str = "bg", kind: str = "subagent") -> dict[str, object]:
+    # A parent whose run ended while work it waits on (a subagent, an awaited monitor) goes on.
+    task = {"taskId": f"task-{thread_id}", "kind": kind, **({"awaited": True} if kind in {"command", "monitor"} else {})}
+    return thread(thread_id, "Rabbit R1 device access", background=[task])
 
 
 class ActivityLevelTest(unittest.TestCase):
@@ -28,16 +29,19 @@ class ActivityLevelTest(unittest.TestCase):
         self.assertEqual("working", thread_status(background))  # still shown as "Background work"
         self.assertFalse(foreground_active(background))
         self.assertEqual(ACTIVITY_BACKGROUND, activity_level([background, thread("d", "Done")]))
-        self.assertEqual(ACTIVITY_BACKGROUND, activity_level([_background("m", "monitoring")]))
+        self.assertEqual(ACTIVITY_BACKGROUND, activity_level([_background("m", "monitor")]))
+        # A run that only waits on another thread is background too.
+        self.assertEqual(ACTIVITY_BACKGROUND, activity_level([thread("w", "Waits", status="running", blocked=True)]))
 
     def test_running_starting_or_pending_threads_are_active(self) -> None:
         for item in (
-            thread("r", "Running", session_status="running", turn_state="running", completed_at=None),
-            thread("s", "Starting", session_status="starting"),
-            thread("a", "Approval", approvals=True),
-            thread("i", "Question", user_input=True),
-            # Background-live but also waiting on the user: the request wins.
-            thread("b", "Both", background="working", approvals=True),
+            thread("r", "Running", status="running", completed_at=None),
+            thread("s", "Starting", status="starting"),
+            thread("q", "Queued", status="queued"),
+            thread("a", "Approval", request="command"),
+            thread("i", "Question", request="user_input"),
+            # Held by background work but also waiting on the user: the request wins.
+            thread("b", "Both", background=[{"taskId": "s", "kind": "subagent"}], request="command"),
         ):
             with self.subTest(item["id"]):
                 self.assertEqual(ACTIVITY_ACTIVE, activity_level([_background(), item]))
@@ -45,9 +49,9 @@ class ActivityLevelTest(unittest.TestCase):
     def test_nothing_working_or_pending_is_idle(self) -> None:
         self.assertEqual(ACTIVITY_IDLE, activity_level([]))
         self.assertEqual(ACTIVITY_IDLE, activity_level([
-            thread("d", "Done"), thread("e", "Errored", session_status="error"),
-            thread("n", "Never started", session_status=None, turn_state=None),
-            thread("x", "Stale liveness", background="idle"), "not a thread",
+            thread("d", "Done"), thread("e", "Errored", status="failed"),
+            thread("n", "Never started", status="idle"),
+            thread("x", "Dev server left running", background=[{"taskId": "c", "kind": "command"}]), "not a thread",
         ]))
 
 
@@ -66,22 +70,21 @@ class T3CadenceTest(unittest.TestCase):
         self.fake.set_threads([_background(), thread("d", "Done")])
         self.service.connect(self.fake.url, PAIRING_CODE)
         self.assertEqual(5.0, self.worker.step())
-        self.fake.set_threads([_background(), thread("r", "Running", session_status="running",
-                                                      turn_state="running", completed_at=None)])
+        self.fake.set_threads([_background(), thread("r", "Running", status="running", completed_at=None)])
         self.assertEqual(2.0, self.worker.step())
-        self.fake.set_threads([_background(), thread("a", "Approval", approvals=True)])
+        self.fake.set_threads([_background(), thread("a", "Approval", request="command")])
         self.assertEqual(2.0, self.worker.step())
         self.fake.set_threads([thread("d", "Done")])
         self.assertEqual(15.0, self.worker.step())
 
     def test_a_turn_requested_on_the_r1_polls_fast_until_it_starts(self) -> None:
-        self.fake.set_threads([thread("t-1", "Fix login redirect", turn_id="turn-1")])
+        self.fake.set_threads([thread("t-1", "Fix login redirect", run_id="run-1")])
         self.service.connect(self.fake.url, PAIRING_CODE)
         self.assertEqual(15.0, self.worker.step())
         self.service.send_message("t-1", "Also check Safari")
-        # T3 still reports the old, completed turn: the requested one has not started yet.
+        # T3 still reports the old, completed run: the requested one has not been queued yet.
         self.assertEqual(2.0, self.worker.step())
-        self.fake.set_threads([thread("t-1", "Fix login redirect", turn_id="turn-2",
+        self.fake.set_threads([thread("t-1", "Fix login redirect", run_id="run-2",
                                       completed_at="2026-10-07T12:10:00.000Z")])
         self.assertEqual(15.0, self.worker.step())
 

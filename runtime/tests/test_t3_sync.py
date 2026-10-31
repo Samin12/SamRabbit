@@ -20,32 +20,32 @@ from t3_fixtures import (
 
 
 def _working(thread_id: str = "t-1", title: str = "Fix login redirect", **extra) -> dict[str, object]:
-    return thread(thread_id, title, session_status="running", turn_state="running", turn_id="turn-2",
-                  completed_at=None, updated_at="2026-10-07T12:05:00.000Z", **extra)
+    return thread(thread_id, title, **{"status": "running", "run_id": "run-2", "completed_at": None,
+                                       "updated_at": "2026-10-07T12:05:00.000Z", **extra})
 
 
 def _done(thread_id: str = "t-1", title: str = "Fix login redirect", **extra) -> dict[str, object]:
-    return thread(thread_id, title, turn_id="turn-2", completed_at="2026-10-07T12:06:00.000Z", **extra)
+    return thread(thread_id, title, run_id="run-2", completed_at="2026-10-07T12:06:00.000Z", **extra)
 
 
 class T3TransitionTrackerTest(unittest.TestCase):
     def test_startup_snapshot_is_silent_baseline(self) -> None:
         tracker = T3TransitionTracker()
         events = tracker.observe([
-            thread("a", "A", approvals=True), thread("b", "B", user_input=True),
-            thread("c", "C", session_status="error"), _done("d", "D"),
+            thread("a", "A", request="command"), thread("b", "B", request="user_input"),
+            thread("c", "C", status="failed"), _done("d", "D"),
         ])
         self.assertEqual([], events)
         self.assertEqual([], tracker.observe([
-            thread("a", "A", approvals=True), thread("b", "B", user_input=True),
-            thread("c", "C", session_status="error"), _done("d", "D"),
+            thread("a", "A", request="command"), thread("b", "B", request="user_input"),
+            thread("c", "C", status="failed"), _done("d", "D"),
         ]))
 
-    def test_finish_detected_for_working_turn_and_fast_new_turn(self) -> None:
+    def test_finish_detected_for_working_run_and_fast_new_run(self) -> None:
         tracker = T3TransitionTracker()
-        tracker.observe([_working("a"), thread("b", "B", turn_id="turn-1")])
-        events = tracker.observe([_done("a"), thread("b", "B", turn_id="turn-9", completed_at="2026-10-07T12:30:00.000Z")])
-        self.assertEqual([("finished", "a", "turn-2"), ("finished", "b", "turn-9")],
+        tracker.observe([_working("a"), thread("b", "B", run_id="run-1")])
+        events = tracker.observe([_done("a"), thread("b", "B", run_id="run-9", completed_at="2026-10-07T12:30:00.000Z")])
+        self.assertEqual([("finished", "a", "run-2"), ("finished", "b", "run-9")],
                          [(item.event, item.thread_id, item.turn_id) for item in events])
 
     def test_reappearing_history_and_interrupts_are_not_announced(self) -> None:
@@ -57,15 +57,18 @@ class T3TransitionTrackerTest(unittest.TestCase):
         ])
         self.assertEqual([], events)
         tracker.observe([_working("i")])
-        self.assertEqual([], tracker.observe([thread("i", "I", turn_state="interrupted", turn_id="turn-2")]))
+        self.assertEqual([], tracker.observe([thread("i", "I", status="interrupted", run_id="run-2")]))
+        # A "waiting" run (provider turn over, effects draining) is not finished yet.
+        tracker.observe([_working("w")])
+        self.assertEqual([], tracker.observe([thread("w", "W", status="waiting", run_id="run-2")]))
 
     def test_needs_you_and_error_transitions(self) -> None:
         tracker = T3TransitionTracker()
         tracker.observe([_working("a"), _working("b"), _working("c")])
         events = tracker.observe([
-            thread("a", "A", approvals=True, session_status="running", turn_state="running", turn_id="turn-2"),
-            thread("b", "B", user_input=True, session_status="running", turn_state="running", turn_id="turn-2"),
-            thread("c", "C", session_status="error", turn_id="turn-2"),
+            thread("a", "A", request="command", status="running", run_id="run-2"),
+            thread("b", "B", request="user_input", status="running", run_id="run-2"),
+            thread("c", "C", status="failed", run_id="run-2"),
         ])
         self.assertEqual({("needs_approval", "a"), ("needs_input", "b"), ("error", "c")},
                          {(item.event, item.thread_id) for item in events})
@@ -114,15 +117,15 @@ class T3AnnouncementFlowTest(unittest.TestCase):
         self.service._tracker._clock = lambda: moment[0]
         self.fake.set_threads([_working()])
         self.service.connect(self.fake.url, PAIRING_CODE)
-        waiting = thread("t-1", "Fix login redirect", approvals=True, session_status="running", turn_state="running",
-                         turn_id="turn-2", completed_at=None, updated_at="2026-10-07T12:07:00.000Z")
+        waiting = thread("t-1", "Fix login redirect", request="command", status="running", run_id="run-2",
+                         completed_at=None, updated_at="2026-10-07T12:07:00.000Z")
         self.fake.set_threads([waiting])
-        self.fake.set_detail("t-1", detail(waiting, activities=[approval_requested("req-1", detail_text="npm test")]))
+        self.fake.set_detail("t-1", detail(waiting, requests=[approval_requested("req-1", detail_text="npm test")]))
         self.service.sync_once()
         self.service.sync_once()
         more = dict(waiting, updatedAt="2026-10-07T12:08:00.000Z")
         self.fake.set_threads([more])
-        self.fake.set_detail("t-1", detail(more, activities=[approval_requested("req-1"), approval_requested("req-2", at="2026-10-07T12:07:30.000Z")]))
+        self.fake.set_detail("t-1", detail(more, requests=[approval_requested("req-1"), approval_requested("req-2", at="2026-10-07T12:07:30.000Z")]))
         requests_before = len(self.fake.requests)
         self.service.sync_once()
         self.assertEqual(1, len(self.fake.requests) - requests_before, "updates while waiting are re-checked at most every 10 s")
@@ -138,17 +141,21 @@ class T3AnnouncementFlowTest(unittest.TestCase):
     def test_question_and_error_announcements(self) -> None:
         self.fake.set_threads([_working("q", "Pick storage"), _working("e", "Deploy preview")])
         self.service.connect(self.fake.url, PAIRING_CODE)
-        asking = thread("q", "Pick storage", user_input=True, session_status="running", turn_state="running", turn_id="turn-2",
+        asking = thread("q", "Pick storage", request="user_input", status="running", run_id="run-2",
                         completed_at=None, updated_at="2026-10-07T12:07:00.000Z")
-        failing = thread("e", "Deploy preview", session_status="error", turn_id="turn-2", completed_at="2026-10-07T12:07:00.000Z")
+        failing = thread("e", "Deploy preview", status="failed", run_id="run-2", completed_at="2026-10-07T12:07:00.000Z",
+                         preview="I could not reach the preview host.")
         self.fake.set_threads([asking, failing])
-        self.fake.set_detail("q", detail(asking, activities=[input_requested("q-1")]))
+        self.fake.set_detail("q", detail(asking, requests=[input_requested("q-1")]))
         self.service.sync_once()
         by_kind = {item.kind: item for item in self._items()}
         self.assertEqual("“Pick storage” in Workbench asks: Which database should I use?", by_kind["t3.thread.needs_input"].text)
         self.assertEqual("q-1", by_kind["t3.thread.needs_input"].payload["requestId"])
         self.assertEqual("“Deploy preview” in Workbench hit an error.", by_kind["t3.thread.error"].text)
         self.assertEqual("Provider crashed", by_kind["t3.thread.error"].payload["error"])
+        # The shell's latest visible agent message is used without fetching the thread.
+        self.assertEqual("I could not reach the preview host.", by_kind["t3.thread.error"].payload["lastMessage"])
+        self.assertFalse([item for item in self.fake.requests if item["path"].startswith("/api/orchestration/threads/e")])
 
 
 class T3SyncWorkerTest(unittest.TestCase):
@@ -196,7 +203,10 @@ class T3SyncWorkerTest(unittest.TestCase):
         self.assertIn("Cannot reach T3 Code", status["detail"])
         with self.assertRaisesRegex(T3Unavailable, "moments ago"):
             self.service.thread_detail("t-1")
-        self.service._client(probe=True)
+        # A probe skips the fail-fast window and really tries (and finds the port closed).
+        with self.assertRaises(T3Unavailable) as caught:
+            self.service._client(probe=True)
+        self.assertEqual("refused", caught.exception.reason)
 
 
 if __name__ == "__main__":

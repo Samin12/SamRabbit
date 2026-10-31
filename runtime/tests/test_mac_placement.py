@@ -115,16 +115,16 @@ class PlacementTest(unittest.TestCase):
         self.assertFalse(result.is_error, result.text)
         value = json.loads(result.text)
         self.assertEqual(("Assistant", "orchestration"), (value["project"], value["placement"]))
-        self.assertEqual(PROJECT_AGENT, self.fake.dispatched[0]["projectId"])
+        self.assertEqual(PROJECT_AGENT, self.fake.launched[0]["projectId"])
         result = catalog.invoke("t3_new_thread", {"prompt": "Fix the crash in the uploader"}, agent=AgentKind.VOICE)
-        self.assertEqual(PROJECT_SIDE, self.fake.dispatched[2]["projectId"])
+        self.assertEqual(PROJECT_SIDE, self.fake.launched[1]["projectId"])
         self.assertEqual("recent", json.loads(result.text)["placement"])
         result = catalog.invoke("t3_new_thread", {"prompt": "Fix it", "project": "Workbench"}, agent=AgentKind.VOICE)
-        self.assertEqual(PROJECT_MAIN, self.fake.dispatched[4]["projectId"])
+        self.assertEqual(PROJECT_MAIN, self.fake.launched[2]["projectId"])
         self.assertNotIn("placement", json.loads(result.text))
         result = catalog.invoke("t3_new_thread", {"prompt": "Make the calendar widget show all-day events"},
                                 agent=AgentKind.VOICE)
-        self.assertEqual(PROJECT_SIDE, self.fake.dispatched[6]["projectId"], "coding work stays in the code project")
+        self.assertEqual(PROJECT_SIDE, self.fake.launched[3]["projectId"], "coding work stays in the code project")
         self.assertEqual("recent", json.loads(result.text)["placement"])
 
     def test_mac_task_delegates_to_a_t3_thread_in_the_orchestration_project(self) -> None:
@@ -142,10 +142,10 @@ class PlacementTest(unittest.TestCase):
         value = json.loads(result.text)
         self.assertEqual({"ok", "threadId", "title", "project", "status", "note"}, set(value))
         self.assertEqual(("Assistant", "started"), (value["project"], value["status"]))
-        create, turn = self.fake.dispatched[:2]
-        self.assertEqual(("thread.create", PROJECT_AGENT), (create["type"], create["projectId"]))
+        create = self.fake.launched[0]
+        self.assertEqual(PROJECT_AGENT, create["projectId"])
         self.assertEqual(value["threadId"], create["threadId"])
-        prompt = turn["message"]["text"]
+        prompt = create["initialMessage"]["text"]
         self.assertTrue(prompt.startswith(request + "\n"), "the user's request comes first, verbatim")
         self.assertIn("You are acting for Samin via the R1 voice orchestrator on Test Mac Studio", prompt)
         self.assertIn("cua-driver CLI/skill", prompt)
@@ -158,8 +158,8 @@ class PlacementTest(unittest.TestCase):
         self.assertIn("invoices", create["title"].lower())
         result = catalog.invoke("mac_task", {"request": "Tidy it", "project": "Orbit Lab", "title": "Tidy orbit"},
                                 agent=AgentKind.VOICE)
-        self.assertEqual(PROJECT_SIDE, self.fake.dispatched[2]["projectId"])
-        self.assertEqual("Tidy orbit", self.fake.dispatched[2]["title"])
+        self.assertEqual(PROJECT_SIDE, self.fake.launched[1]["projectId"])
+        self.assertEqual("Tidy orbit", self.fake.launched[1]["title"])
         self.assertTrue(catalog.invoke("mac_task", {"request": "  "}, agent=AgentKind.VOICE).is_error)
 
     def test_mac_task_goes_ahead_when_the_bridge_health_check_fails(self) -> None:
@@ -169,7 +169,7 @@ class PlacementTest(unittest.TestCase):
         self.mac_fake.responses["/health"] = (503, {"error": {"code": "bridge_busy", "message": "Busy."}})
         result = catalog.invoke("mac_task", {"request": "Tidy my desktop"}, agent=AgentKind.VOICE)
         self.assertFalse(result.is_error, result.text)
-        prompt = self.fake.dispatched[1]["message"]["text"]
+        prompt = self.fake.launched[0]["initialMessage"]["text"]
         self.assertTrue(prompt.startswith("Tidy my desktop\n"))
         self.assertIn("on this Mac", prompt)
         self.assertNotIn("cua-driver: ", prompt)

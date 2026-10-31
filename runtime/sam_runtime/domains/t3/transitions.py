@@ -1,10 +1,11 @@
 """Detect announceable T3 thread transitions for threads observed during this runtime's life.
 
 The first snapshot after start (or after pairing) is a silent baseline, so
-history is never announced. A finish is announced only for a turn that was
-active when observed, or a new turn (different turn id) whose completion time
-is later than the baseline. Each (thread, turn/request, status) is announced
-at most once.
+history is never announced. A finish is announced only for a run that was
+active when observed, or a new run (different ``latestRunId``) whose completion
+time is later than the baseline. Each (thread, run/request, status) is announced
+at most once. Protocol 2 has runs, not turns; ``turn_id`` keeps its name in the
+announcement payload ("turnId") so the R1 app is unchanged.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import time
 
-from .status import DONE, ERROR, NEEDS_APPROVAL, NEEDS_INPUT, NEEDS_YOU, WORKING, parse_time, thread_status
+from .status import DONE, ERROR, NEEDS_APPROVAL, NEEDS_INPUT, NEEDS_YOU, WORKING, latest_run_id, parse_time, thread_status
 
 
 FINISHED = "finished"
@@ -43,18 +44,17 @@ class Transition:
 
 
 def _observe(thread: dict[str, object]) -> _Observed:
-    latest = thread.get("latestTurn") if isinstance(thread.get("latestTurn"), dict) else {}
+    run_id = latest_run_id(thread)
     return _Observed(
         status=thread_status(thread),
-        turn_id=str(latest.get("turnId")) if latest.get("turnId") else None,
-        turn_state=str(latest.get("state")) if latest.get("state") else None,
+        turn_id=run_id,
+        turn_state=str(thread.get("status")) if run_id and thread.get("status") else None,
         updated_at=str(thread.get("updatedAt")) if thread.get("updatedAt") else None,
     )
 
 
 def _completed_after(thread: dict[str, object], baseline: datetime | None) -> bool:
-    latest = thread.get("latestTurn") if isinstance(thread.get("latestTurn"), dict) else {}
-    completed = parse_time(latest.get("completedAt"))
+    completed = parse_time(thread.get("latestRunCompletedAt"))
     if completed is None:
         return False
     return baseline is None or completed > baseline
@@ -122,7 +122,7 @@ class T3TransitionTracker:
                     events.append(Transition(event, thread_id, now.turn_id, thread))
             elif now.status == ERROR:
                 if before is None:
-                    if _completed_after(thread, self._baseline) or now.turn_state != "error":
+                    if _completed_after(thread, self._baseline) or now.turn_state != "failed":
                         events.append(Transition(ERROR_EVENT, thread_id, now.turn_id, thread))
                 elif before.status != ERROR or before.turn_id != now.turn_id:
                     events.append(Transition(ERROR_EVENT, thread_id, now.turn_id, thread))
@@ -132,8 +132,7 @@ class T3TransitionTracker:
 def _latest_time(threads: list[dict[str, object]]) -> datetime | None:
     latest: datetime | None = None
     for thread in threads:
-        turn = thread.get("latestTurn") if isinstance(thread.get("latestTurn"), dict) else {}
-        for value in (turn.get("completedAt"), turn.get("startedAt"), thread.get("updatedAt")):
+        for value in (thread.get("latestRunCompletedAt"), thread.get("latestRunStartedAt"), thread.get("updatedAt")):
             parsed = parse_time(value)
             if parsed is not None and (latest is None or parsed > latest):
                 latest = parsed

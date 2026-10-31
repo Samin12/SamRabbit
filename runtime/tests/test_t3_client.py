@@ -3,17 +3,21 @@ from __future__ import annotations
 import socket
 import unittest
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+
 from sam_runtime.domains.t3.client import (
     T3EndpointError,
     T3HttpClient,
     T3RequestError,
     T3Unauthorized,
     T3Unavailable,
+    looks_like_t3,
     normalize_pairing_code,
     parse_server_url,
 )
 
-from t3_fixtures import PAIRING_CODE, FakeT3Server, thread
+from t3_fixtures import PAIRING_CODE, FakeT3Server, descriptor, thread
 
 
 class T3ClientPairingTest(unittest.TestCase):
@@ -46,26 +50,90 @@ class T3ClientPairingTest(unittest.TestCase):
                 client.exchange_pairing_code(PAIRING_CODE)
             self.assertEqual("invalid_credential", caught.exception.reason)
 
-    def test_shell_uses_bearer_and_gzip(self) -> None:
+    def test_shell_uses_bearer_gzip_and_the_protocol_2_header(self) -> None:
         with FakeT3Server() as fake:
             token = T3HttpClient(fake.endpoint).exchange_pairing_code(PAIRING_CODE)["access_token"]
             fake.set_threads([thread("t-1", "Fix login redirect")])
             shell = T3HttpClient(fake.endpoint, token).shell()
             self.assertEqual("Fix login redirect", shell["threads"][0]["title"])
-            headers = fake.requests[-1]["headers"]
+            request = fake.requests[-1]
+            self.assertEqual("/api/orchestration/shell?omitIdleSubagents=1", request["path"])
+            headers = request["headers"]
             self.assertEqual(f"Bearer {token}", headers["Authorization"])
             self.assertIn("gzip", headers["Accept-Encoding"])
+            self.assertEqual("2", headers["x-t3-orchestration-protocol"])
+
+    def test_thread_reads_the_bounded_window_or_the_whole_projection(self) -> None:
+        with FakeT3Server() as fake:
+            token = T3HttpClient(fake.endpoint).exchange_pairing_code(PAIRING_CODE)["access_token"]
+            fake.set_threads([thread("t-1", "Fix login redirect")])
+            client = T3HttpClient(fake.endpoint, token)
+            bounded = client.thread("t-1")
+            self.assertEqual("/api/orchestration/threads/t-1/bounded", fake.requests[-1]["path"])
+            self.assertEqual("t-1", bounded["projection"]["thread"]["id"])
+            client.thread("t-1", full=True)
+            self.assertEqual("/api/orchestration/threads/t-1", fake.requests[-1]["path"])
 
     def test_revoked_token_raises_unauthorized_and_missing_thread_is_404(self) -> None:
         with FakeT3Server() as fake:
             token = T3HttpClient(fake.endpoint).exchange_pairing_code(PAIRING_CODE)["access_token"]
             client = T3HttpClient(fake.endpoint, token)
             with self.assertRaises(T3RequestError) as missing:
-                client.thread("does-not-exist", turn_limit=1)
+                client.thread("does-not-exist")
             self.assertEqual(404, missing.exception.status)
             fake.revoke_all()
             with self.assertRaises(T3Unauthorized):
                 client.shell()
+            with self.assertRaises(T3Unauthorized):
+                client.dispatch({"type": "thread.archive", "commandId": "c", "threadId": "t"})
+
+    def test_writes_are_websocket_rpc_calls(self) -> None:
+        with FakeT3Server() as fake:
+            token = T3HttpClient(fake.endpoint).exchange_pairing_code(PAIRING_CODE)["access_token"]
+            client = T3HttpClient(fake.endpoint, token)
+            command = {"type": "thread.archive", "commandId": "c-1", "threadId": "t-1"}
+            self.assertEqual({"sequence": 101}, client.dispatch(command))
+            self.assertEqual([command], fake.dispatched)
+            self.assertEqual(1, fake.pongs, "the server Ping is answered")
+            upgrade = fake.requests[-1]
+            self.assertEqual("/ws?orchestrationProtocol=2", upgrade["path"])
+            self.assertEqual(f"Bearer {token}", upgrade["headers"]["Authorization"])
+            result = client.launch_thread({"commandId": "c-2", "threadId": "t-2", "projectId": "p"})
+            self.assertEqual("t-2", result["threadId"])
+            self.assertEqual(["orchestration.dispatchCommand", "orchestration.launchThread"], fake.rpcs)
+            fake.fail_dispatch_types.add("thread.archive")
+            with self.assertRaises(T3RequestError) as failed:
+                client.dispatch(command)
+            self.assertEqual((422, "OrchestrationV2DispatchCommandError"), (failed.exception.status, failed.exception.error_code))
+
+    def test_descriptor_rejects_what_is_not_t3(self) -> None:
+        self.assertTrue(looks_like_t3(descriptor()))
+        self.assertFalse(looks_like_t3({**descriptor(), "orchestrationProtocolVersion": 1}))
+        self.assertFalse(looks_like_t3({"environmentId": "x"}))
+
+        class Html(BaseHTTPRequestHandler):
+            def log_message(self, *_: object) -> None:
+                return
+
+            def do_GET(self) -> None:
+                body = b"<!doctype html><html></html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Html)
+        worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        worker.start()
+        try:
+            client = T3HttpClient(parse_server_url(f"http://127.0.0.1:{server.server_address[1]}"))
+            with self.assertRaises(T3Unavailable) as caught:
+                client.descriptor()
+            self.assertEqual("not_t3", caught.exception.reason)
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_unreachable_server_raises_unavailable_without_token_in_message(self) -> None:
         listener = socket.socket()
@@ -76,6 +144,10 @@ class T3ClientPairingTest(unittest.TestCase):
         with self.assertRaises(T3Unavailable) as caught:
             client.shell()
         self.assertNotIn("secret-token-value", str(caught.exception))
+        self.assertEqual("refused", caught.exception.reason)
+        with self.assertRaises(T3Unavailable) as caught:
+            client.dispatch({"type": "thread.archive"})
+        self.assertEqual("refused", caught.exception.reason)
 
 
 class T3EndpointValidationTest(unittest.TestCase):

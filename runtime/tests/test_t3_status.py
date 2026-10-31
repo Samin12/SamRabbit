@@ -7,6 +7,8 @@ from unittest import mock
 from sam_runtime.domains.t3.service import T3Service
 from sam_runtime.domains.t3.status import (
     DEFAULT_APPROVAL_OPTIONS,
+    listed,
+    missing_request_items,
     pending_requests,
     status_label,
     thread_status,
@@ -19,7 +21,7 @@ from t3_fixtures import (
     FakeT3Server,
     StubBridge,
     approval_requested,
-    approval_resolved,
+    detail,
     input_requested,
     make_service,
     thread,
@@ -29,48 +31,67 @@ from t3_fixtures import (
 class T3StatusDerivationTest(unittest.TestCase):
     def test_status_follows_t3_sidebar_order(self) -> None:
         cases = {
-            "needs-approval": thread("a", "A", approvals=True, user_input=True, session_status="running"),
-            "needs-input": thread("b", "B", user_input=True, session_status="running"),
-            "working": thread("c", "C", session_status="running", turn_state="running"),
-            "error": thread("d", "D", session_status="error"),
+            "needs-approval": thread("a", "A", request="command", status="running"),
+            "needs-input": thread("b", "B", request="user_input", status="running"),
+            "working": thread("c", "C", status="running"),
+            "error": thread("d", "D", status="failed"),
             "done": thread("e", "E"),
         }
         for expected, item in cases.items():
             with self.subTest(expected=expected):
                 self.assertEqual(expected, thread_status(item))
-        self.assertEqual("working", thread_status(thread("f", "F", session_status="starting", turn_state="running")))
-        self.assertEqual("working", thread_status(thread("g", "G", background="monitoring")))
-        self.assertEqual("error", thread_status(thread("h", "H", turn_state="error", session_status="stopped")))
-        self.assertEqual("done", thread_status(thread("i", "I", turn_state="error", session_status="stopped", settled=True)))
-        self.assertEqual("done", thread_status(thread("j", "J", session_status=None, turn_state=None)))
+        self.assertEqual("working", thread_status(thread("f", "F", status="starting")))
+        self.assertEqual("working", thread_status(thread("q", "Q", status="queued")))
+        self.assertEqual("working", thread_status(thread("w", "W", status="waiting")))
+        # The activity run wins over the latest run (a follow-up queued behind a live run).
+        self.assertEqual("working", thread_status(thread("v", "V", activity="running")))
+        # Background work the agent waits on holds the thread; a dev server it left running does not.
+        self.assertEqual("working", thread_status(thread("g", "G", background=[{"taskId": "s", "kind": "subagent"}])))
+        self.assertEqual("working", thread_status(thread("m", "M", background=[{"taskId": "m", "kind": "monitor", "awaited": True}])))
+        self.assertEqual("done", thread_status(thread("h", "H", background=[{"taskId": "c", "kind": "command"}])))
+        self.assertEqual("done", thread_status(thread("i", "I", status="failed", settled=True)))
+        self.assertEqual("done", thread_status(thread("j", "J", status="idle")))
+        # An async question the run keeps working past is not "needs input" until the run stops.
+        self.assertEqual("working", thread_status(thread("k", "K", request="user_input", blocking=False, status="running")))
+        self.assertEqual("needs-input", thread_status(thread("l", "L", request="user_input", blocking=False)))
+        self.assertEqual("done", thread_status(thread("n", "N", request="auth_refresh")))
 
     def test_labels_are_short_and_specific(self) -> None:
-        self.assertEqual("Starting", status_label(thread("a", "A", session_status="starting"), "working"))
-        self.assertEqual("Monitoring", status_label(thread("b", "B", background="monitoring"), "working"))
-        planned = thread("c", "C", session_status="running", plan={"step": "Run tests", "completedSteps": 2, "totalSteps": 5})
-        self.assertEqual("Step 3 of 5", status_label(planned, "working"))
-        self.assertEqual("Stopped", status_label(thread("d", "D", turn_state="interrupted"), "done"))
-        self.assertEqual("New", status_label(thread("e", "E", turn_state=None), "done"))
+        self.assertEqual("Starting", status_label(thread("a", "A", status="starting"), "working"))
+        self.assertEqual("Background work", status_label(thread("b", "B", background=[{"taskId": "s", "kind": "subagent"}]), "working"))
+        self.assertEqual("Waiting", status_label(thread("w", "W", status="running", blocked=True), "working"))
+        self.assertEqual("Queued", status_label(thread("q", "Q", status="queued"), "working"))
+        self.assertEqual("Stopped", status_label(thread("d", "D", status="interrupted"), "done"))
+        self.assertEqual("New", status_label(thread("e", "E", status="idle"), "done"))
+
+    def test_subagent_children_are_listed_only_while_they_wait_on_the_user(self) -> None:
+        self.assertTrue(listed(thread("p", "Parent")))
+        self.assertFalse(listed(thread("c", "Child", subagent=True, status="running")))
+        self.assertTrue(listed(thread("c", "Child", subagent=True, status="running", request="command")))
+        self.assertFalse(listed({**thread("x", "Archived"), "archivedAt": "2026-10-07T12:00:00.000Z"}))
+        self.assertFalse(listed({**thread("y", "Deleted"), "deletedAt": "2026-10-07T12:00:00.000Z"}))
 
 
 class T3PendingRequestsTest(unittest.TestCase):
-    def test_requests_open_and_close_like_t3(self) -> None:
-        activities = [
-            approval_requested("r-1", at="2026-10-07T11:00:00.000Z"),
+    def test_requests_follow_runtime_request_rows_like_t3(self) -> None:
+        shell = thread("t", "T", request="file-change")
+        snapshot = detail(shell, requests=[
+            approval_requested("r-1", at="2026-10-07T11:00:00.000Z", status="resolved"),
             approval_requested("r-2", at="2026-10-07T11:01:00.000Z", kind="file-change", detail_text="Changed files"),
-            approval_resolved("r-1"),
-            {"kind": "approval.requested", "createdAt": "2026-10-07T11:02:00.000Z",
-             "payload": {"requestId": "r-3", "requestType": "tool_user_input"}},
             input_requested("q-1"),
-            input_requested("q-2"),
-            {"kind": "provider.user-input.respond.failed", "createdAt": "2026-10-07T11:03:00.000Z",
-             "payload": {"requestId": "q-2", "detail": "Stale pending user-input request"}},
-            {"kind": "approval.requested", "createdAt": "2026-10-07T11:04:00.000Z",
-             "payload": {"requestId": "r-1", "requestKind": "command"}},
+            input_requested("q-2", status="expired"),
+        ])
+        projection = snapshot["projection"]
+        projection["runtimeRequests"] += [
+            {**approval_requested("auth")["request"], "kind": "auth_refresh"},
+            {**approval_requested("tool")["request"], "kind": "dynamic_tool_call"},
+            # A pending question whose item is outside the bounded window is skipped (and flagged).
+            input_requested("q-old")["request"],
         ]
-        pending = pending_requests(activities)
+        pending = pending_requests(snapshot)
         self.assertEqual(["r-2"], [item.request_id for item in pending.approvals])
         self.assertEqual("file-change", pending.approvals[0].kind)
+        self.assertEqual("Changed files", pending.approvals[0].detail)
         self.assertEqual(list(DEFAULT_APPROVAL_OPTIONS), pending.view()["approvals"][0]["options"])
         self.assertEqual(
             {"requestId": "q-1", "questions": [{
@@ -79,11 +100,13 @@ class T3PendingRequestsTest(unittest.TestCase):
             }]},
             pending.view()["inputs"][0],
         )
+        self.assertTrue(missing_request_items(snapshot))
+        projection["runtimeRequests"].pop()
+        self.assertFalse(missing_request_items(snapshot))
 
     def test_provider_options_are_kept(self) -> None:
-        activity = approval_requested("r-9")
-        activity["payload"]["options"] = [{"decision": "accept", "label": "Allow"}, {"decision": "decline", "label": "Deny"}]
-        pending = pending_requests([activity])
+        pair = approval_requested("r-9", options=[{"decision": "accept", "label": "Allow"}, {"decision": "decline", "label": "Deny"}])
+        pending = pending_requests(detail(thread("t", "T", request="command"), requests=[pair]))
         self.assertEqual([{"decision": "accept", "label": "Allow"}, {"decision": "decline", "label": "Deny"}],
                          pending.view()["approvals"][0]["options"])
 
@@ -102,11 +125,12 @@ class T3SummariesTest(unittest.TestCase):
             thread("done-old", "Old done", completed_at="2026-10-07T08:00:00.000Z"),
             thread("done-new", "New done", completed_at="2026-10-07T10:00:00.000Z"),
             thread("settled", "Settled one", completed_at="2026-10-07T11:30:00.000Z", settled=True),
-            thread("working", "Busy thread", session_status="running", turn_state="running", project_id=PROJECT_SIDE,
-                   plan={"step": "Run tests", "completedSteps": 1, "totalSteps": 4}),
-            thread("error", "Broken thread", session_status="error"),
-            thread("input", "Question thread", user_input=True),
-            thread("approve", "Approval thread", approvals=True),
+            thread("working", "Busy thread", status="running", project_id=PROJECT_SIDE),
+            thread("error", "Broken thread", status="failed"),
+            thread("input", "Question thread", request="user_input"),
+            thread("approve", "Approval thread", request="command"),
+            # An idle subagent child is never listed.
+            thread("child", "Subagent child", subagent=True),
         ]
 
     def test_order_counts_projects_and_revision(self) -> None:
@@ -122,8 +146,8 @@ class T3SummariesTest(unittest.TestCase):
         working = view["threads"][2]
         self.assertEqual(
             {"id": "working", "projectId": PROJECT_SIDE, "projectTitle": "Orbit Lab", "title": "Busy thread",
-             "status": "working", "statusLabel": "Step 2 of 4", "unread": False, "model": "claude-opus-5-5",
-             "phase": "Run tests", "progress": 0.25, "completedAt": None},
+             "status": "working", "statusLabel": "Working", "unread": False, "model": "claude-opus-5-5",
+             "phase": None, "progress": None, "completedAt": None},
             {key: value for key, value in working.items() if key != "updatedAt"},
         )
         self.assertEqual("Workbench", view["projects"][0]["title"])
@@ -146,7 +170,7 @@ class T3SummariesTest(unittest.TestCase):
         self.service.connect(self.fake.url, PAIRING_CODE)
         self.assertFalse(any(item["unread"] for item in self.service.threads_view()["threads"]))
         threads = self._threads()
-        threads[1] = thread("done-new", "New done", completed_at="2026-10-07T12:20:00.000Z", turn_id="turn-2")
+        threads[1] = thread("done-new", "New done", completed_at="2026-10-07T12:20:00.000Z", run_id="run-2")
         self.fake.set_threads(threads)
         self.service.sync_once()
         before = self.service.threads_view()

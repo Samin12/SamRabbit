@@ -1,8 +1,17 @@
-"""Pure T3 shell/thread interpretation: status, labels, ordering, pending requests.
+"""Pure T3 shell/thread interpretation (orchestration protocol 2): status, labels, ordering, pending requests.
 
-Status mirrors T3's own sidebar (``resolveSidebarThreadStatus``) plus one
-addition: an unsettled thread whose latest turn errored reads as ``error``.
-Settled threads are demoted: an error the user already settled reads as done.
+Status mirrors T3's own sidebar (``resolveSidebarThreadStatus`` in apps/web over
+``presentThreadShell`` in packages/client-runtime): a pending runtime request
+first (approval before question), then a live run, then background work the
+agent waits on, then a failed run. Settled threads are demoted: a failure the
+user already settled reads as done.
+
+Shell fields used (``OrchestrationV2ThreadShell``): ``status`` (latest run status,
+``idle`` with no run), ``activityRunStatus`` (the run that owns activity, wins over
+``status``), ``latestRunId`` / ``latestRun{Requested,Started,Completed}At``,
+``activeRunId``, ``pendingRuntimeRequest`` ``{id, kind, createdAt, blocking?}``,
+``pendingBackgroundTasks``, ``blockedOnThreadWait``, ``lastError``, ``settledAt``,
+``snoozedUntil``, ``modelSelection``, ``projectId``, ``title``, ``updatedAt``.
 """
 
 from __future__ import annotations
@@ -25,29 +34,12 @@ DEFAULT_APPROVAL_OPTIONS = (
     {"decision": "decline", "label": "Decline"},
     {"decision": "cancel", "label": "Cancel"},
 )
-_STALE_APPROVAL = (
-    "stale pending approval request",
-    "unknown pending approval request",
-    "unknown pending permission request",
-    "unknown pending codex approval request",
-)
-_STALE_INPUT = (
-    "stale pending user-input request",
-    "unknown pending user-input request",
-    "unknown pending user input request",
-    "unknown pending codex user input request",
-)
-_REQUEST_KIND_BY_TYPE = {
-    "command_execution_approval": "command",
-    "exec_command_approval": "command",
-    "dynamic_tool_call": "command",
-    "file_read_approval": "file-read",
-    "file_change_approval": "file-change",
-    "apply_patch_approval": "file-change",
-    "mcp_elicitation_approval": "mcp-elicitation",
-    "permission_approval": "permission",
-}
 _REQUEST_KINDS = frozenset({"command", "file-read", "file-change", "mcp-elicitation", "permission"})
+# Run statuses (OrchestrationV2RunStatus). "waiting" runs ended their provider turn and only drain effects.
+LIVE_RUN = frozenset({"preparing", "queued", "starting", "running", "waiting"})
+_PROVIDER_WORKING = frozenset({"preparing", "starting", "running"})
+TERMINAL_RUN = frozenset({"completed", "interrupted", "failed", "cancelled", "rolled_back"})
+PARKED = "idle"  # runtime status while background work the agent waits on holds the thread
 
 
 def _dict(value: object) -> dict[str, object]:
@@ -77,22 +69,65 @@ def is_snoozed(thread: dict[str, object], now: datetime) -> bool:
     return until is not None and until > now
 
 
-def raw_status(thread: dict[str, object]) -> str:
-    """Status before settlement demotion (T3 sidebar order + latest-turn error)."""
-    session = _dict(thread.get("session"))
-    latest = _dict(thread.get("latestTurn"))
-    session_status = session.get("status")
-    if thread.get("hasPendingApprovals") is True:
-        return NEEDS_APPROVAL
-    if thread.get("hasPendingUserInput") is True:
+def is_subagent(thread: dict[str, object]) -> bool:
+    return _dict(thread.get("lineage")).get("relationshipToParent") == "subagent"
+
+
+def holds_completion(thread: dict[str, object]) -> bool:
+    """Background work the agent waits on (``backgroundWorkHoldsCompletion``): a subagent or
+    background task, or a command/monitor the agent marked ``awaited``. A dev server it merely
+    left running does not hold the thread."""
+    for task in thread.get("pendingBackgroundTasks") or []:
+        if isinstance(task, dict) and (task.get("awaited") is True or task.get("kind") in {"subagent", "background_task"}):
+            return True
+    return False
+
+
+def runtime_status(thread: dict[str, object]) -> str | None:
+    """The status T3's sidebar reads (``shellRuntime``): ``None`` for a thread that never ran,
+    ``idle`` while held by awaited background work, else the activity run's or latest run's status."""
+    parked = holds_completion(thread) and thread.get("status") != "failed"
+    if thread.get("latestRunId") is None and thread.get("activeProviderThreadId") is None and not parked:
+        return None
+    if parked:
+        return PARKED
+    return str(thread.get("activityRunStatus") or thread.get("status") or "") or None
+
+
+def latest_run_id(thread: dict[str, object]) -> str | None:
+    value = thread.get("latestRunId")
+    return str(value) if value else None
+
+
+def run_live(thread: dict[str, object]) -> bool:
+    """A run is queued, starting, running or draining (what "stop" would interrupt)."""
+    return runtime_status(thread) in LIVE_RUN
+
+
+def _pending_kind(thread: dict[str, object]) -> str | None:
+    request = thread.get("pendingRuntimeRequest")
+    if not isinstance(request, dict):
+        return None
+    kind = request.get("kind")
+    if kind == "auth_refresh":
+        return None
+    if kind == "user_input":
+        # An async question (blocking: false) counts only once the run stops working past it.
+        if request.get("blocking") is False and runtime_status(thread) in _PROVIDER_WORKING:
+            return None
         return NEEDS_INPUT
-    if session_status in {"running", "starting"}:
+    return NEEDS_APPROVAL
+
+
+def raw_status(thread: dict[str, object]) -> str:
+    """Status before settlement demotion (T3 sidebar order)."""
+    pending = _pending_kind(thread)
+    if pending is not None:
+        return pending
+    runtime = runtime_status(thread)
+    if runtime in LIVE_RUN or runtime == PARKED:
         return WORKING
-    if session_status == "error":
-        return ERROR
-    if thread.get("backgroundLiveness") in {"working", "monitoring"}:
-        return WORKING
-    if latest.get("state") == "error":
+    if runtime == "failed":
         return ERROR
     return DONE
 
@@ -100,26 +135,22 @@ def raw_status(thread: dict[str, object]) -> str:
 ACTIVITY_ACTIVE = "active"
 ACTIVITY_BACKGROUND = "background"
 ACTIVITY_IDLE = "idle"
-_LIVE_SESSION = frozenset({"running", "starting"})
-_BACKGROUND_LIVE = frozenset({"working", "monitoring"})
 
 
 def foreground_active(thread: dict[str, object]) -> bool:
-    """A turn is running or starting, or a request is waiting on the user."""
-    return (
-        thread.get("hasPendingApprovals") is True
-        or thread.get("hasPendingUserInput") is True
-        or _dict(thread.get("session")).get("status") in _LIVE_SESSION
-    )
+    """A run is live (and not just waiting on another thread), or a request waits on the user."""
+    if _pending_kind(thread) is not None:
+        return True
+    return runtime_status(thread) in LIVE_RUN and thread.get("blockedOnThreadWait") is not True
 
 
 def activity_level(threads: Iterable[object]) -> str:
     """How busy T3 is, for the shell poll cadence (not for display).
 
-    ``active``: some thread runs a turn or waits on the user. ``background``: threads are only
-    background-live (``backgroundLiveness`` working/monitoring with no running session and
-    nothing pending), e.g. the parent session of long background tasks, which shows as
-    "Background work" but produces no turn to announce. ``idle``: nothing working or pending.
+    ``active``: some thread runs or waits on the user. ``background``: threads are only held by
+    background work (a subagent or awaited task with no live run of their own, or a run blocked
+    on another thread), which shows as "Background work" / "Waiting" but has no turn to announce
+    yet. ``idle``: nothing working or pending.
     """
     level = ACTIVITY_IDLE
     for thread in threads:
@@ -127,7 +158,7 @@ def activity_level(threads: Iterable[object]) -> str:
             continue
         if foreground_active(thread):
             return ACTIVITY_ACTIVE
-        if thread.get("backgroundLiveness") in _BACKGROUND_LIVE:
+        if runtime_status(thread) in LIVE_RUN or runtime_status(thread) == PARKED:
             level = ACTIVITY_BACKGROUND
     return level
 
@@ -140,52 +171,50 @@ def thread_status(thread: dict[str, object]) -> str:
 
 
 def status_label(thread: dict[str, object], status: str) -> str:
-    session = _dict(thread.get("session"))
-    latest = _dict(thread.get("latestTurn"))
+    runtime = runtime_status(thread)
     if status == NEEDS_APPROVAL:
         return "Needs approval"
     if status == NEEDS_INPUT:
         return "Has a question"
     if status == WORKING:
-        progress = _dict(thread.get("planProgress"))
-        total = progress.get("totalSteps")
-        done = progress.get("completedSteps")
-        if session.get("status") == "starting":
-            return "Starting"
-        if session.get("status") != "running" and thread.get("backgroundLiveness") == "monitoring":
-            return "Monitoring"
-        if session.get("status") != "running" and thread.get("backgroundLiveness") == "working":
+        if runtime == PARKED:
             return "Background work"
-        if isinstance(total, int) and isinstance(done, int) and total > 0:
-            return f"Step {min(done + 1, total)} of {total}"
+        if runtime in {"preparing", "starting"}:
+            return "Starting"
+        if runtime == "queued":
+            return "Queued"
+        if thread.get("blockedOnThreadWait") is True:
+            return "Waiting"
         return "Working"
     if status == ERROR:
         return "Failed"
-    if not latest:
+    if latest_run_id(thread) is None:
         return "New"
-    if latest.get("state") == "interrupted":
+    if thread.get("status") in {"interrupted", "cancelled"}:
         return "Stopped"
     return "Done"
 
 
-def plan_phase(thread: dict[str, object]) -> tuple[str | None, float | None]:
-    progress = _dict(thread.get("planProgress"))
-    step = _text(progress.get("step"))
-    total = progress.get("totalSteps")
-    done = progress.get("completedSteps")
-    fraction = None
-    if isinstance(total, int) and isinstance(done, int) and total > 0:
-        fraction = round(max(0.0, min(1.0, done / total)), 3)
-    return (step[:80] if step else None), fraction
+def plan_phase(steps: object) -> tuple[str | None, float | None]:
+    """(current step, fraction done) from a v2 ``todo_list`` item's ``steps``."""
+    if not isinstance(steps, list) or not steps:
+        return None, None
+    rows = [step for step in steps if isinstance(step, dict)]
+    if not rows:
+        return None, None
+    done = sum(1 for step in rows if step.get("status") == "completed")
+    current = next((step for step in rows if step.get("status") == "running"), None)
+    current = current or next((step for step in rows if step.get("status") == "pending"), None)
+    text = _text(current.get("text")) if current else None
+    return (text[:80] if text else None), round(max(0.0, min(1.0, done / len(rows))), 3)
 
 
 def activity_time(thread: dict[str, object]) -> str:
     """When something last happened in the thread (not settle/rename bookkeeping)."""
-    latest = _dict(thread.get("latestTurn"))
     candidates = [
-        latest.get("completedAt"),
-        latest.get("startedAt"),
-        latest.get("requestedAt"),
+        thread.get("latestRunCompletedAt"),
+        thread.get("latestRunStartedAt"),
+        thread.get("latestRunRequestedAt"),
         thread.get("latestUserMessageAt"),
         thread.get("createdAt"),
     ]
@@ -206,11 +235,15 @@ def summary_time(thread: dict[str, object], status: str) -> str:
 
 
 def completed_at(thread: dict[str, object]) -> str | None:
-    latest = _dict(thread.get("latestTurn"))
-    if latest.get("state") in {"completed", "error", "interrupted"}:
-        value = latest.get("completedAt")
-        return str(value) if value else None
-    return None
+    """When the latest run ended (``None`` while it runs or before any run). Older servers omit
+    ``latestRunCompletedAt``; T3's own client then uses ``updatedAt``."""
+    if latest_run_id(thread) is None or thread.get("status") not in TERMINAL_RUN:
+        return None
+    if "latestRunCompletedAt" not in thread:
+        value = thread.get("updatedAt")
+    else:
+        value = thread.get("latestRunCompletedAt")
+    return str(value) if value else None
 
 
 def unread_marker(thread: dict[str, object], status: str) -> str | None:
@@ -251,9 +284,18 @@ def project_titles(shell: dict[str, object]) -> dict[str, str]:
     }
 
 
+def listed(thread: object) -> bool:
+    """Whether a shell thread appears on the R1: not archived or deleted, and not a subagent
+    child unless the child itself waits on the user (an app-owned child asks on its own thread)."""
+    if not isinstance(thread, dict) or not thread.get("id"):
+        return False
+    if thread.get("archivedAt") is not None or thread.get("deletedAt") is not None:
+        return False
+    return not is_subagent(thread) or _pending_kind(thread) is not None
+
+
 def summarize(thread: dict[str, object], projects: dict[str, str], *, seen: str | None) -> dict[str, object]:
     status = thread_status(thread)
-    phase, progress = plan_phase(thread)
     model = _dict(thread.get("modelSelection")).get("model")
     project_id = str(thread.get("projectId") or "")
     return {
@@ -267,8 +309,9 @@ def summarize(thread: dict[str, object], projects: dict[str, str], *, seen: str 
         "completedAt": completed_at(thread),
         "unread": is_unread(unread_marker(thread, status), seen),
         "model": str(model) if isinstance(model, str) and model else None,
-        "phase": phase if status == WORKING else None,
-        "progress": progress if status == WORKING else None,
+        # The v2 shell carries no plan progress; the live card reads it from the thread's todo list.
+        "phase": None,
+        "progress": None,
     }
 
 
@@ -399,76 +442,139 @@ def _questions(value: object) -> tuple[PendingQuestion, ...]:
     return tuple(result)
 
 
-def pending_requests(activities: object) -> PendingRequests:
-    """Mirror of T3 ``derivePendingRequests`` (packages/client-runtime/src/pendingRequests.ts)."""
-    approvals: dict[str, PendingApproval] = {}
-    inputs: dict[str, PendingInput] = {}
-    closed_approvals: set[str] = set()
-    closed_inputs: set[str] = set()
-    for activity in activities if isinstance(activities, list) else []:
-        if not isinstance(activity, dict):
+def projection_of(detail: object) -> dict[str, object]:
+    """The ``OrchestrationV2ThreadProjection`` inside a thread snapshot (or the projection itself)."""
+    value = _dict(detail)
+    return _dict(value.get("projection")) if "projection" in value else value
+
+
+def pending_requests(projection: object) -> PendingRequests:
+    """Mirror of T3 ``derivePendingThreadRequests`` (packages/client-runtime/src/state/threadRequests.ts).
+
+    Every ``runtimeRequests`` row still ``pending``: ``user_input`` rows become questions from
+    their ``user_input_request`` turn item (skipped while that item is not in the window);
+    ``auth_refresh`` and ``dynamic_tool_call`` are T3's own business; the rest are approvals,
+    with the ``approval_request`` item's prompt as the detail and its options when given.
+    """
+    value = projection_of(projection)
+    items = [item for item in value.get("turnItems") or [] if isinstance(item, dict)]
+    by_request: dict[tuple[str, str], dict[str, object]] = {}
+    for item in items:
+        request_id = item.get("requestId")
+        if isinstance(request_id, str) and item.get("type") in {"user_input_request", "approval_request"}:
+            by_request[(str(item["type"]), request_id)] = item
+    approvals: list[PendingApproval] = []
+    inputs: list[PendingInput] = []
+    for request in value.get("runtimeRequests") or []:
+        if not isinstance(request, dict) or request.get("status") != "pending":
             continue
-        kind = activity.get("kind")
-        payload = _dict(activity.get("payload"))
-        request_id = payload.get("requestId")
+        request_id = request.get("id")
         if not isinstance(request_id, str) or not request_id:
             continue
-        created = str(activity.get("createdAt") or "")
-        detail_lower = str(payload.get("detail") or "").lower()
-        if kind == "approval.requested":
-            if request_id in closed_approvals or payload.get("requestType") in {"tool_user_input", "auth_tokens_refresh"}:
+        kind = request.get("kind")
+        created = str(request.get("createdAt") or "")
+        capability = _dict(request.get("responseCapability")).get("type")
+        if kind == "user_input":
+            item = by_request.get(("user_input_request", request_id))
+            if item is None:
                 continue
-            request_kind = payload.get("requestKind")
-            if request_kind not in _REQUEST_KINDS:
-                request_kind = _REQUEST_KIND_BY_TYPE.get(str(payload.get("requestType")), "command")
-            options = tuple(
-                {"decision": str(option["decision"]), "label": str(option["label"])}
-                for option in payload.get("options", []) or []
-                if isinstance(option, dict) and isinstance(option.get("decision"), str) and isinstance(option.get("label"), str)
-            )
-            approvals[request_id] = PendingApproval(
-                request_id=request_id,
-                kind=str(request_kind),
-                detail=_text(payload.get("detail")),
-                options=options or DEFAULT_APPROVAL_OPTIONS,
-                created_at=created,
-            )
-        elif kind == "user-input.requested":
-            if request_id in closed_inputs:
-                continue
-            questions = _questions(payload.get("questions"))
+            questions = _questions(item.get("questions"))
             if not questions:
                 continue
-            inputs[request_id] = PendingInput(
+            inputs.append(PendingInput(
                 request_id=request_id,
                 questions=questions,
-                dismissible=payload.get("responseMode") == "message",
+                dismissible=item.get("responseMode") == "message" or capability == "message",
                 created_at=created,
-            )
-        elif kind == "approval.resolved" or (
-            kind == "provider.approval.respond.failed" and any(item in detail_lower for item in _STALE_APPROVAL)
-        ):
-            closed_approvals.add(request_id)
-            approvals.pop(request_id, None)
-        elif kind == "user-input.resolved" or (
-            kind == "provider.user-input.respond.failed" and any(item in detail_lower for item in _STALE_INPUT)
-        ):
-            closed_inputs.add(request_id)
-            inputs.pop(request_id, None)
+            ))
+            continue
+        if kind in {"auth_refresh", "dynamic_tool_call"}:
+            continue
+        item = by_request.get(("approval_request", request_id)) or {}
+        options = tuple(
+            {"decision": str(option["decision"]), "label": str(option["label"])}
+            for option in item.get("options", []) or []
+            if isinstance(option, dict) and isinstance(option.get("decision"), str) and isinstance(option.get("label"), str)
+        )
+        approvals.append(PendingApproval(
+            request_id=request_id,
+            kind=str(kind) if kind in _REQUEST_KINDS else "command",
+            detail=_text(item.get("prompt")) or _text(item.get("reason")),
+            options=options or DEFAULT_APPROVAL_OPTIONS,
+            created_at=created,
+        ))
     return PendingRequests(
-        approvals=tuple(sorted(approvals.values(), key=lambda item: item.created_at)),
-        inputs=tuple(sorted(inputs.values(), key=lambda item: item.created_at)),
+        approvals=tuple(sorted(approvals, key=lambda item: item.created_at)),
+        inputs=tuple(sorted(inputs, key=lambda item: item.created_at)),
     )
 
 
-def last_assistant_text(thread_detail: dict[str, object]) -> str | None:
-    messages = _dict(thread_detail.get("thread")).get("messages") or thread_detail.get("messages")
+def missing_request_items(projection: object) -> bool:
+    """A pending question whose turn item is outside the bounded window (fetch the whole thread)."""
+    value = projection_of(projection)
+    have = {
+        str(item.get("requestId")) for item in value.get("turnItems") or []
+        if isinstance(item, dict) and item.get("type") == "user_input_request"
+    }
+    return any(
+        isinstance(request, dict) and request.get("status") == "pending" and request.get("kind") == "user_input"
+        and str(request.get("id")) not in have
+        for request in value.get("runtimeRequests") or []
+    )
+
+
+def _ordinal(value: object) -> int:
+    ordinal = _dict(value).get("ordinal")
+    return ordinal if isinstance(ordinal, int) else -1
+
+
+def shell_from_projection(detail: object) -> dict[str, object]:
+    """A shell-like thread (the fields this module reads) built from a thread projection, for a
+    thread the cached shell does not hold yet and for the freshest run state of one thread."""
+    projection = projection_of(detail)
+    thread = dict(_dict(projection.get("thread")))
+    runs = sorted((run for run in projection.get("runs") or [] if isinstance(run, dict)), key=_ordinal)
+    latest = runs[-1] if runs else None
+    active = next((run for run in reversed(runs) if run.get("status") in LIVE_RUN), None)
+    thread["latestRunId"] = latest.get("id") if latest else None
+    thread["status"] = str(latest.get("status")) if latest else "idle"
+    thread["latestRunRequestedAt"] = latest.get("requestedAt") if latest else None
+    thread["latestRunStartedAt"] = latest.get("startedAt") if latest else None
+    thread["latestRunCompletedAt"] = latest.get("completedAt") if latest else None
+    thread["activeRunId"] = active.get("id") if active else None
+    pending = next((
+        request for request in projection.get("runtimeRequests") or []
+        if isinstance(request, dict) and request.get("status") == "pending" and request.get("kind") != "auth_refresh"
+    ), None)
+    thread["pendingRuntimeRequest"] = (
+        {"id": pending.get("id"), "kind": pending.get("kind"), "createdAt": pending.get("createdAt")} if pending else None
+    )
+    thread.setdefault("pendingBackgroundTasks", [])
+    return thread
+
+
+def run_items(detail: object, run_id: str | None) -> list[dict[str, object]]:
+    """Turn items of one run (all items when ``run_id`` is None), oldest first."""
+    items = [item for item in projection_of(detail).get("turnItems") or [] if isinstance(item, dict)]
+    if run_id is not None:
+        items = [item for item in items if item.get("runId") == run_id]
+    return sorted(items, key=_ordinal)
+
+
+def last_assistant_text(thread_detail: object) -> str | None:
+    messages = projection_of(thread_detail).get("messages")
     for message in reversed(messages if isinstance(messages, list) else []):
         if isinstance(message, dict) and message.get("role") == "assistant":
             text = _text(message.get("text"))
             if text:
                 return text
     return None
+
+
+def latest_assistant_preview(thread: dict[str, object]) -> str | None:
+    """The shell's ``latestVisibleMessage`` when it is the agent's (no detail fetch needed)."""
+    latest = _dict(thread.get("latestVisibleMessage"))
+    return _text(latest.get("text")) if latest.get("role") == "assistant" else None
 
 
 def condense(text: str | None, limit: int) -> str:

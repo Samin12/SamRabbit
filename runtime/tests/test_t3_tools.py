@@ -61,8 +61,8 @@ class T3VoiceToolsTest(unittest.TestCase):
     def test_list_filters_counts_and_size_cap(self) -> None:
         threads = [thread(f"done-{index}", f"Long finished thread title number {index} " + "x" * 120,
                           completed_at=f"2026-10-07T0{index % 9}:00:00.000Z") for index in range(30)]
-        threads.append(thread("ask", "Approve the deploy", approvals=True))
-        threads.append(thread("busy", "Refactor the parser", session_status="running", turn_state="running"))
+        threads.append(thread("ask", "Approve the deploy", request="command"))
+        threads.append(thread("busy", "Refactor the parser", status="running"))
         self._connect(threads)
         ok, value = self._call("t3_list_threads", {})
         self.assertTrue(ok)
@@ -79,12 +79,12 @@ class T3VoiceToolsTest(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_read_condenses_and_lists_pending_requests(self) -> None:
-        asking = thread("ask", "Fix login redirect bug", approvals=True)
+        asking = thread("ask", "Fix login redirect bug", request="command")
         self._connect([asking, thread("other", "Write the changelog")])
         self.fake.set_detail("ask", detail(asking, messages=[
             message("u", "user", "please fix it"),
             message("assistant:1", "assistant", "I found the bug in the redirect handler. " * 300),
-        ], activities=[approval_requested("req-1", detail_text="git push origin fix-login")]))
+        ], requests=[approval_requested("req-1", detail_text="git push origin fix-login")]))
         ok, value = self._call("t3_read_thread", {"thread": "login redirect"})
         self.assertTrue(ok, value)
         self.assertEqual("ask", value["thread"]["id"])
@@ -116,7 +116,7 @@ class T3VoiceToolsTest(unittest.TestCase):
         catalog = ToolCatalog()
         register_t3_tools(catalog, restarted)
         self.fake.unavailable = True
-        count = len(self.fake.dispatched)
+        count = len(self.fake.dispatched) + len(self.fake.launched)
         for name, arguments in (
             ("t3_new_thread", {"prompt": "Add dark mode"}),
             ("t3_list_threads", {}),
@@ -125,11 +125,11 @@ class T3VoiceToolsTest(unittest.TestCase):
             result = catalog.invoke(name, arguments, agent=AgentKind.VOICE)
             self.assertTrue(result.is_error, result.text)
             self.assertIn("unreachable", result.text, name)
-        self.assertEqual(count, len(self.fake.dispatched))
+        self.assertEqual(count, len(self.fake.dispatched) + len(self.fake.launched))
 
     def test_latest_means_most_recently_active_not_highest_priority(self) -> None:
         self._connect([
-            thread("waiting", "Approve the old deploy", approvals=True, completed_at="2026-10-05T09:00:00.000Z"),
+            thread("waiting", "Approve the old deploy", request="command", completed_at="2026-10-05T09:00:00.000Z"),
             thread("fresh", "Polish the settings page", completed_at="2026-10-07T12:30:00.000Z"),
             thread("older", "Write the changelog", completed_at="2026-10-07T08:00:00.000Z"),
         ])
@@ -140,25 +140,25 @@ class T3VoiceToolsTest(unittest.TestCase):
             self.assertEqual("fresh", value["thread"]["id"], spoken)
 
     def test_new_send_respond_and_stop(self) -> None:
-        asking = thread("ask", "Pick storage", user_input=True)
-        self._connect([asking, thread("busy", "Refactor the parser", session_status="running", turn_state="running", active_turn="turn-x")])
+        asking = thread("ask", "Pick storage", request="user_input")
+        self._connect([asking, thread("busy", "Refactor the parser", status="running", run_id="run-x")])
         ok, value = self._call("t3_new_thread", {"prompt": "Add retry logic to the uploader", "project": "Orbit Lab"})
         self.assertTrue(ok, value)
         self.assertEqual("Orbit Lab", value["project"])
-        self.assertEqual(["thread.create", "thread.turn.start"], [item["type"] for item in self.fake.dispatched])
-        self.assertEqual(value["threadId"], self.fake.dispatched[0]["threadId"])
+        self.assertEqual([value["threadId"]], [item["threadId"] for item in self.fake.launched])
+        self.assertEqual("Add retry logic to the uploader", self.fake.launched[0]["initialMessage"]["text"])
 
         ok, value = self._call("t3_send_message", {"thread": "parser", "text": "Keep the public API"})
         self.assertTrue(ok)
         self.assertIn("queued", value["note"])
 
-        self.fake.set_detail("ask", detail(asking, activities=[input_requested("q-1")]))
+        self.fake.set_detail("ask", detail(asking, requests=[input_requested("q-1")]))
         ok, value = self._call("t3_respond", {"thread": "pick storage", "answer": "the first one"})
         self.assertTrue(ok, value)
-        self.assertEqual({"type": "thread.user-input.respond", "requestId": "q-1", "answers": {"0": "Use SQLite"}},
+        self.assertEqual({"type": "runtime-request.respond", "requestId": "q-1", "answers": {"0": "Use SQLite"}},
                          {key: self.fake.dispatched[-1][key] for key in ("type", "requestId", "answers")})
 
-        self.fake.set_detail("ask", detail(asking, activities=[input_requested("q-2", options=("Red", "Green", "Blue"), multi=True)]))
+        self.fake.set_detail("ask", detail(asking, requests=[input_requested("q-2", options=("Red", "Green", "Blue"), multi=True)]))
         ok, value = self._call("t3_respond", {"thread": "pick storage", "requestId": "q-2", "answers": ["red | blue"]})
         self.assertTrue(ok, value)
         self.assertEqual({"0": ["Red", "Blue"]}, self.fake.dispatched[-1]["answers"])
@@ -166,13 +166,13 @@ class T3VoiceToolsTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("one answer per question", value)
 
-        self.fake.set_detail("ask", detail(asking, activities=[approval_requested("req-7")]))
+        self.fake.set_detail("ask", detail(asking, requests=[approval_requested("req-7")]))
         ok, value = self._call("t3_respond", {"thread": "pick storage", "decision": "decline"})
         self.assertTrue(ok, value)
-        self.assertEqual(("thread.approval.respond", "req-7", "decline"),
+        self.assertEqual(("runtime-request.respond", "req-7", "decline"),
                          tuple(self.fake.dispatched[-1][key] for key in ("type", "requestId", "decision")))
 
-        self.fake.set_detail("ask", detail(asking, activities=[]))
+        self.fake.set_detail("ask", detail(asking, requests=[]))
         ok, value = self._call("t3_respond", {"thread": "pick storage", "decision": "accept"})
         self.assertFalse(ok)
         self.assertIn("Nothing is waiting", value)
@@ -180,7 +180,7 @@ class T3VoiceToolsTest(unittest.TestCase):
         ok, value = self._call("t3_stop", {"thread": "refactor parser"})
         self.assertTrue(ok)
         self.assertTrue(value["wasWorking"])
-        self.assertEqual("turn-x", self.fake.dispatched[-1]["turnId"])
+        self.assertEqual(("thread.stop", "busy"), (self.fake.dispatched[-1]["type"], self.fake.dispatched[-1]["threadId"]))
 
     def test_disconnected_tools_fail_softly(self) -> None:
         handlers_result = self.catalog.invoke("t3_list_threads", {}, agent=AgentKind.VOICE)
