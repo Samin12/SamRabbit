@@ -283,7 +283,7 @@ class TurnTest(AssistantBase):
         self.assertEqual("Hermes", action["project"])
         self.assertTrue(action["threadId"])
         self.assertTrue(action["title"])
-        created = [item for item in self.fake_t3.dispatched if item["type"] == "thread.create"]
+        created = self.fake_t3.launched
         self.assertEqual(1, len(created), "the task went to the (fake) T3")
         self.assertEqual(action["threadId"], created[0]["threadId"])
         status, second = self.say("is it done?", conversation=first["conversationId"])
@@ -524,28 +524,16 @@ class IdempotencyTest(AssistantBase):
 
 
 class AnnouncementsTest(AssistantBase):
-    def change(self, thread_id: str, **fields: Any) -> None:
-        with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread(thread_id)
-            for key, value in fields.items():
-                if isinstance(value, dict) and isinstance(thread.get(key), dict):
-                    thread[key].update(value)
-                else:
-                    thread[key] = value
-        self.hub.invalidate()
-
     def test_tasks_that_need_him_finish_or_fail_are_announced_once(self) -> None:
         self.script({"reply": "Okay."}, {"reply": "Approving it?"})
         status, first = self.say("hello")
         conversation = first["conversationId"]
         self.assertEqual({"items": [], "cursor": 0}, self.poll(conversation), "nothing old is announced")
-        self.change("t-running", session={"status": "ready", "activeTurnId": None}, planProgress=None,
-                    latestTurn={"state": "completed", "completedAt": "2026-10-08T13:10:00.000Z"},
-                    updatedAt="2026-10-08T13:10:00.000Z")
-        self.change("t-new", hasPendingApprovals=True, session={"threadId": "t-new", "status": "running",
-                                                                "activeTurnId": "turn-x", "lastError": None},
-                    latestTurn={"turnId": "turn-x", "state": "running", "requestedAt": "2026-10-08T13:11:00.000Z"},
-                    updatedAt="2026-10-08T13:11:00.000Z")
+        with self.fake_t3.lock:
+            self.fake_t3.end_run("t-running", "2026-10-08T13:10:00.000Z")
+            self.fake_t3.start_run("t-new", "2026-10-08T13:11:00.000Z", run_id="turn-x")
+            self.fake_t3.ask_approval("t-new", "req-x", at="2026-10-08T13:11:00.000Z")
+        self.hub.invalidate()
         value = self.poll(conversation)
         items = {item["threadId"]: item for item in value["items"]}
         self.assertEqual({"t-running", "t-new"}, set(items))
@@ -561,8 +549,9 @@ class AnnouncementsTest(AssistantBase):
         self.assertEqual([], self.poll(conversation, since=cursor)["items"])
         status, other = self.say("hi")
         self.assertEqual([], self.poll(other["conversationId"])["items"], "a new conversation hears only new things")
-        self.change("t-input", hasPendingUserInput=False, session={"status": "error", "lastError": "boom"},
-                    updatedAt="2026-10-08T13:12:00.000Z")
+        with self.fake_t3.lock:
+            self.fake_t3.end_run("t-input", "2026-10-08T13:12:00.000Z", status="failed", lastError="boom")
+        self.hub.invalidate()
         self.assertEqual(["“Pick a database” in Website ran into a problem."],
                          [item["say"] for item in self.poll(other["conversationId"])["items"]])
         # The next turn tells the agent what was announced, so "approve it" means that task.
@@ -703,7 +692,8 @@ class McpServerTest(AssistantBase):
         self.assertEqual(("approval", "req-approve-1"), (read["waitingFor"]["kind"], read["waitingFor"]["requestId"]))
         answered = call(6, "respond_task", {"id": "t-approval", "requestId": "req-approve-1", "decision": "approve"})
         self.assertFalse(answered["isError"], answered)
-        self.assertEqual("thread.approval.respond", self.fake_t3.dispatched[-1]["type"])
+        self.assertEqual(("runtime-request.respond", "accept"),
+                         (self.fake_t3.dispatched[-1]["type"], self.fake_t3.dispatched[-1]["decision"]))
         look = call(7, "mac_look", {})
         self.assertEqual("image", look["content"][0]["type"])
         self.assertEqual("image/jpeg", look["content"][0]["mimeType"])
@@ -736,7 +726,7 @@ class McpServerTest(AssistantBase):
         own.attach(self.server)
         own.refresh(force=True)  # the first look: what is there is seen ...
         with self.fake_t3.lock:  # ... so the deploy preview fails again: news, in Needs you
-            self.fake_t3.get_thread("t-error")["session"]["updatedAt"] = "2026-10-08T18:00:00.000Z"
+            self.fake_t3.end_run("t-error", "2026-10-08T18:00:00.000Z", status="failed", run_id="run-t-error-2")
         self.hub.invalidate()
         own.refresh_soon()
         process = self.start_server()

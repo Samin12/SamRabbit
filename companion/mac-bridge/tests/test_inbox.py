@@ -665,8 +665,9 @@ class RevisionTest(InboxBase):
         again = self.fresh()
         self.assertEqual(first["revision"], again["revision"], "nothing changed: the same revision")
         self.assertEqual(first["items"], again["items"])
-        with self.fake_t3.lock:
-            self.fake_t3.get_thread("t-running")["planProgress"]["completedSteps"] = 2
+        with self.fake_t3.lock:  # the next step of its task list (only its detail has it)
+            steps = self.fake_t3.details["t-running"]["plans"][0]["steps"]
+            steps[1]["status"], steps[2]["status"] = "completed", "running"
         self.hub.invalidate()
         moved = self.fresh()
         self.assertEqual(first["revision"] + 1, moved["revision"])
@@ -755,8 +756,7 @@ class SeenTest(InboxBase):
         self.assertFalse(any(item["unread"] for item in first["items"]), "the first look marks everything seen")
         # T3: a thread finishes later
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-done")
-            thread["latestTurn"]["completedAt"] = thread["updatedAt"] = "2026-10-08T18:30:00.000Z"
+            self.fake_t3.end_run("t-done", "2026-10-08T18:30:00.000Z", run_id="run-t-done-2")
         self.hub.invalidate()
         # Claude: a session answers later
         path = self.project_dir / (IDS["done"] + ".jsonl")
@@ -804,8 +804,7 @@ class SeenTest(InboxBase):
         self.get_inbox()
         def fail_at(stamp: str) -> None:
             with self.fake_t3.lock:
-                thread = self.fake_t3.get_thread("t-error")
-                thread["latestTurn"]["completedAt"] = thread["updatedAt"] = stamp
+                self.fake_t3.end_run("t-error", stamp, status="failed", run_id="run-" + stamp)
             self.hub.invalidate()
         fail_at("2026-10-08T18:30:00.000Z")
         failed = self.by_id(self.fresh())["t3:t-error"]
@@ -821,25 +820,23 @@ class SeenTest(InboxBase):
         again = self.by_id(self.fresh())["t3:t-error"]
         self.assertEqual(("error", True), (again["status"], again["unread"]))
 
-    def test_a_t3_session_that_fails_after_a_seen_finish_is_news_and_bookkeeping_is_not(self) -> None:
-        # The provider session goes to "error" after a turn that finished and was seen (a crash; T3 found the
-        # session orphaned when it started again): only the session's and the thread's times move, never the turn's.
+    def test_a_t3_thread_that_fails_after_a_seen_finish_is_news_and_bookkeeping_is_not(self) -> None:
+        # A run fails after a turn that finished and was seen (T3 tried again: a wake-up, a queued message): its
+        # failure is news; T3's own bookkeeping (only the thread's time moves) is not.
         self.build_world()
         self.get_inbox()
-        def touch(*, session: Optional[str] = None, thread: Optional[str] = None, **fields: Any) -> None:
+        def fail(at: str, error: str) -> None:
             with self.fake_t3.lock:
-                value = self.fake_t3.get_thread("t-done")
-                value["session"].update(fields)
-                if session:
-                    value["session"]["updatedAt"] = session
-                if thread:
-                    value["updatedAt"] = thread
+                self.fake_t3.end_run("t-done", at, status="failed", run_id="run-" + at, lastError=error)
+            self.hub.invalidate()
+
+        def touch(at: str) -> None:
+            with self.fake_t3.lock:
+                self.fake_t3.get_thread("t-done")["updatedAt"] = at
             self.hub.invalidate()
         done = self.by_id(self.get_inbox())["t3:t-done"]
         self.assertEqual(("done", False), (done["status"], done["unread"]))
-        turn = dict(self.fake_t3.get_thread("t-done")["latestTurn"])
-        touch(status="error", lastError="The provider stopped unexpectedly.", session="2026-10-08T18:30:00.000Z",
-              thread="2026-10-08T18:30:00.000Z")
+        fail("2026-10-08T18:30:00.000Z", "The provider stopped unexpectedly.")
         value = self.fresh()
         failed = self.by_id(value)["t3:t-done"]
         self.assertEqual(("error", "Failed", True, "The provider stopped unexpectedly."),
@@ -849,16 +846,15 @@ class SeenTest(InboxBase):
         self.assertTrue(inbox._needs_you(failed))  # noqa: SLF001
         self.assertEqual(len([item for item in value["items"] if inbox._needs_you(item)]),  # noqa: SLF001
                          value["counts"]["needsYou"])
-        self.assertEqual(turn, self.fake_t3.get_thread("t-done")["latestTurn"], "the turn never moved")
         self.assertEqual((200, {"ok": True}), self.act("t3:t-done", "seen"))
         settled = self.by_id(self.fresh())["t3:t-done"]
         self.assertEqual(("idle", "Failed", False), (settled["status"], settled["statusLabel"], settled["unread"]))
         self.assertFalse(inbox._needs_you(settled))  # noqa: SLF001
-        touch(thread="2026-10-08T19:00:00.000Z")  # T3's own bookkeeping: the thread's time only
+        touch("2026-10-08T19:00:00.000Z")  # T3's own bookkeeping: the thread's time only
         touched = self.by_id(self.fresh())["t3:t-done"]
         self.assertEqual(("idle", False), (touched["status"], touched["unread"]), "bookkeeping is no news")
-        # It fails again, the session's own time ahead of the thread's: news, and seeing it settles it.
-        touch(session="2026-10-08T19:20:00.000Z", lastError="The provider stopped again.")
+        # It fails again: news, and seeing it settles it.
+        fail("2026-10-08T19:20:00.000Z", "The provider stopped again.")
         again = self.by_id(self.fresh())["t3:t-done"]
         self.assertEqual(("error", True), (again["status"], again["unread"]))
         self.assertEqual((200, {"ok": True}), self.act("t3:t-done", "seen"))
@@ -876,8 +872,7 @@ class SeenTest(InboxBase):
         self.assertNotIn("t3:t-error", items, "a seen failure is settled: snoozed, it is shelved like the rest")
         self.assertNotIn("t3:t-done", items)
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-error")
-            thread["latestTurn"]["completedAt"] = thread["updatedAt"] = "2026-10-08T18:30:00.000Z"
+            self.fake_t3.end_run("t-error", "2026-10-08T18:30:00.000Z", status="failed", run_id="run-t-error-2")
         self.hub.invalidate()
         failed = self.by_id(self.fresh()).get("t3:t-error")
         self.assertIsNotNone(failed, "a failure he hasn't seen needs him, snoozed or not")
@@ -892,11 +887,7 @@ class SeenTest(InboxBase):
 class DismissTest(InboxBase):
     def finish_t3(self, thread_id: str, at: str = "2026-10-08T18:30:00.000Z") -> None:
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread(thread_id)
-            thread["session"]["status"] = "ready"
-            thread["planProgress"] = None
-            thread["latestTurn"].update({"state": "completed", "completedAt": at})
-            thread["updatedAt"] = at
+            self.fake_t3.end_run(thread_id, at)
         self.hub.invalidate()
 
     def saved(self) -> Dict[str, Any]:
@@ -906,8 +897,7 @@ class DismissTest(InboxBase):
         self.build_world()
         self.get_inbox()  # the first look: what is there is seen (a seen failure is settled) ...
         with self.fake_t3.lock:  # ... so t-error fails again: news, in Needs you
-            thread = self.fake_t3.get_thread("t-error")
-            thread["latestTurn"]["completedAt"] = thread["updatedAt"] = "2026-10-08T18:20:00.000Z"
+            self.fake_t3.end_run("t-error", "2026-10-08T18:20:00.000Z", status="failed", run_id="run-t-error-2")
         self.hub.invalidate()
         first = self.fresh()
         self.assertTrue(all("dismiss" in item["can"] for item in first["items"]), "every item can be dismissed")
@@ -948,9 +938,9 @@ class DismissTest(InboxBase):
         self.assertEqual((200, True), (status, detail["item"].get("dismissed")), "its own route says it too")
         # A working thread's steps are not news ...
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-running")
-            thread["planProgress"]["completedSteps"] = 2
-            thread["updatedAt"] = "2026-10-08T13:10:00.000Z"
+            steps = self.fake_t3.details["t-running"]["plans"][0]["steps"]
+            steps[1]["status"], steps[2]["status"] = "completed", "running"
+            self.fake_t3.get_thread("t-running")["updatedAt"] = "2026-10-08T13:10:00.000Z"
         self.hub.invalidate()
         self.assertNotIn("t3:t-running", self.by_id(self.fresh()))
         # ... finishing is: it comes back by itself, unread.
@@ -963,11 +953,10 @@ class DismissTest(InboxBase):
         self.assertEqual({"t3:t-error"}, set(self.saved()["dismissed"]), "its dismissal is forgotten")
         # The failed thread comes back when something happens in it (tried again in T3 Code: failed again).
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-error")
-            thread["latestUserMessageAt"] = thread["updatedAt"] = "2026-10-08T18:40:00.000Z"
-            thread["latestTurn"].update({"requestedAt": "2026-10-08T18:40:00.000Z",
-                                         "startedAt": "2026-10-08T18:40:00.000Z",
-                                         "completedAt": "2026-10-08T18:41:00.000Z"})
+            self.fake_t3.end_run("t-error", "2026-10-08T18:41:00.000Z", status="failed", run_id="run-t-error-3",
+                                 latestUserMessageAt="2026-10-08T18:40:00.000Z",
+                                 latestRunRequestedAt="2026-10-08T18:40:00.000Z",
+                                 latestRunStartedAt="2026-10-08T18:40:00.000Z")
         self.hub.invalidate()
         value = self.fresh()
         self.assertIn("t3:t-error", self.by_id(value))
@@ -1239,8 +1228,11 @@ class DismissTest(InboxBase):
 
 
 class T3ActionTest(InboxBase):
-    def dispatched(self, kind: str) -> List[Dict[str, Any]]:
-        return [command for command in self.fake_t3.dispatched if command["type"] == kind]
+    def dispatched(self, kind: str, field: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The commands of type ``kind`` (with ``field``: ``runtime-request.respond`` carries a ``decision`` or
+        ``answers``)."""
+        return [command for command in self.fake_t3.dispatched if command["type"] == kind
+                and (field is None or field in command)]
 
     def test_approve_answer_reply_stop_dispatch_what_t3_expects(self) -> None:
         self.get_inbox()
@@ -1248,15 +1240,15 @@ class T3ActionTest(InboxBase):
         self.assertEqual(200, status, value)
         self.assertEqual({"ok": True, "threadId": "t-approval", "requestId": "req-approve-1", "decision": "accept"},
                          value)
-        [command] = self.dispatched("thread.approval.respond")
+        [command] = self.dispatched("runtime-request.respond", "decision")
         self.assertEqual(("t-approval", "req-approve-1", "accept"),
                          (command["threadId"], command["requestId"], command["decision"]))
         self.assertRegex(command["commandId"], r"^[0-9a-f-]{36}$")
         status, value = self.act("t3:t-approval", "approve", {"requestId": "req-approve-1", "decision": "deny"})
-        self.assertEqual("decline", self.dispatched("thread.approval.respond")[-1]["decision"])
+        self.assertEqual("decline", self.dispatched("runtime-request.respond", "decision")[-1]["decision"])
         status, value = self.act("t3:t-approval", "approve", {"requestId": "req-approve-1",
                                                               "decision": "acceptForSession"})
-        self.assertEqual("acceptForSession", self.dispatched("thread.approval.respond")[-1]["decision"])
+        self.assertEqual("acceptForSession", self.dispatched("runtime-request.respond", "decision")[-1]["decision"])
         status, value = self.act("t3:t-approval", "approve", {"requestId": "req-gone", "decision": "accept"})
         self.assertEqual((409, "t3_request_not_pending"), (status, value["error"]["code"]))
         status, value = self.act("t3:t-approval", "approve", {"requestId": "req-approve-1"})
@@ -1264,7 +1256,7 @@ class T3ActionTest(InboxBase):
         # answer: the option's value, as T3 expects
         status, value = self.act("t3:t-input", "answer", {"requestId": "req-input-1", "answers": {"q1": "SQLite"}})
         self.assertEqual(200, status, value)
-        [command] = self.dispatched("thread.user-input.respond")
+        [command] = self.dispatched("runtime-request.respond", "answers")
         self.assertEqual(("t-input", "req-input-1", {"q1": "sqlite"}),
                          (command["threadId"], command["requestId"], command["answers"]))
         status, value = self.act("t3:t-input", "answer", {"requestId": "req-input-1", "answers": {}})
@@ -1272,20 +1264,20 @@ class T3ActionTest(InboxBase):
         # reply: a turn on the thread (202)
         status, value = self.act("t3:t-done", "reply", {"text": REPLY})
         self.assertEqual((202, {"ok": True, "how": "t3", "threadId": "t-done"}), (status, value))
-        [command] = self.dispatched("thread.turn.start")
-        self.assertEqual(("t-done", REPLY, "full-access"),
-                         (command["threadId"], command["message"]["text"], command["runtimeMode"]))
+        [command] = self.dispatched("message.dispatch")
+        self.assertEqual(("t-done", REPLY, {"type": "start_immediately"}),
+                         (command["threadId"], command["text"], command["dispatchMode"]))
         status, value = self.act("t3:t-done", "reply", {"text": "  "})
         self.assertEqual((400, "invalid_text"), (status, value["error"]["code"]))
-        # stop: interrupt the active turn
+        # stop: the thread's run and what runs under it
         status, value = self.act("t3:t-running", "stop")
         self.assertEqual(200, status, value)
-        [command] = self.dispatched("thread.turn.interrupt")
-        self.assertEqual(("t-running", "turn-active-1"), (command["threadId"], command["turnId"]))
+        [command] = self.dispatched("thread.stop")
+        self.assertEqual("t-running", command["threadId"])
         # nothing to stop: no dispatch
         status, value = self.act("t3:t-done", "stop")
         self.assertEqual((200, False), (status, value["wasWorking"]))
-        self.assertEqual(1, len(self.dispatched("thread.turn.interrupt")))
+        self.assertEqual(1, len(self.dispatched("thread.stop")))
         status, value = self.act("t3:no-such-thread", "reply", {"text": "hi"})
         self.assertEqual(404, status, value)
         self.assert_log_clean(REPLY, "5521")
@@ -1562,11 +1554,10 @@ class NewTaskTest(InboxBase):
         self.assertEqual(("p-site", "Website", "chosen", "codex", "gpt-6.1"),
                          (value["projectId"], value["projectName"], value["placement"], value["agent"],
                           value["model"]))
-        create, turn = self.fake_t3.dispatched[-2:]
-        self.assertEqual(("thread.create", "p-site", "Release prep", {"instanceId": "codex_cli", "model": "gpt-6.1"}),
-                         (create["type"], create["projectId"], create["title"], create["modelSelection"]))
-        self.assertEqual(("thread.turn.start", SECRET_PROMPT, {"instanceId": "codex_cli", "model": "gpt-6.1"}),
-                         (turn["type"], turn["message"]["text"], turn["modelSelection"]))
+        launch = self.fake_t3.launched[-1]
+        self.assertEqual(("p-site", "Release prep", {"instanceId": "codex_cli", "model": "gpt-6.1"}, SECRET_PROMPT),
+                         (launch["projectId"], launch["title"], launch["modelSelection"],
+                          launch["initialMessage"]["text"]))
         items = self.by_id(self.fresh())
         self.assertEqual(("working", "codex"), (items[value["itemId"]]["status"], items[value["itemId"]]["agent"]),
                          "the new task shows under Working at once")
@@ -1575,13 +1566,13 @@ class NewTaskTest(InboxBase):
                                   desktop=True)
         self.assertEqual(202, status, value)
         self.assertEqual({"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
-                         self.fake_t3.dispatched[-2]["modelSelection"])
+                         self.fake_t3.launched[-1]["modelSelection"])
         # Neither: the phone's own path (placement, the project's last model).
         status, value = self.call("POST", "/v1/desktop/inbox/new", {"text": "Tell me a joke"}, desktop=True)
         self.assertEqual(202, status, value)
         self.assertEqual(("p-agent", "orchestration"), (value["projectId"], value["placement"]))
         self.assertEqual({"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
-                         self.fake_t3.dispatched[-2]["modelSelection"])
+                         self.fake_t3.launched[-1]["modelSelection"])
         for body, code in (({"text": "x", "agent": "gemini"}, "invalid_agent"),
                            ({"text": "x", "agent": "codex", "model": "claude-opus-5-5"}, "invalid_model"),
                            ({"text": "x", "model": "bad model!"}, "invalid_model"),
@@ -1646,6 +1637,8 @@ class ProcessesTest(unittest.TestCase):
         self.assertEqual("/System/Applications/Utilities/Terminal.app", processes.app_of(520))
         self.assertEqual("/Applications/T3 Code (Alpha).app", processes.app_of(620),
                          "the codex binary sits inside an app itself: its parents decide")
+        self.assertTrue("/Applications/T3 Code (Nightly).app".endswith(inbox._APP_OWNED),  # noqa: SLF001
+                        "T3 Code's own codex, whichever T3 Code app runs it")
         self.assertEqual("/Applications/iTerm.app", processes.app_of(952), "iTerm's shells hang off iTermServer")
         self.assertIsNone(processes.app_of(710), "tmux has no app")
         self.assertEqual("/Users/test/code/app", processes.cwd(table[520]))

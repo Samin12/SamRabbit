@@ -398,7 +398,7 @@ class ToolTest(RealtimeBase):
         own.attach(self.server)
         own.refresh(force=True)  # the first look: what is there is seen ...
         with self.fake_t3.lock:  # ... so the deploy preview fails again: news, in Needs you
-            self.fake_t3.get_thread("t-error")["session"]["updatedAt"] = "2026-10-08T18:00:00.000Z"
+            self.fake_t3.end_run("t-error", "2026-10-08T18:00:00.000Z", status="failed", run_id="run-t-error-2")
         self.hub.invalidate()
         own.refresh_soon()
         failed = next(item for item in own.refresh(force=True).items if item["id"] == "t3:t-error")
@@ -630,11 +630,8 @@ class SessionTest(RealtimeBase):
         conversation = self.done(turn)["conversationId"]
         self.assertEqual([], self.poll(conversation)["items"])
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-new")
-            thread["hasPendingApprovals"] = True
-            thread["session"] = {"threadId": "t-new", "status": "running", "activeTurnId": "turn-x", "lastError": None}
-            thread["latestTurn"] = {"turnId": "turn-x", "state": "running", "requestedAt": "2026-10-08T13:11:00.000Z"}
-            thread["updatedAt"] = "2026-10-08T13:11:00.000Z"
+            self.fake_t3.start_run("t-new", "2026-10-08T13:11:00.000Z", run_id="turn-x")
+            self.fake_t3.ask_approval("t-new", "req-x", at="2026-10-08T13:11:00.000Z")
         self.hub.invalidate()
         items = self.poll(conversation)["items"]
         self.assertEqual(1, len(items))
@@ -662,12 +659,7 @@ class SessionTest(RealtimeBase):
         first = self.say_turn("hello")
         self.poll(self.done(first)["conversationId"])  # the announcer's baseline
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-running")
-            thread["session"]["status"] = "ready"
-            thread["session"]["activeTurnId"] = None
-            thread["latestTurn"] = {"state": "completed", "completedAt": "2026-10-08T13:10:00.000Z"}
-            thread["planProgress"] = None
-            thread["updatedAt"] = "2026-10-08T13:10:00.000Z"
+            self.fake_t3.end_run("t-running", "2026-10-08T13:10:00.000Z")
         self.hub.invalidate()
         later = self.say_turn("anything new?")  # a new conversation, nobody polled meanwhile
         self.assertEqual([], self.poll(self.done(later)["conversationId"])["items"])
@@ -743,7 +735,7 @@ class HalfwayTest(RealtimeBase):
     Claude; a session that is too old or whose helper died is replaced without a deadlock."""
 
     def creates(self) -> List[Dict[str, Any]]:
-        return [item for item in self.fake_t3.dispatched if item["type"] == "thread.create"]
+        return list(self.fake_t3.launched)
 
     def tools_recorded(self, conversation: str) -> List[str]:
         return [event["tool"] for event in self.events(conversation) if event["type"] == "tool.completed"]
@@ -840,11 +832,8 @@ class HalfwayTest(RealtimeBase):
         conversation = self.done(self.say_turn("hello"))["conversationId"]
         self.poll(conversation)  # the announcer's baseline
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-new")
-            thread["hasPendingApprovals"] = True
-            thread["session"] = {"threadId": "t-new", "status": "running", "activeTurnId": "turn-x", "lastError": None}
-            thread["latestTurn"] = {"turnId": "turn-x", "state": "running", "requestedAt": "2026-10-08T13:11:00.000Z"}
-            thread["updatedAt"] = "2026-10-08T13:11:00.000Z"
+            self.fake_t3.start_run("t-new", "2026-10-08T13:11:00.000Z", run_id="turn-x")
+            self.fake_t3.ask_approval("t-new", "req-x", at="2026-10-08T13:11:00.000Z")
         self.hub.invalidate()
         [item] = self.poll(conversation)["items"]
         self.rt_script({"verbatim": True, "die_after": "words"})
@@ -921,7 +910,7 @@ class PolishTest(RealtimeBase):
                 event["item"]["type"] == "function_call_output"}
 
     def creates(self) -> List[Dict[str, Any]]:
-        return [item for item in self.fake_t3.dispatched if item["type"] == "thread.create"]
+        return list(self.fake_t3.launched)
 
     def test_a_session_that_died_between_turns_is_replaced_without_a_pause(self) -> None:
         self.rt_script({"say": ANSWER, "ms": 200})

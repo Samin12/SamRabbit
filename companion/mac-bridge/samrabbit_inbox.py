@@ -165,11 +165,12 @@ MAX_REGISTRY_FILES = 64
 MAX_SEEN = 4000
 MAX_DISMISSED = 2000
 SCRIPT_KEEP_SECONDS = 120.0
-T3_BUNDLE_ID = "com.t3tools.t3code"  # T3 Code (Alpha): its t3code:// scheme opens only sign-in and settings pages
+T3_BUNDLE_ID = "com.t3tools.t3code"  # every T3 Code app (Alpha, Nightly, ...): t3code:// opens no thread
 TERMINAL_BUNDLE_ID = "com.apple.Terminal"
 CHATGPT_BUNDLE_ID = "com.openai.codex"  # the ChatGPT app is Codex Desktop; it opens codex://threads/<id>
 CODEX_THREAD_URL = "codex://threads/"
-_APP_OWNED = ("/ChatGPT.app", "/T3 Code (Alpha).app")  # apps that run codex for their own threads
+_APP_OWNED = ("/ChatGPT.app",) + tuple("/" + os.path.basename(app) for app in t3.T3_APPS)  # apps that run codex
+# for their own threads
 
 NEEDS_APPROVAL, NEEDS_INPUT, ERROR, DONE, WORKING, IDLE = "needs-approval", "needs-input", "error", "done", \
     "working", "idle"
@@ -2222,7 +2223,7 @@ class InboxService:
         hub = self._t3_hub()
         detail = hub.detail(thread_id, turns=3, fresh=True)
         thread = _dict(detail.get("thread"))
-        pending = t3.pending_requests(thread.get("activities"))
+        pending = t3.pending_requests(thread)
         try:
             snapshot = hub.snapshot(max_age=5.0)
         except t3.T3Error:

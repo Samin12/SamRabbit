@@ -320,41 +320,42 @@ class RouteTest(CaptureBase):
     def test_a_message_to_someone_is_never_started_by_the_classifier(self) -> None:
         self.answers([{"mode": "ok", "output": {"kind": "task", "confidence": 0.97, "title": "Tell Dana the SOW slips",
                                                  "suggestion": "task"}}])
-        before = len(self.fake_t3.dispatched)
+        before = len(self.fake_t3.writes)
         view = self.note("I need to tell Dana the SOW slips to Monday")
         self.assertEqual(("note", "task"), (view["outcome"]["kind"], view["suggestion"]["action"]))
-        self.assertEqual(before, len(self.fake_t3.dispatched), "no agent was started")
+        self.assertEqual(before, len(self.fake_t3.writes), "no agent was started")
         # His tap starts it, and the agent asks him before it acts (it could send the email).
         status, value = self.call("POST", f"/v1/captures/{view['captureId']}/act", {"action": "task"}, token=TOKEN)
         self.assertEqual((200, "task", "approval-required"),
                          (status, value["outcome"]["kind"], value["outcome"]["runtimeMode"]))
-        create, turn = self.fake_t3.dispatched[-2:]
-        self.assertEqual(("approval-required", "approval-required"), (create["runtimeMode"], turn["runtimeMode"]))
-        self.assertEqual("I need to tell Dana the SOW slips to Monday", turn["message"]["text"])
+        launch = self.fake_t3.launched[-1]
+        self.assertEqual("approval-required", launch["runtimeMode"])
+        self.assertEqual("I need to tell Dana the SOW slips to Monday", launch["initialMessage"]["text"])
         self.assertIn("it asks you before it acts", value["say"])
         # A task the classifier starts (no message to anyone) also asks first; an explicit cue is the phone's new task.
         self.answers([{"mode": "ok", "output": {"kind": "task", "confidence": 0.92, "title": "Look into the sync",
                                                  "suggestion": "none"}}])
         self.note("the sync service drops events after a restart, look into it")
-        self.assertEqual("approval-required", self.fake_t3.dispatched[-2]["runtimeMode"])
+        self.assertEqual("approval-required", self.fake_t3.launched[-1]["runtimeMode"])
         self.note("Make a new task to rename the widgets module")
-        self.assertEqual("full-access", self.fake_t3.dispatched[-2]["runtimeMode"], "inherited, as from the phone")
+        self.assertEqual("full-access", self.fake_t3.launched[-1]["runtimeMode"], "inherited, as from the phone")
         self.note("Make a new task to email Dana the release notes")
-        self.assertEqual("approval-required", self.fake_t3.dispatched[-2]["runtimeMode"],
+        self.assertEqual("approval-required", self.fake_t3.launched[-1]["runtimeMode"],
                          "an explicit task that writes to someone asks first")
         self.assertIn("never a task", capture.ROUTER_PROMPT)
         self.assertNotIn("an email to write is a task", capture.ROUTER_PROMPT)
 
     def test_a_task_whose_first_message_failed_is_finished_not_reported_started(self) -> None:
         hub = self.server.mobile.t3
-        real = hub._dispatch  # noqa: SLF001
+        real = hub._write  # noqa: SLF001
 
-        def first_message_fails(command: Dict[str, Any]) -> None:
-            if command.get("type") == "thread.turn.start":
+        def first_message_lost(tag: str, payload: Dict[str, Any], timeout: float) -> Any:
+            if tag == "orchestration.launchThread":  # T3 made the thread, then stopped before its first message
+                real(tag, {key: value for key, value in payload.items() if key != "initialMessage"}, timeout)
                 raise t3.T3Error(503, "t3_unavailable", "T3 Code is busy.", retryable=True)
-            real(command)
+            return real(tag, payload, timeout)
 
-        hub._dispatch = first_message_fails  # noqa: SLF001
+        hub._write = first_message_lost  # noqa: SLF001
         status, value = self.submit("Make a new task to fix the flaky sync test")
         capture_id = value["captureId"]
         self.capture.process(capture_id)
@@ -362,28 +363,29 @@ class RouteTest(CaptureBase):
         thread_id = record["steps"]["task"]["threadId"]
         self.assertEqual(("transcribed", "creating"), (record["state"], record["steps"]["task"]["state"]),
                          "the thread is there, its first message is not: not done")
-        self.assertEqual(["thread.create"], [command["type"] for command in self.fake_t3.dispatched
-                                             if command.get("threadId") == thread_id])
-        hub._dispatch = real  # noqa: SLF001
+        self.assertEqual(["orchestration.launchThread"], [tag for tag, payload in self.fake_t3.writes
+                                                          if payload.get("threadId") == thread_id])
+        hub._write = real  # noqa: SLF001
         self.capture.process(capture_id)
         view = self.capture.view(self.capture.store.get(capture_id))
         self.assertEqual(("done", "task", thread_id), (view["state"], view["outcome"]["kind"],
                                                        view["outcome"]["threadId"]))
-        mine = [command for command in self.fake_t3.dispatched if command.get("threadId") == thread_id]
-        self.assertEqual(["thread.create", "thread.turn.start"], [command["type"] for command in mine],
+        mine = [(tag, payload) for tag, payload in self.fake_t3.writes if payload.get("threadId") == thread_id]
+        self.assertEqual(["orchestration.launchThread", "orchestration.dispatchCommand"], [tag for tag, _ in mine],
                          "the same thread, its first message sent once")
-        self.assertEqual("Make a new task to fix the flaky sync test", mine[-1]["message"]["text"])
+        self.assertEqual(("message.dispatch", "Make a new task to fix the flaky sync test"),
+                         (mine[-1][1]["type"], mine[-1][1]["text"]))
         self.capture.process(capture_id)
-        self.assertEqual(2, len([command for command in self.fake_t3.dispatched
-                                 if command.get("threadId") == thread_id]), "done: nothing more")
+        self.assertEqual(2, len([tag for tag, payload in self.fake_t3.writes
+                                 if payload.get("threadId") == thread_id]), "done: nothing more")
 
     def test_make_a_new_task_starts_t3_with_the_verbatim_transcript(self) -> None:
         heard = "Make a new task to fix the failing unit tests in the sync module"
         view = self.note(heard)
         self.assertEqual(("done", "task"), (view["state"], view["outcome"]["kind"]))
-        create, turn = self.fake_t3.dispatched[-2:]
-        self.assertEqual(("thread.create", "thread.turn.start"), (create["type"], turn["type"]))
-        self.assertEqual(heard, turn["message"]["text"], "the prompt is what he said, word for word")
+        create = self.fake_t3.launched[-1]
+        self.assertEqual([("orchestration.launchThread", create)], self.fake_t3.writes[-1:])
+        self.assertEqual(heard, create["initialMessage"]["text"], "the prompt is what he said, word for word")
         self.assertEqual("Fix the failing unit tests in the sync module", create["title"])
         record = self.capture.store.get(view["captureId"])
         self.assertEqual(create["threadId"], record["steps"]["task"]["threadId"], "the id was saved before dispatch")
@@ -396,7 +398,7 @@ class RouteTest(CaptureBase):
         record = self.capture.store.get(value["captureId"])
         thread_id = str(uuid.uuid4())
         self.capture.process(value["captureId"])  # done once, normally
-        count = len(self.fake_t3.dispatched)
+        count = len(self.fake_t3.writes)
         # A second note as if the bridge stopped right after dispatching: the thread exists, the step says "creating".
         status, value = self.submit("Make a task to update the changelog")
         record = self.capture.store.get(value["captureId"])
@@ -406,9 +408,9 @@ class RouteTest(CaptureBase):
                       plan={"kind": "task", "by": "rule", "confidence": 1.0, "title": "Update the changelog"},
                       steps={"task": {"state": "creating", "threadId": thread_id}})
         self.capture.store.save(record)
-        dispatched = len(self.fake_t3.dispatched)
+        dispatched = len(self.fake_t3.writes)
         self.capture.process(value["captureId"])
-        self.assertEqual(dispatched, len(self.fake_t3.dispatched), "it looked for the thread instead")
+        self.assertEqual(dispatched, len(self.fake_t3.writes), "it looked for the thread instead")
         self.assertEqual(("task", thread_id), (self.capture.view(self.capture.store.get(value["captureId"]))[
             "outcome"]["kind"], self.capture.store.get(value["captureId"])["outcome"]["threadId"]))
         self.assertGreater(dispatched, count)
@@ -463,7 +465,7 @@ class RouteTest(CaptureBase):
         task = self.note("I need to get the Q4 investor update drafted for Friday")
         self.assertEqual("task", task["outcome"]["kind"])
         self.assertEqual("I need to get the Q4 investor update drafted for Friday",
-                         self.fake_t3.dispatched[-1]["message"]["text"])
+                         self.fake_t3.launched[-1]["initialMessage"]["text"])
         low = self.note("lunch with Priya tomorrow around 12:30 probably")
         self.assertEqual(("note", "event", "2026-10-09T12:30:00-04:00"),
                          (low["outcome"]["kind"], low["suggestion"]["action"], low["suggestion"]["startsAt"]))
@@ -601,11 +603,11 @@ class ActTest(CaptureBase):
         self.assertEqual((200, "task", "event"), (status, value["outcome"]["kind"], value["outcome"]["undone"]))
         self.assertEqual("GOOGLECALENDAR_DELETE_EVENT", self.composio_calls()[-1]["slug"],
                          "the event it made is removed first")
-        self.assertEqual("Remind me to send the invoice at 4 pm", self.fake_t3.dispatched[-1]["message"]["text"])
-        dispatched = len(self.fake_t3.dispatched)
+        self.assertEqual("Remind me to send the invoice at 4 pm", self.fake_t3.launched[-1]["initialMessage"]["text"])
+        dispatched = len(self.fake_t3.writes)
         again = self.call("POST", f"/v1/mobile/captures/{capture_id}/act", {"action": "task"}, token=self.phone)
         self.assertEqual(200, again[0])
-        self.assertEqual(dispatched, len(self.fake_t3.dispatched), "a second tap starts nothing new")
+        self.assertEqual(dispatched, len(self.fake_t3.writes), "a second tap starts nothing new")
         status, value = self.call("POST", f"/v1/captures/{capture_id}/act", {"action": "undo"}, token=TOKEN)
         self.assertEqual((409, "cannot_undo"), (status, value["error"]["code"]))
         status, value = self.call("POST", f"/v1/captures/{capture_id}/act", {"action": "journal"}, token=TOKEN)
@@ -675,7 +677,7 @@ class ActTest(CaptureBase):
         self.assertEqual("the sync store migration needs a test", detail["messages"][0]["text"])
         status, value = self.call("POST", f"/v1/mobile/inbox/items/{item_id}/act", {}, token=self.phone)
         self.assertEqual((200, "task"), (status, value["capture"]["outcome"]["kind"]))
-        self.assertEqual("the sync store migration needs a test", self.fake_t3.dispatched[-1]["message"]["text"])
+        self.assertEqual("the sync store migration needs a test", self.fake_t3.launched[-1]["initialMessage"]["text"])
         status, value = self.call("GET", "/v1/desktop/inbox", desktop=True)
         self.assertNotIn(item_id, [entry["id"] for entry in value["items"]], "done: it left the inbox")
         other = self.note("call the landlord")

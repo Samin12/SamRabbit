@@ -677,6 +677,8 @@ class PureFunctionTest(unittest.TestCase):
                 {"name": "Notion Calendar"}, {"name": "Notion"}, {"name": "‎WhatsApp"}]
         self.assertEqual("Google Chrome", mac._best_app("chrome", apps)["name"])  # noqa: SLF001
         self.assertEqual("T3 Code (Alpha)", mac._best_app("T3", apps)["name"])  # noqa: SLF001
+        nightly = [app for app in apps if app["name"] != "T3 Code (Alpha)"] + [{"name": "T3 Code (Nightly)"}]
+        self.assertEqual("T3 Code (Nightly)", mac._best_app("t3 code", nightly)["name"])  # noqa: SLF001
         self.assertEqual("Notion", mac._best_app("notion", apps)["name"])  # noqa: SLF001
         self.assertEqual("‎WhatsApp", mac._best_app("whatsapp", apps)["name"])  # noqa: SLF001
         self.assertEqual("Google Chrome", mac._best_app("com.google.chrome", apps)["name"])  # noqa: SLF001

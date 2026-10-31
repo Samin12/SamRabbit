@@ -56,8 +56,11 @@ class PhoneInboxBase(InboxBase):
         return self.call("POST", f"/v1/mobile/inbox/items/{item_id}/{action}", body if body is not None else {},
                          token=self.phone)
 
-    def dispatched(self, kind: str) -> List[Dict[str, Any]]:
-        return [command for command in self.fake_t3.dispatched if command["type"] == kind]
+    def dispatched(self, kind: str, field: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The commands of type ``kind`` (with ``field``: ``runtime-request.respond`` carries a ``decision`` or
+        ``answers``)."""
+        return [command for command in self.fake_t3.dispatched if command["type"] == kind
+                and (field is None or field in command)]
 
 
 # ====================================================================== auth
@@ -215,8 +218,7 @@ class PhoneSeenTest(PhoneInboxBase):
         self.build_world()
         self.get_inbox()  # the first look: everything there is seen
         with self.fake_t3.lock:
-            thread = self.fake_t3.get_thread("t-done")
-            thread["latestTurn"]["completedAt"] = thread["updatedAt"] = "2026-10-08T18:30:00.000Z"
+            self.fake_t3.end_run("t-done", "2026-10-08T18:30:00.000Z", run_id="run-t-done-2")
         self.hub.invalidate()
         path = self.project_dir / (IDS["done"] + ".jsonl")
         with open(path, "a") as handle:
@@ -250,8 +252,7 @@ class PhoneDismissTest(PhoneInboxBase):
         self.build_world()
         self.get_inbox()  # the first look: what is there is seen (a seen failure settles) ...
         with self.fake_t3.lock:  # ... so the deploy preview fails again: news, in Needs you
-            thread = self.fake_t3.get_thread("t-error")
-            thread["latestTurn"]["completedAt"] = thread["updatedAt"] = "2026-10-08T18:20:00.000Z"
+            self.fake_t3.end_run("t-error", "2026-10-08T18:20:00.000Z", status="failed", run_id="run-t-error-2")
         self.hub.invalidate()
         dock = self.fresh()
         start = self.phone_inbox()
@@ -350,22 +351,22 @@ class PhoneT3ActionTest(PhoneInboxBase):
         status, value = self.phone_act("t3:t-approval", "approve", {"requestId": "req-approve-1", "decision": "accept"})
         self.assertEqual((200, {"ok": True, "threadId": "t-approval", "requestId": "req-approve-1",
                                 "decision": "accept"}), (status, value))
-        [command] = self.dispatched("thread.approval.respond")
+        [command] = self.dispatched("runtime-request.respond", "decision")
         self.assertEqual(("t-approval", "req-approve-1", "accept"),
                          (command["threadId"], command["requestId"], command["decision"]))
         status, value = self.phone_act("t3:t-input", "answer",
                                        {"requestId": "req-input-1", "answers": {"q1": "SQLite"}})
         self.assertEqual(200, status, value)
-        [command] = self.dispatched("thread.user-input.respond")
+        [command] = self.dispatched("runtime-request.respond", "answers")
         self.assertEqual(("t-input", {"q1": "sqlite"}), (command["threadId"], command["answers"]))
         status, value = self.phone_act("t3:t-done", "reply", {"text": REPLY})
         self.assertEqual((202, {"ok": True, "how": "t3", "threadId": "t-done"}), (status, value))
-        [command] = self.dispatched("thread.turn.start")
-        self.assertEqual(("t-done", REPLY), (command["threadId"], command["message"]["text"]))
+        [command] = self.dispatched("message.dispatch")
+        self.assertEqual(("t-done", REPLY), (command["threadId"], command["text"]))
         status, value = self.phone_act("t3:t-running", "stop")
         self.assertEqual(200, status, value)
-        [command] = self.dispatched("thread.turn.interrupt")
-        self.assertEqual(("t-running", "turn-active-1"), (command["threadId"], command["turnId"]))
+        [command] = self.dispatched("thread.stop")
+        self.assertEqual("t-running", command["threadId"])
         status, value = self.phone_act("t3:t-approval", "approve", {"requestId": "req-approve-1"})
         self.assertEqual((400, "invalid_decision"), (status, value["error"]["code"]))
         # Where a new task can go, and a new one.
@@ -378,10 +379,9 @@ class PhoneT3ActionTest(PhoneInboxBase):
         self.assertEqual(202, status, value)
         self.assertEqual(("t3:" + value["threadId"], "p-site", "codex", "gpt-6.1"),
                          (value["itemId"], value["projectId"], value["agent"], value["model"]))
-        create, turn = self.fake_t3.dispatched[-2:]
-        self.assertEqual(("thread.create", {"instanceId": "codex_cli", "model": "gpt-6.1"}),
-                         (create["type"], create["modelSelection"]))
-        self.assertEqual(("thread.turn.start", SECRET_PROMPT), (turn["type"], turn["message"]["text"]))
+        launch = self.fake_t3.launched[-1]
+        self.assertEqual(({"instanceId": "codex_cli", "model": "gpt-6.1"}, SECRET_PROMPT),
+                         (launch["modelSelection"], launch["initialMessage"]["text"]))
         self.assertEqual("working", self.by_id(self.phone_inbox())[value["itemId"]]["status"],
                          "the new task shows under Working at once")
         # Opening is the Mac's: nothing comes up there because of the phone.

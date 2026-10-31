@@ -1011,8 +1011,9 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
                 briefing_service: Any = None) -> BridgeServer:
     """Conversation sync runs only with a ``sync_dir`` (the command line passes the default one). ``cli`` is a
     path, ``auto`` or ``dry-run``; only the installed copy uses the real CLI without a path (``cli_for``). T3 for the
-    mobile API: the installed copy pairs with T3 Code itself; any other copy (a checkout, a test, a copy in a temp
-    HOME) answers ``t3_dev_copy`` and never reaches T3 unless given ``t3_url``, and even then pairs only through an
+    mobile API: the installed copy pairs with T3 Code itself and follows it to whatever port it runs on (no
+    ``t3_url``: ``samrabbit_t3.make_hub(None)``); any other copy (a checkout, a test, a copy in a temp HOME) answers
+    ``t3_dev_copy`` and never reaches T3 unless given ``t3_url``, and even then pairs only through an
     explicit ``t3_cli`` path (never the T3 Code app's own CLI); it is ``calendar_dev_copy`` unless given ``composio``.
     ``transcribe_helper``: the speech-to-text helper for ``/v1/mobile/transcribe`` (default: ``samrabbit-transcribe``
     next to this script, which install.sh builds). The watch's assistant (``samrabbit_assistant.make_service``): a dev
@@ -1032,7 +1033,7 @@ def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, token_fil
         calendar_writer = gcal.make_writer_or_unavailable(composio, calendar_id=calendar_id)
     if mobile_service is None and mobile is not None:
         if t3_hub is None and (t3_url or installed_copy):
-            t3_hub = t3.make_hub(t3_url or t3.DEFAULT_SERVER_URL, token_file=t3_token_file or t3.DEFAULT_TOKEN_FILE,
+            t3_hub = t3.make_hub(t3_url or None, token_file=t3_token_file or t3.DEFAULT_TOKEN_FILE,
                                  cli=t3_cli_for(t3_cli, installed=installed_copy))
         helper = None
         if assistant is not None:
@@ -1116,8 +1117,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--mobile-devices-file", default=os.environ.get("SAMRABBIT_MOBILE_DEVICES_FILE") or None,
                         help="paired iPhones and watches (token hashes; default ~/.config/samrabbit/mobile-devices.json)")
     parser.add_argument("--t3-url", default=os.environ.get("SAMRABBIT_T3_URL") or None,
-                        help="T3 Code server for the mobile API (default http://127.0.0.1:3773 for the installed "
-                             "copy; a copy run from a checkout talks to T3 only when given this)")
+                        help="T3 Code server for the mobile API (default for the installed copy: the port T3 "
+                             "Code writes to ~/.t3/userdata/server-runtime.json, else http://127.0.0.1:3773; a copy "
+                             "run from a checkout talks to T3 only when given this)")
     parser.add_argument("--t3-cli", default=os.environ.get("SAMRABBIT_T3_CLI") or None,
                         help="the T3 CLI used to pair: 'auto' (inside the T3 Code app; the installed copy only) or a "
                              "path (a copy run from a checkout pairs only through an explicit path)")

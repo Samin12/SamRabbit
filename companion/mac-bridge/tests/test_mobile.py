@@ -582,7 +582,7 @@ class SummaryTest(MobileBase):
         self.assertEqual(1, self.fake_t3.count("GET /api/orchestration/shell"), "T3 cached for 10 s")
         self.assertEqual(1, len(self.composio_calls()), "calendar cached for 120 s")
         self.clock.advance(2)  # 11 s after the first load
-        self.fake_t3.get_thread("t-input")["hasPendingUserInput"] = False
+        self.fake_t3.get_thread("t-input")["pendingRuntimeRequest"] = None  # answered
         value = self.call("GET", "/v1/mobile/summary", token=phone)[1]
         self.assertEqual(2, self.fake_t3.count("GET /api/orchestration/shell"))
         self.assertEqual(1, value["t3"]["needsYou"])
@@ -760,14 +760,16 @@ class T3RoutesTest(MobileBase):
                                   token=self.phone)
         self.assertEqual((200, False), (status, value["wasWorking"]))
         command = self.fake_t3.dispatched[-1]
-        self.assertEqual(("thread.turn.start", "t-done", "Thanks, also check the 7781", [], "full-access", "default"),
-                         (command["type"], command["threadId"], command["message"]["text"],
-                          command["message"]["attachments"], command["runtimeMode"], command["interactionMode"]))
-        self.assertEqual("user", command["message"]["role"])
+        self.assertEqual(("message.dispatch", "t-done", "Thanks, also check the 7781", [], "user", "mobile"),
+                         (command["type"], command["threadId"], command["text"], command["attachments"],
+                          command["createdBy"], command["creationSource"]))
+        self.assertEqual(({"type": "start_immediately"}, "auto"), (command["dispatchMode"], command["deliveryIntent"]),
+                         "T3 starts a turn, or steers / queues behind the running one itself")
+        self.assertRegex(command["messageId"], r"^[0-9a-f-]{36}$")
         status, value = self.call("POST", "/v1/mobile/t3/threads/t-approval/respond", {"decision": "approve"},
                                   token=self.phone)
         self.assertEqual(200, status, value)
-        self.assertEqual({"type": "thread.approval.respond", "threadId": "t-approval", "requestId": "req-approve-1",
+        self.assertEqual({"type": "runtime-request.respond", "threadId": "t-approval", "requestId": "req-approve-1",
                           "decision": "accept"},
                          {key: self.fake_t3.dispatched[-1][key] for key in ("type", "threadId", "requestId", "decision")})
         self.call("POST", "/v1/mobile/t3/threads/t-approval/respond", {"decision": "deny"}, token=self.phone)
@@ -775,7 +777,7 @@ class T3RoutesTest(MobileBase):
         status, value = self.call("POST", "/v1/mobile/t3/threads/t-input/respond", {"answer": "postgres"},
                                   token=self.phone)
         self.assertEqual(200, status, value)
-        self.assertEqual(("thread.user-input.respond", "req-input-1", {"q1": "Postgres"}),
+        self.assertEqual(("runtime-request.respond", "req-input-1", {"q1": "Postgres"}),
                          (self.fake_t3.dispatched[-1]["type"], self.fake_t3.dispatched[-1]["requestId"],
                           self.fake_t3.dispatched[-1]["answers"]))
         self.call("POST", "/v1/mobile/t3/threads/t-input/respond", {"answer": "SQLite"}, token=self.phone)
@@ -788,14 +790,13 @@ class T3RoutesTest(MobileBase):
         self.assertEqual((409, "t3_request_not_pending"), (status, value["error"]["code"]))
         status, value = self.call("POST", "/v1/mobile/t3/threads/t-running/stop", token=self.phone)
         self.assertEqual((200, True), (status, value["wasWorking"]))
-        self.assertEqual({"type": "thread.turn.interrupt", "threadId": "t-running", "turnId": "turn-active-1"},
-                         {key: self.fake_t3.dispatched[-1].get(key) for key in ("type", "threadId", "turnId")})
+        self.assertEqual({"type": "thread.stop", "threadId": "t-running"},
+                         {key: self.fake_t3.dispatched[-1].get(key) for key in ("type", "threadId")})
         count = len(self.fake_t3.dispatched)
         status, value = self.call("POST", "/v1/mobile/t3/threads/t-done/stop", {}, token=self.phone)
         self.assertEqual((200, False, count), (status, value["wasWorking"], len(self.fake_t3.dispatched)))
         for command in self.fake_t3.dispatched:
             self.assertRegex(command["commandId"], r"^[0-9a-f-]{36}$")
-            self.assertTrue(command["createdAt"].endswith("Z"))
         self.assert_log_clean("7781", "postgres", "Postgres", self.phone)
 
     def test_new_task_placement_and_payloads(self) -> None:
@@ -809,15 +810,16 @@ class T3RoutesTest(MobileBase):
                 self.assertEqual(200, status, value)
                 self.assertEqual((project, reason), (value["projectId"], value["placement"]))
                 self.assertTrue({"threadId", "title", "projectName"} <= set(value))
-                create, turn = self.fake_t3.dispatched[-2:]
-                self.assertEqual(("thread.create", value["threadId"], project, value["title"], None, None),
-                                 (create["type"], create["threadId"], create["projectId"], create["title"],
-                                  create["branch"], create["worktreePath"]))
-                self.assertEqual(("thread.turn.start", value["threadId"], text, value["title"]),
-                                 (turn["type"], turn["threadId"], turn["message"]["text"], turn["titleSeed"]))
-                self.assertEqual(create["modelSelection"], turn["modelSelection"])
+                launch = self.fake_t3.launched[-1]
+                self.assertEqual((value["threadId"], project, value["title"], True, {"type": "root"}, "mobile"),
+                                 (launch["threadId"], launch["projectId"], launch["title"], launch["generateTitle"],
+                                  launch["workspaceStrategy"], launch["creationSource"]))
+                self.assertEqual((text, []), (launch["initialMessage"]["text"],
+                                              launch["initialMessage"]["attachments"]))
+                self.assertRegex(launch["commandId"], r"^[0-9a-f-]{36}$")
+        self.assertEqual([], self.fake_t3.dispatched, "one launch per task, no separate dispatches")
         self.assertEqual({"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
-                         self.fake_t3.dispatched[-2]["modelSelection"], "the project's most recent thread's model")
+                         self.fake_t3.launched[-1]["modelSelection"], "the project's most recent thread's model")
         status, value = self.call("POST", "/v1/mobile/t3/threads", {"text": "Look at it", "projectId": "p-site"},
                                   token=self.phone)
         self.assertEqual(("p-site", "chosen", "Website"), (value["projectId"], value["placement"], value["projectName"]))
@@ -835,9 +837,9 @@ class T3RoutesTest(MobileBase):
         self.assertEqual({"projectId", "name", "orchestration"}, set(projects["projects"][0]))
 
     def test_approve_and_deny_pick_the_offered_choices(self) -> None:
-        activity = self.fake_t3.details["t-approval"]["activities"][-1]
-        activity["payload"]["options"] = [{"decision": "acceptForSession", "label": "Allow for this session"},
-                                          {"decision": "cancel", "label": "Cancel"}]
+        item = self.fake_t3.details["t-approval"]["turnItems"][-1]
+        item["options"] = [{"decision": "acceptForSession", "label": "Allow for this session"},
+                           {"decision": "cancel", "label": "Cancel"}]
         self.call("POST", "/v1/mobile/t3/threads/t-approval/respond", {"decision": "approve"}, token=self.phone)
         self.assertEqual("acceptForSession", self.fake_t3.dispatched[-1]["decision"])
         self.call("POST", "/v1/mobile/t3/threads/t-approval/respond", {"decision": "deny"}, token=self.phone)
@@ -985,19 +987,15 @@ class T3RoutesTest(MobileBase):
         self.threads()
         self.assertEqual(reads, self.fake_t3.count("GET /api/orchestration/threads/"), "read once, then cached")
         # A thread that starts needing you later is read on the next list.
-        thread = self.fake_t3.get_thread("t-done")
-        thread["hasPendingApprovals"] = True
-        thread["updatedAt"] = "2026-10-08T13:00:00.000Z"
-        self.fake_t3.details["t-done"] = {"messages": [], "activities": [
-            {"id": "x", "kind": "approval.requested", "createdAt": "2026-10-08T13:00:00.000Z",
-             "payload": {"requestId": "req-late", "requestKind": "file-change", "detail": "Edit README.md"}}]}
+        self.fake_t3.ask_approval("t-done", "req-late", kind="file-change", prompt="Edit README.md",
+                                  at="2026-10-08T13:00:00.000Z")
         self.clock.advance(4)
         item = next(entry for entry in self.threads() if entry["threadId"] == "t-done")
         self.assertEqual(("needs_approval", "req-late", "Edit README.md"),
                          (item["status"], item["pending"]["requestId"], item["pending"]["text"]))
 
     def test_dictated_answers_pick_options_by_position(self) -> None:
-        question = self.fake_t3.details["t-input"]["activities"][0]["payload"]["questions"][0]
+        question = self.fake_t3.details["t-input"]["turnItems"][0]["questions"][0]
         question["allowCustomAnswer"] = True
         for said, expected in (("the first one", "sqlite"), ("Second option.", "Postgres"), ("2", "Postgres"),
                                ("the third one", "the third one")):
