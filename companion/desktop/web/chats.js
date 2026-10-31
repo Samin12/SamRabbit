@@ -1,7 +1,7 @@
 // Chats: every SamRabbit conversation (R1, Watch, iPhone, Mac voice) live, as it happens (CONTRACTS-WAVE3 hop 3).
 // The conversation list and the timeline of the selected one; the shell (app.js) shows it as the Chats view.
 
-import { ApiError, SyncStream, api, pageHasMore } from './api.js';
+import { ApiError, SyncStream, api, desktop, pageHasMore } from './api.js';
 import { tickTimers } from './cards.js';
 import { h } from './dom.js';
 import { clip, dayLabel, plural, relativeTime, shortWhen, stamp, toMs } from './format.js';
@@ -13,7 +13,6 @@ import { TimelineView } from './timeline.js';
 import { closeOverlay, copyText, openExternal, overlayOpen, reportDragExclusions, showOverlay, toast } from './ui.js';
 
 const PAGE = 100;
-const T3_URL = 'http://127.0.0.1:3773/';
 const FOLLOW_IDLE_MS = 90 * 1000;
 const RETRY_MS = [2000, 4000, 8000, 15000];
 
@@ -641,10 +640,15 @@ function openArtifact(item) {
 
 // ---------------------------------------------------------------------------- actions
 
-function openT3(item) {
-  const env = item && item.environmentId;
+// T3 Code's port is the bridge's to know (it moves, and another app can hold the old one), so the bridge brings the
+// T3 Code app forward itself: the inbox's "open" action on that thread (any T3 Code app; it opens no thread page).
+async function openT3(item) {
   const thread = item && item.threadId;
-  openExternal(env && thread ? `${T3_URL}${encodeURIComponent(env)}/${encodeURIComponent(thread)}` : T3_URL);
+  try {
+    await desktop.act(`t3:${thread || 'app'}`, 'open');
+  } catch {
+    toast('Could not open T3 Code');
+  }
 }
 
 async function copyHtml(item, button) {
