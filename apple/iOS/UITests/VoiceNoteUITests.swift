@@ -303,12 +303,21 @@ final class VoiceNoteUITests: XCTestCase {
     // MARK: - Helpers
 
     private func launch(voice: String, extra: [String] = []) throws {
-        app.launchArguments = ["-SamRabbitVoiceFixture", voice, "-SamRabbitOpenLinks", "off"] + extra
+        var base = ["-SamRabbitVoiceFixture", voice, "-SamRabbitOpenLinks", "off"]
         if ProcessInfo.processInfo.environment["SAMRABBIT_ANIMATED"] != "1" {
-            app.launchArguments += ["-SamRabbitStillOrb", "YES"]
+            base += ["-SamRabbitStillOrb", "YES"]
         }
+        // The intent opens the recorder at launch, over Home and over the pairing sheet: pair first with a plain
+        // launch (an unpaired app, or SAMRABBIT_FAKE_PAIR=1), then launch again with the intent.
+        if extra.contains("-SamRabbitIntent") {
+            app.launchArguments = base
+            app.launch()
+            try pairIfNeeded()
+            app.terminate()
+        }
+        app.launchArguments = base + extra
         app.launch()
-        try pairIfNeeded()
+        if !extra.contains("-SamRabbitIntent") { try pairIfNeeded() }
     }
 
     /// Pairs with the fake bridge when the app isn't paired (or `SAMRABBIT_FAKE_PAIR=1`).
