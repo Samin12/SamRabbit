@@ -2,6 +2,10 @@
 
 The bearer token is sealed by ``ConnectionCredentialEnvelopes`` (Keystore on
 the device) and stored only as an envelope; plaintext never reaches SQLite.
+The envelope also carries the T3 ``environmentId`` the token belongs to
+(``{"token", "environmentId"}``), so the token and the only server it may be
+sent to are kept together; records paired before that have no id until the
+first successful contact backfills it (no schema change).
 """
 
 from __future__ import annotations
@@ -140,6 +144,24 @@ class T3Repository:
                 (_HEALTH_TO_CONNECTION[state], detail, now, connection_id),
             )
             connection.commit()
+
+    def set_envelope(self, connection_id: str, envelope: str) -> None:
+        with self._database.connect() as connection:
+            connection.execute(
+                "UPDATE connection_credential_envelopes SET envelope = ?, updated_at = ? WHERE connection_id = ?",
+                (envelope, _now(), connection_id),
+            )
+            connection.commit()
+
+    def set_server_url(self, connection_id: str, server_url: str) -> T3ConnectionRecord | None:
+        """Point the connection at the address T3 moved to (same environment, new port)."""
+        with self._database.connect() as connection:
+            connection.execute(
+                "UPDATE t3_connections SET server_url = ?, updated_at = ? WHERE connection_id = ?",
+                (server_url, _now(), connection_id),
+            )
+            connection.commit()
+        return self.get()
 
     def mark_synced(self, connection_id: str, synced_at: str) -> None:
         with self._database.connect() as connection:

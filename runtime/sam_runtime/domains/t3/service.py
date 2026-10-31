@@ -2,7 +2,29 @@
 
 One T3 server per R1. The runtime keeps an in-memory snapshot of the T3
 shell (refreshed by ``T3SyncWorker``) so device routes and voice tools answer
-instantly; thread details are fetched on demand with a short cache.
+instantly; thread details are fetched on demand with a short cache. T3 speaks
+orchestration protocol 2 (see ``client.py``); the views this service returns to
+the R1 app and the voice tools keep their protocol-1 shapes.
+
+Which server gets the token. Pairing stores T3's ``environmentId`` (from the
+unauthenticated ``/.well-known/t3/environment``) sealed with the token. Before
+the token goes to an address, its descriptor must be T3 Code (protocol 2) with
+that same ``environmentId``; the check is redone after any connection failure
+and at least every ``VERIFY_TTL`` seconds. A record paired before ids were kept
+("legacy") accepts a T3-looking descriptor at its own saved address and stores
+that id after the first call the token works for.
+
+T3 moving ports. T3 picks another port when its own is taken (another app on
+3773 put it on 3774) and may move again on restart. When the saved address
+refuses connections, or something other than our T3 answers there, the service
+probes the same host's nearby ports (``nearby_ports``: 3773-3779 and the saved
+port +-3, at most 10, nearest first; 1.5 s each, no token) for a descriptor with
+the stored ``environmentId`` and switches the saved address to it. A timeout
+(Mac asleep or off the network) never probes. Probes run at most every 30 s,
+backing off to 5 min while nothing is found. A legacy record switches only when
+exactly one protocol-2 T3 descriptor answers in that range, its label equals
+the label seen at pairing (when one was stored), and ``/api/auth/session``
+there says the token is authenticated; the id is then stored.
 """
 
 from __future__ import annotations
@@ -21,12 +43,16 @@ from sam_runtime.security.credentials import ConnectionCredentialEnvelopes
 from sam_runtime.storage.announcements import AnnouncementRepository
 
 from .client import (
+    MISMATCH,
+    NOT_T3,
+    REFUSED,
     T3Endpoint,
     T3Error,
     T3HttpClient,
     T3RequestError,
     T3Unauthorized,
     T3Unavailable,
+    looks_like_t3,
     normalize_pairing_code,
     parse_server_url,
 )
@@ -56,18 +82,28 @@ from .status import (
     activity_time,
     condense,
     counts,
+    holds_completion,
     last_assistant_text,
+    latest_assistant_preview,
+    latest_run_id,
+    listed,
+    missing_request_items,
     order_key,
     parse_time,
     pending_requests,
+    plan_phase,
+    projection_of,
     project_titles,
+    run_items,
+    run_live,
     seen_marker,
+    shell_from_projection,
     summarize,
 )
 from .transitions import ERROR_EVENT, FINISHED, NEEDS_APPROVAL_EVENT, NEEDS_INPUT_EVENT, T3TransitionTracker, Transition
 
 
-DEFAULT_SERVER_URL = "http://192.168.1.183:3773"
+DEFAULT_SERVER_URL = "http://192.168.1.183:3774"
 REAUTH_DETAIL = "T3 Code no longer accepts this R1. Pair again from Management > Connections."
 EXPIRED_DETAIL = "T3 access expired. Pair again from Management > Connections."
 MAX_MESSAGE_CHARS = 6000
@@ -77,6 +113,13 @@ _DETAIL_TTL = 1.5
 _PERSIST_SYNC_EVERY = 60.0
 _FAIL_FAST_SECONDS = 5.0
 _TURN_START_GRACE = 45.0
+VERIFY_TTL = 60.0
+PROBE_TIMEOUT = 1.5
+PROBE_MIN_INTERVAL = 30.0
+PROBE_MAX_INTERVAL = 300.0
+_PROBE_BASE_PORTS = range(3773, 3780)
+_PROBE_SPREAD = 3
+_PROBE_MAX = 10
 _APPROVAL_PHRASES = {
     "command": "wants approval to run a command",
     "file-change": "wants approval to edit files",
@@ -86,6 +129,14 @@ _APPROVAL_PHRASES = {
 }
 
 ClientFactory = Callable[[T3Endpoint, "str | None"], T3HttpClient]
+PortsFor = Callable[[int], "list[int]"]
+
+
+def nearby_ports(port: int) -> list[int]:
+    """Ports T3 may have moved to from ``port``, nearest first (the saved port itself excluded)."""
+    candidates = set(_PROBE_BASE_PORTS) | set(range(port - _PROBE_SPREAD, port + _PROBE_SPREAD + 1))
+    ordered = sorted((item for item in candidates if 0 < item < 65536 and item != port), key=lambda item: (abs(item - port), item))
+    return ordered[:_PROBE_MAX]
 
 
 class T3NotConnected(T3Error):
@@ -144,6 +195,7 @@ class T3Service:
         resolver: Callable[[str], tuple[str, ...]] | None = None,
         commands: T3CommandBuilder | None = None,
         clock: Callable[[], datetime] = _utcnow,
+        probe_ports: PortsFor = nearby_ports,
     ) -> None:
         self._repository = repository
         self._envelopes = envelopes
@@ -152,9 +204,11 @@ class T3Service:
         self._resolver = resolver
         self._commands = commands or T3CommandBuilder()
         self._clock = clock
+        self._probe_ports = probe_ports
         self._log = runtime_logger()
         self._lock = threading.RLock()
         self._sync_lock = threading.Lock()
+        self._probe_lock = threading.Lock()
         self._wake: Callable[[], None] = lambda: None
         self._loaded = False
         self._record: T3ConnectionRecord | None = None
@@ -172,11 +226,23 @@ class T3Service:
         self._last_sync_at: str | None = None
         self._last_sync_persisted = 0.0
         self._tracker = T3TransitionTracker()
-        self._detail_cache: dict[tuple[str, int], tuple[float, dict[str, object]]] = {}
+        self._detail_cache: dict[tuple[str, bool], tuple[float, dict[str, object]]] = {}
         self._down_until = 0.0
-        # thread id -> (monotonic time, latest turn id before) for turns this R1 just
-        # requested; T3 still reports the previous turn until the provider starts.
+        # thread id -> (monotonic time, latest run id before) for runs this R1 just
+        # requested; T3 still reports the previous run until the new one is queued.
         self._turn_requests: dict[str, tuple[float, str | None]] = {}
+        self._reset_identity()
+
+    def _reset_identity(self) -> None:
+        # The environment the token belongs to (None: legacy record, not backfilled yet).
+        self._environment_id: str | None = None
+        # (server url, monotonic time) of the last descriptor check that allowed the token there.
+        self._verified: tuple[str, float] | None = None
+        self._capabilities: dict[str, object] = {}
+        # A legacy record's environment id, stored after the token first works there.
+        self._backfill: str | None = None
+        self._probe_after = 0.0
+        self._probe_interval = PROBE_MIN_INTERVAL
 
     # ------------------------------------------------------------------ state
     def set_wake(self, wake: Callable[[], None]) -> None:
@@ -228,9 +294,9 @@ class T3Service:
     def activity_level(self) -> str:
         """Poll cadence tier from the last shell (see ``status.activity_level``).
 
-        A turn this R1 just requested counts as active until it shows up (or its grace ends),
+        A run this R1 just requested counts as active until it shows up (or its grace ends),
         so a new thread or message from the R1 is followed at the fast cadence even before T3
-        reports the session as starting.
+        reports the run as queued.
         """
         with self._lock:
             threads = dict(self._threads)
@@ -291,15 +357,12 @@ class T3Service:
         raw_url = str(server_url or "").strip() or link_url or DEFAULT_SERVER_URL
         endpoint = parse_server_url(raw_url, **({"resolver": self._resolver} if self._resolver else {}))
         anonymous = self._client_factory(endpoint, None)
-        environment_label: str | None = None
-        try:
-            descriptor = anonymous.descriptor()
-            label = descriptor.get("label")
-            environment_label = str(label).strip()[:80] if isinstance(label, str) and label.strip() else None
-        except T3Unavailable:
-            raise
-        except T3Error:
-            environment_label = None
+        descriptor = anonymous.descriptor()
+        if not looks_like_t3(descriptor):
+            raise T3Unavailable("That T3 Code is too old for this R1. Update T3 Code on the Mac.", NOT_T3)
+        environment_id = str(descriptor["environmentId"]).strip()
+        label = descriptor.get("label")
+        environment_label = str(label).strip()[:80] if isinstance(label, str) and label.strip() else None
         exchanged = anonymous.exchange_pairing_code(code)
         token = str(exchanged["access_token"])
         authed = self._client_factory(endpoint, token)
@@ -317,7 +380,7 @@ class T3Service:
             expires_at = _iso(self._clock() + timedelta(seconds=float(exchanged["expires_in"])))
         shell = authed.shell()
         connection_id = str(uuid4())
-        envelope = self._envelopes.seal(connection_id, json.dumps({"token": token}, separators=(",", ":")))
+        envelope = self._envelopes.seal(connection_id, _sealed(token, environment_id))
         with self._sync_lock:
             record = self._repository.replace(
                 connection_id=connection_id,
@@ -332,6 +395,9 @@ class T3Service:
                 self._reset_state()
                 self._record = record
                 self._token = token
+                self._environment_id = environment_id
+                self._verified = (endpoint.url, time.monotonic())
+                self._capabilities = _capabilities(descriptor)
             transitions = self._apply_shell(shell)
         del transitions
         self._log.info("t3.connected", extra={"server": endpoint.url})
@@ -364,12 +430,14 @@ class T3Service:
         self._tracker.reset()
         self._detail_cache.clear()
         self._turn_requests.clear()
+        self._reset_identity()
         self._recompute()
 
     # ------------------------------------------------------------- transport
     def _client(self, *, probe: bool = False) -> tuple[T3ConnectionRecord, T3HttpClient]:
-        """Client for the paired server. Fails fast for a few seconds after a network
-        failure (unless ``probe``), so screens polling an asleep Mac never pile up."""
+        """Client for the paired server, after the identity check (module docstring). Fails fast
+        for a few seconds after a network failure (unless ``probe``), so screens polling an
+        asleep Mac never pile up. A closed port or the wrong server tries rediscovery first."""
         with self._lock:
             self._load()
             record = self._record
@@ -385,10 +453,129 @@ class T3Service:
                 try:
                     opened = json.loads(self._envelopes.open(record.connection_id, envelope or ""))
                     self._token = str(opened["token"])
+                    stored = opened.get("environmentId")
+                    self._environment_id = str(stored) if isinstance(stored, str) and stored else None
                 except Exception:
                     raise T3NotConnected("The T3 Code credential is unavailable. Pair again.") from None
-            endpoint = parse_server_url(record.server_url, verify_host=False)
-            return record, self._client_factory(endpoint, self._token)
+            token = self._token
+        client = self._client_factory(parse_server_url(record.server_url, verify_host=False), token)
+        try:
+            self._verify(record, client.endpoint)
+        except T3Unavailable as error:
+            moved = self._rediscover(record, error)
+            if moved is None:
+                with self._lock:
+                    self._down_until = time.monotonic() + _FAIL_FAST_SECONDS
+                raise
+            return moved
+        return record, client
+
+    def _verify(self, record: T3ConnectionRecord, endpoint: T3Endpoint) -> None:
+        """Allow the token at ``record.server_url`` only if our T3 environment answers there."""
+        with self._lock:
+            verified = self._verified
+            expected = self._environment_id
+        if verified is not None and verified[0] == record.server_url and time.monotonic() - verified[1] < VERIFY_TTL:
+            return
+        descriptor = self._client_factory(endpoint, None).descriptor()
+        if not looks_like_t3(descriptor):
+            raise T3Unavailable("Something other than T3 Code answers at the saved address.", NOT_T3)
+        found = str(descriptor["environmentId"]).strip()
+        if expected is not None and found != expected:
+            self._log.warning("t3.server.mismatch", extra={"server": record.server_url})
+            raise T3Unavailable("A different T3 Code answers at the saved address.", MISMATCH)
+        with self._lock:
+            self._verified = (record.server_url, time.monotonic())
+            self._capabilities = _capabilities(descriptor)
+            if expected is None:
+                self._backfill = found
+
+    def _rediscover(self, record: T3ConnectionRecord, error: T3Unavailable) -> tuple[T3ConnectionRecord, T3HttpClient] | None:
+        """Find the same T3 environment on a nearby port of the saved host (module docstring)."""
+        if error.reason not in {REFUSED, NOT_T3, MISMATCH}:
+            return None
+        if not self._probe_lock.acquire(blocking=False):
+            return None
+        try:
+            with self._lock:
+                if time.monotonic() < self._probe_after:
+                    return None
+                expected = self._environment_id
+                token = self._token
+            saved = parse_server_url(record.server_url, verify_host=False)
+            found: list[tuple[T3Endpoint, dict[str, object]]] = []
+            for port in self._probe_ports(saved.port):
+                candidate = T3Endpoint(saved.scheme, saved.host, port)
+                try:
+                    descriptor = self._client_factory(candidate, None).descriptor(timeout=PROBE_TIMEOUT)
+                except T3Error:
+                    continue
+                if not looks_like_t3(descriptor):
+                    continue
+                found.append((candidate, descriptor))
+                if expected is not None and str(descriptor["environmentId"]).strip() == expected:
+                    break
+            chosen = self._choose_moved(record, found, expected, token)
+            if chosen is None:
+                with self._lock:
+                    self._probe_after = time.monotonic() + self._probe_interval
+                    self._probe_interval = min(PROBE_MAX_INTERVAL, self._probe_interval * 2)
+                self._log.info("t3.rediscover.none", extra={"candidates": len(found)})
+                return None
+            endpoint, descriptor = chosen
+            environment_id = str(descriptor["environmentId"]).strip()
+            moved = self._repository.set_server_url(record.connection_id, endpoint.url) or replace(record, server_url=endpoint.url)
+            with self._lock:
+                if self._record is None or self._record.connection_id != record.connection_id:
+                    return None
+                self._record = replace(self._record, server_url=moved.server_url)
+                self._verified = (endpoint.url, time.monotonic())
+                self._capabilities = _capabilities(descriptor)
+                self._down_until = 0.0
+                self._probe_after = 0.0
+                self._probe_interval = PROBE_MIN_INTERVAL
+                current = self._record
+            if expected is None:
+                self._store_identity(current, environment_id)
+            self._log.info("t3.server.moved", extra={"fromPort": saved.port, "toPort": endpoint.port})
+            return current, self._client_factory(endpoint, token)
+        finally:
+            self._probe_lock.release()
+
+    def _choose_moved(
+        self,
+        record: T3ConnectionRecord,
+        found: list[tuple[T3Endpoint, dict[str, object]]],
+        expected: str | None,
+        token: str | None,
+    ) -> tuple[T3Endpoint, dict[str, object]] | None:
+        if expected is not None:
+            return next((item for item in found if str(item[1]["environmentId"]).strip() == expected), None)
+        # Legacy record: no id to match, so only an unambiguous candidate that knows our token.
+        if record.environment_label:
+            found = [item for item in found if str(item[1].get("label") or "").strip()[:80] == record.environment_label]
+        if len(found) != 1 or not token:
+            return None
+        try:
+            session = self._client_factory(found[0][0], token).session_state()
+        except T3Error:
+            return None
+        return found[0] if session.get("authenticated") is True else None
+
+    def _store_identity(self, record: T3ConnectionRecord, environment_id: str) -> None:
+        """Seal the environment id next to the token (backfill for records paired before ids)."""
+        with self._lock:
+            token = self._token
+            if token is None or self._environment_id is not None:
+                return
+            self._environment_id = environment_id
+            self._backfill = None
+        try:
+            envelope = self._envelopes.seal(record.connection_id, _sealed(token, environment_id))
+            self._repository.set_envelope(record.connection_id, envelope)
+            self._log.info("t3.identity.stored")
+        except Exception:
+            self._log.warning("t3.identity.persist_failed")
 
     def _guard(self, record: T3ConnectionRecord, call: Callable[[], object]) -> object:
         try:
@@ -399,9 +586,13 @@ class T3Service:
         except T3Unavailable:
             with self._lock:
                 self._down_until = time.monotonic() + _FAIL_FAST_SECONDS
+                self._verified = None
             raise
         with self._lock:
             self._down_until = 0.0
+            backfill = self._backfill
+        if backfill is not None:
+            self._store_identity(record, backfill)
         return value
 
     def _set_health(self, record: T3ConnectionRecord, state: str, detail: str | None) -> None:
@@ -417,13 +608,30 @@ class T3Service:
         except Exception:
             self._log.warning("t3.health.persist_failed")
 
+    def _capability(self, name: str) -> bool:
+        with self._lock:
+            return self._capabilities.get(name) is True
+
     # ------------------------------------------------------------------ sync
     def sync_once(self, *, probe: bool = True) -> bool:
         """Fetch the shell once, update the snapshot, announce transitions. Returns has_active."""
         with self._sync_lock:
-            record, client = self._client(probe=probe)
             try:
-                shell = self._guard(record, client.shell)
+                record, client = self._client(probe=probe)
+            except T3Unavailable:
+                record = self._current()
+                if record is not None:
+                    self._set_health(record, "failed", f"Cannot reach T3 Code at {record.server_url}.")
+                raise
+            try:
+                try:
+                    shell = self._guard(record, client.shell)
+                except T3Unavailable as error:
+                    moved = self._rediscover(record, error)
+                    if moved is None:
+                        raise
+                    record, client = moved
+                    shell = self._guard(record, client.shell)
             except T3ReauthRequired:
                 raise
             except T3Error:
@@ -452,10 +660,7 @@ class T3Service:
 
     def _apply_shell(self, shell: dict[str, object]) -> list[Transition]:
         sequence = shell.get("snapshotSequence")
-        threads = [
-            thread for thread in shell.get("threads", []) or []
-            if isinstance(thread, dict) and thread.get("id") and thread.get("archivedAt") is None
-        ]
+        threads = [thread for thread in shell.get("threads", []) or [] if listed(thread)]
         projects = [project for project in shell.get("projects", []) or [] if isinstance(project, dict) and project.get("id")]
         with self._lock:
             record = self._record
@@ -553,32 +758,33 @@ class T3Service:
         if transition.event == FINISHED:
             if not self._tracker.claim((thread_id, transition.turn_id or "", DONE)):
                 return
-            detail = self._detail_quiet(record, client, thread_id, 1)
-            last = condense(last_assistant_text(detail), LAST_MESSAGE_CHARS) if detail else ""
+            text = latest_assistant_preview(thread)
+            if text is None:
+                detail = self._detail_quiet(record, client, thread_id)
+                text = last_assistant_text(detail) if detail else None
             self._announcements.publish(
                 "t3.thread.finished", title, f"{where} finished.",
-                {**base, "status": DONE, "lastMessage": last},
+                {**base, "status": DONE, "lastMessage": condense(text, LAST_MESSAGE_CHARS)},
             )
             return
         if transition.event == ERROR_EVENT:
             if not self._tracker.claim((thread_id, transition.turn_id or "", ERROR)):
                 return
-            session = thread.get("session") if isinstance(thread.get("session"), dict) else {}
-            detail = self._detail_quiet(record, client, thread_id, 1)
-            last = condense(last_assistant_text(detail), LAST_MESSAGE_CHARS) if detail else ""
-            error_text = condense(str(session.get("lastError") or ""), 200)
+            text = latest_assistant_preview(thread)
+            if text is None:
+                detail = self._detail_quiet(record, client, thread_id)
+                text = last_assistant_text(detail) if detail else None
+            error_text = condense(str(thread.get("lastError") or ""), 200)
             self._announcements.publish(
                 "t3.thread.error", title, f"{where} hit an error.",
-                {**base, "status": ERROR, "error": error_text or None, "lastMessage": last},
+                {**base, "status": ERROR, "error": error_text or None, "lastMessage": condense(text, LAST_MESSAGE_CHARS)},
             )
             return
-        detail = self._detail_quiet(record, client, thread_id, 1)
-        pending = pending_requests((detail or {}).get("thread", {}).get("activities")) if detail else PendingRequests()
-        if detail and pending.count == 0:
-            wider = self._detail_quiet(record, client, thread_id, 5)
-            if wider:
-                detail, pending = wider, pending_requests(wider.get("thread", {}).get("activities"))
-        last = condense(last_assistant_text(detail), LAST_MESSAGE_CHARS) if detail else ""
+        detail = self._detail_quiet(record, client, thread_id)
+        if detail and missing_request_items(detail):
+            detail = self._detail_quiet(record, client, thread_id, full=True) or detail
+        pending = pending_requests(detail) if detail else PendingRequests()
+        last = condense(latest_assistant_preview(thread) or (last_assistant_text(detail) if detail else None), LAST_MESSAGE_CHARS)
         if transition.event == NEEDS_APPROVAL_EVENT:
             approvals = pending.approvals or ()
             if not approvals:
@@ -626,9 +832,9 @@ class T3Service:
                     },
                 )
 
-    def _detail_quiet(self, record: T3ConnectionRecord, client: T3HttpClient, thread_id: str, turns: int) -> dict[str, object] | None:
+    def _detail_quiet(self, record: T3ConnectionRecord, client: T3HttpClient, thread_id: str, *, full: bool = False) -> dict[str, object] | None:
         try:
-            value = self._guard(record, lambda: client.thread(thread_id, turn_limit=turns))
+            value = self._guard(record, lambda: client.thread(thread_id, full=full))
         except T3ReauthRequired:
             raise
         except T3Error:
@@ -688,17 +894,18 @@ class T3Service:
                     return dict(item)
         return None
 
-    def thread_detail(self, thread_id: str, *, turns: int = 3, fresh: bool = False) -> dict[str, object]:
+    def thread_detail(self, thread_id: str, *, fresh: bool = False, full: bool = False) -> dict[str, object]:
+        """The thread snapshot ``{snapshotSequence, projection}``: T3's bounded recent window, or
+        the whole projection with ``full``. Cached for ``_DETAIL_TTL`` seconds."""
         record, client = self._client()
-        turns = max(1, min(10, int(turns)))
-        key = (thread_id, turns)
+        key = (thread_id, full)
         if not fresh:
             with self._lock:
                 cached = self._detail_cache.get(key)
             if cached is not None and time.monotonic() - cached[0] < _DETAIL_TTL:
                 return cached[1]
         try:
-            detail = self._guard(record, lambda: client.thread(thread_id, turn_limit=turns))
+            detail = self._guard(record, lambda: client.thread(thread_id, full=full))
         except T3RequestError as error:
             if error.status == 404:
                 raise T3ThreadNotFound("That T3 thread was not found.") from None
@@ -715,46 +922,45 @@ class T3Service:
             for key in [key for key in self._detail_cache if key[0] == thread_id]:
                 self._detail_cache.pop(key, None)
 
-    def _note_turn_requested(self, thread_id: str, previous_turn_id: object) -> None:
+    def _note_turn_requested(self, thread_id: str, previous_run_id: object) -> None:
         with self._lock:
-            self._turn_requests[thread_id] = (time.monotonic(), str(previous_turn_id) if previous_turn_id else None)
+            self._turn_requests[thread_id] = (time.monotonic(), str(previous_run_id) if previous_run_id else None)
             if len(self._turn_requests) > 32:
                 oldest = min(self._turn_requests, key=lambda key: self._turn_requests[key][0])
                 self._turn_requests.pop(oldest, None)
 
     def _awaiting_turn_start(self, thread_id: str, thread: dict[str, object]) -> bool:
-        """True while a turn this R1 requested has not shown up in ``thread`` yet."""
+        """True while a run this R1 requested has not shown up in ``thread`` (shell-like) yet."""
         with self._lock:
             requested = self._turn_requests.get(thread_id)
             if requested is None:
                 return False
-            at, previous_turn = requested
-            session = thread.get("session") if isinstance(thread.get("session"), dict) else {}
-            latest = thread.get("latestTurn") if isinstance(thread.get("latestTurn"), dict) else {}
-            turn_id = str(latest.get("turnId")) if latest.get("turnId") else None
-            started = session.get("status") in {"running", "starting"} or turn_id != previous_turn
+            at, previous_run = requested
+            started = run_live(thread) or latest_run_id(thread) != previous_run
             if started or time.monotonic() - at > _TURN_START_GRACE:
                 self._turn_requests.pop(thread_id, None)
                 return False
             return True
 
-    def _summary_from_detail(self, thread: dict[str, object], pending: PendingRequests) -> dict[str, object]:
-        shell_like = dict(thread)
-        shell_like["hasPendingApprovals"] = bool(pending.approvals)
-        shell_like["hasPendingUserInput"] = bool(pending.inputs)
+    def _summary_from_shell(self, thread: dict[str, object]) -> dict[str, object]:
         with self._lock:
             titles = project_titles({"projects": self._projects})
             seen = self._seen.get(str(thread.get("id")))
-        return summarize(shell_like, titles, seen=seen)
+        return summarize(thread, titles, seen=seen)
 
     def thread_view(self, thread_id: str, *, turns: int = 3) -> dict[str, object]:
-        detail = self.thread_detail(thread_id, turns=turns)
-        thread = detail.get("thread") if isinstance(detail.get("thread"), dict) else {}
-        pending = pending_requests(thread.get("activities"))
-        summary = self.summary(thread_id) or self._summary_from_detail(thread, pending)
+        detail = self.thread_detail(thread_id)
+        if missing_request_items(detail):
+            detail = self.thread_detail(thread_id, full=True)
+        projection = projection_of(detail)
+        current = shell_from_projection(detail)
+        pending = pending_requests(detail)
+        summary = self.summary(thread_id) or self._summary_from_shell(current)
         messages = []
-        for message in thread.get("messages", []) or []:
+        for message in projection.get("messages", []) or []:
             if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+                continue
+            if message.get("notification") is not None:
                 continue
             text = str(message.get("text") or "")
             if len(text) > MAX_MESSAGE_CHARS:
@@ -768,8 +974,11 @@ class T3Service:
                 "createdAt": str(message.get("createdAt") or ""),
                 "streaming": message.get("streaming") is True,
             })
-        session = thread.get("session") if isinstance(thread.get("session"), dict) else {}
-        active = session.get("activeTurnId") if session.get("status") in {"running", "starting"} else None
+        # ``turns``: keep the last that many user turns (T3's window is already bounded).
+        users = [index for index, item in enumerate(messages) if item["role"] == "user"]
+        if len(users) > max(1, int(turns)):
+            messages = messages[users[-max(1, int(turns))]:]
+        active = current.get("activeRunId") if run_live(current) else None
         return {
             "thread": summary,
             "messages": messages[-MAX_MESSAGES:],
@@ -778,65 +987,64 @@ class T3Service:
         }
 
     def pending(self, thread_id: str) -> PendingRequests:
-        detail = self.thread_detail(thread_id, turns=1, fresh=True)
-        pending = pending_requests(detail.get("thread", {}).get("activities"))
-        if pending.count == 0:
-            summary = self.summary(thread_id)
-            if summary is not None and summary["status"] in NEEDS_YOU:
-                wider = self.thread_detail(thread_id, turns=5, fresh=True)
-                pending = pending_requests(wider.get("thread", {}).get("activities"))
+        detail = self.thread_detail(thread_id, fresh=True)
+        pending = pending_requests(detail)
+        if missing_request_items(detail):
+            pending = pending_requests(self.thread_detail(thread_id, fresh=True, full=True))
         return pending
 
     def live_view(self, thread_id: str) -> dict[str, object]:
-        detail = self.thread_detail(thread_id, turns=1)
-        thread = detail.get("thread") if isinstance(detail.get("thread"), dict) else {}
-        activities = thread.get("activities") if isinstance(thread.get("activities"), list) else []
-        pending = pending_requests(activities)
-        summary = self.summary(thread_id) or self._summary_from_detail(thread, pending)
+        detail = self.thread_detail(thread_id)
+        current = shell_from_projection(detail)
+        pending = pending_requests(detail)
+        summary = self.summary(thread_id) or self._summary_from_shell(current)
         status = str(summary["status"])
         status_label = str(summary["statusLabel"])
-        if status in {DONE, ERROR} and self._awaiting_turn_start(thread_id, thread):
-            # Still showing the previous turn: a terminal snapshot now would make the
-            # live card stop polling before the requested turn even starts.
+        if status in {DONE, ERROR} and self._awaiting_turn_start(thread_id, current):
+            # Still showing the previous run: a terminal snapshot now would make the
+            # live card stop polling before the requested run even starts.
             status, status_label = WORKING, "Starting"
         live_status = {WORKING: "active", NEEDS_APPROVAL: "warn", NEEDS_INPUT: "warn", ERROR: "error"}.get(status, "ok")
-        latest = thread.get("latestTurn") if isinstance(thread.get("latestTurn"), dict) else None
-        if status == DONE and not latest:
+        run_id = latest_run_id(current)
+        if status == DONE and not run_id:
             live_status = "idle"
-        # Terminal only for a finished turn (genui contract: ok/error); a thread with
-        # no turn yet ("idle") may still start.
+        # Terminal only for a finished run (genui contract: ok/error); a thread with
+        # no run yet ("idle") may still start.
         terminal = live_status in {"ok", "error"}
+        items = run_items(detail, run_id) if run_id else []
+        todo = next((item for item in reversed(items) if item.get("type") == "todo_list"), None)
+        step, progress = plan_phase(todo.get("steps")) if todo else (None, None)
         parts = [str(summary.get("projectTitle") or "")]
         if summary.get("model"):
             parts.append(str(summary["model"]))
         parts.append(status_label)
-        if status == WORKING and latest and latest.get("startedAt"):
-            started = parse_time(latest.get("startedAt"))
-            if started is not None:
-                minutes = int(max(0.0, (self._clock() - started).total_seconds()) // 60)
-                parts.append(f"{minutes}m" if minutes else "<1m")
+        started = parse_time(current.get("latestRunStartedAt") or current.get("latestRunRequestedAt"))
+        if status == WORKING and run_live(current) and started is not None:
+            minutes = int(max(0.0, (self._clock() - started).total_seconds()) // 60)
+            parts.append(f"{minutes}m" if minutes else "<1m")
         if status == NEEDS_APPROVAL and pending.approvals:
             phase = condense(pending.approvals[0].detail or "Approval needed", 60)
         elif status == NEEDS_INPUT and pending.inputs and pending.inputs[0].questions:
             phase = condense(pending.inputs[0].questions[0].question, 60)
+        elif status == WORKING and step:
+            phase = step
         else:
             phase = summary.get("phase") or status_label
-        turn_id = latest.get("turnId") if latest else None
-        items = _activity_items([item for item in activities if isinstance(item, dict) and (turn_id is None or item.get("turnId") in {turn_id, None})])
         return {
             "status": live_status,
             "terminal": terminal,
             "subtitle": " · ".join(part for part in parts if part),
             "phase": phase,
-            "progress": summary.get("progress"),
-            "items": items,
+            "progress": progress if status == WORKING else summary.get("progress"),
+            "items": _activity_items(items),
             "text": condense(last_assistant_text(detail), 280),
-            "updatedAt": str(thread.get("updatedAt") or summary.get("updatedAt") or ""),
+            "updatedAt": str(current.get("updatedAt") or summary.get("updatedAt") or ""),
             "nextPollMs": 3000 if live_status == "active" else (5000 if live_status == "warn" else 20000),
         }
 
     # --------------------------------------------------------------- commands
     def _known_thread(self, thread_id: str) -> dict[str, object]:
+        """The cached shell thread, or one built from its projection when the shell lacks it."""
         thread_id = str(thread_id or "").strip()
         if not thread_id:
             raise T3InvalidRequest("A thread id is required.")
@@ -845,17 +1053,20 @@ class T3Service:
             thread = self._threads.get(thread_id)
         if thread is not None:
             return thread
-        detail = self.thread_detail(thread_id, turns=1)
-        thread = detail.get("thread")
-        if not isinstance(thread, dict):
+        detail = self.thread_detail(thread_id)
+        thread = shell_from_projection(detail)
+        if not thread.get("id"):
             raise T3ThreadNotFound("That T3 thread was not found.")
         return thread
 
-    def _dispatch(self, record: T3ConnectionRecord, client: T3HttpClient, command: dict[str, object]) -> dict[str, object]:
+    def _write(self, record: T3ConnectionRecord, call: Callable[[], object]) -> dict[str, object]:
+        """One WebSocket RPC write, sent again once on a network failure (T3 dedupes by commandId),
+        after the address is checked again: the failure cleared the identity check."""
         try:
-            value = self._guard(record, lambda: client.dispatch(command))
+            value = self._guard(record, call)
         except T3Unavailable:
-            value = self._guard(record, lambda: client.dispatch(command))
+            self._verify(record, parse_server_url(record.server_url, verify_host=False))
+            value = self._guard(record, call)
         return value if isinstance(value, dict) else {}
 
     def resolve_project(self, project_id: str | None = None, project: str | None = None) -> dict[str, object]:
@@ -914,38 +1125,26 @@ class T3Service:
             selection = dict(chosen["defaultModelSelection"])
         selection = selection or dict(DEFAULT_MODEL_SELECTION)
         mode = runtime_mode or (str(recent.get("runtimeMode")) if recent is not None and recent.get("runtimeMode") in RUNTIME_MODES else DEFAULT_RUNTIME_MODE)
-        name = " ".join(str(title or "").split())[:80] or title_from_prompt(prompt)
+        name = " ".join(str(title or "").split())[:80]
+        generate_title = not name
+        name = name or title_from_prompt(prompt)
         thread_id = self._commands.new_id()
-        create = self._commands.create_thread(
+        launch = self._commands.launch_thread(
             thread_id=thread_id,
             project_id=chosen_id,
             title=name,
+            text=prompt,
             model_selection=selection,
             runtime_mode=mode,
             interaction_mode=DEFAULT_INTERACTION_MODE,
+            generate_title=generate_title,
         )
         try:
-            self._dispatch(record, client, create)
+            self._write(record, lambda: client.launch_thread(launch))
         except T3ReauthRequired:
             raise
         except T3Error as error:
             raise T3DispatchFailed(f"T3 Code could not create the thread ({type(error).__name__}).") from None
-        turn = self._commands.turn_start(
-            thread_id=thread_id,
-            text=prompt,
-            runtime_mode=mode,
-            interaction_mode=DEFAULT_INTERACTION_MODE,
-            model_selection=selection,
-            title_seed=name,
-        )
-        try:
-            self._dispatch(record, client, turn)
-        except T3ReauthRequired:
-            raise
-        except T3Error as error:
-            raise T3DispatchFailed(
-                f"The thread was created but the first message failed ({type(error).__name__}).", thread_id
-            ) from None
         self._note_turn_requested(thread_id, None)
         self._log.info("t3.thread.created", extra={"project": chosen_id})
         self._wake()
@@ -966,15 +1165,14 @@ class T3Service:
             raise T3InvalidRequest("That message is too long.")
         record, client = self._client()
         thread = self._known_thread(thread_id)
-        mode = str(thread.get("runtimeMode")) if thread.get("runtimeMode") in RUNTIME_MODES else DEFAULT_RUNTIME_MODE
-        interaction = str(thread.get("interactionMode") or DEFAULT_INTERACTION_MODE)
-        command = self._commands.turn_start(thread_id=str(thread["id"]), text=body, runtime_mode=mode, interaction_mode=interaction)
+        was_working = run_live(thread)
+        command = self._commands.message(
+            thread_id=str(thread["id"]), text=body,
+            server_resolved=self._capability("serverResolvedCommandContext"), run_live=was_working,
+        )
         self._dispatch_or_fail(record, client, command)
-        session = thread.get("session") if isinstance(thread.get("session"), dict) else {}
-        was_working = session.get("status") in {"running", "starting"}
         if not was_working:
-            latest = thread.get("latestTurn") if isinstance(thread.get("latestTurn"), dict) else {}
-            self._note_turn_requested(str(thread["id"]), latest.get("turnId"))
+            self._note_turn_requested(str(thread["id"]), latest_run_id(thread))
         self._invalidate(str(thread["id"]))
         self._wake()
         return {"ok": True, "threadId": str(thread["id"]), "title": str(thread.get("title") or ""), "wasWorking": was_working}
@@ -1009,13 +1207,11 @@ class T3Service:
         command = self._commands.user_input_respond(thread_id=thread_id, request_id=request_id, answers=resolved)
         self._dispatch_or_fail(record, client, command)
         if request.dismissible:
-            # T3 sends an async ("message") answer to the agent as a new user turn.
+            # T3 sends an async ("message") answer to the agent as a new run.
             with self._lock:
                 cached = self._threads.get(thread_id) or {}
-            session = cached.get("session") if isinstance(cached.get("session"), dict) else {}
-            if session.get("status") not in {"running", "starting"}:
-                latest = cached.get("latestTurn") if isinstance(cached.get("latestTurn"), dict) else {}
-                self._note_turn_requested(thread_id, latest.get("turnId"))
+            if not run_live(cached):
+                self._note_turn_requested(thread_id, latest_run_id(cached))
         self._invalidate(thread_id)
         self._wake()
         return {"ok": True, "threadId": thread_id, "requestId": request_id, "answers": resolved}
@@ -1023,13 +1219,17 @@ class T3Service:
     def interrupt(self, thread_id: str) -> dict[str, object]:
         record, client = self._client()
         thread = self._known_thread(thread_id)
-        session = thread.get("session") if isinstance(thread.get("session"), dict) else {}
-        running = session.get("status") in {"running", "starting"}
-        background = thread.get("backgroundLiveness") in {"working", "monitoring"}
+        running = run_live(thread)
+        background = holds_completion(thread) or bool(thread.get("pendingBackgroundTasks"))
         if not running and not background:
             return {"ok": True, "threadId": str(thread["id"]), "wasWorking": False}
-        turn_id = session.get("activeTurnId") if running else None
-        command = self._commands.interrupt(thread_id=str(thread["id"]), turn_id=str(turn_id) if turn_id else None)
+        if self._capability("threadStop"):
+            command = self._commands.stop(thread_id=str(thread["id"]))
+        else:
+            run_id = thread.get("activeRunId") or latest_run_id(thread)
+            if not run_id:
+                return {"ok": True, "threadId": str(thread["id"]), "wasWorking": False}
+            command = self._commands.interrupt(thread_id=str(thread["id"]), run_id=str(run_id))
         self._dispatch_or_fail(record, client, command)
         self._invalidate(str(thread["id"]))
         self._wake()
@@ -1044,7 +1244,7 @@ class T3Service:
 
     def _dispatch_or_fail(self, record: T3ConnectionRecord, client: T3HttpClient, command: dict[str, object]) -> None:
         try:
-            self._dispatch(record, client, command)
+            self._write(record, lambda: client.dispatch(command))
         except T3ReauthRequired:
             raise
         except T3Error as error:
@@ -1117,32 +1317,55 @@ def _pick_option(question: PendingQuestion, value: str) -> str:
     raise T3InvalidRequest(f"Choose one of: {choices}.")
 
 
-def _activity_items(activities: list[dict[str, object]]) -> list[dict[str, object]]:
-    """The four most recent tool/task steps as live-card rows."""
-    rows: dict[str, dict[str, object]] = {}
-    order: list[str] = []
-    for activity in activities:
-        kind = str(activity.get("kind") or "")
-        if not (kind.startswith("tool.") or kind.startswith("task.")):
+_STEP_TYPES = {
+    "command_execution": "Ran a command",
+    "file_change": "Edited a file",
+    "file_search": "Searched files",
+    "web_search": "Searched the web",
+    "dynamic_tool": "Used a tool",
+    "subagent": "Subagent",
+}
+
+
+def _activity_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The four most recent tool steps of the run (v2 turn items) as live-card rows."""
+    rows = []
+    for item in items:
+        kind = str(item.get("type") or "")
+        if kind not in _STEP_TYPES:
             continue
-        payload = activity.get("payload") if isinstance(activity.get("payload"), dict) else {}
-        key = str(payload.get("toolCallId") or payload.get("taskId") or activity.get("id") or "")
-        raw_status = str(payload.get("status") or "")
-        if kind.endswith(".completed") or raw_status in {"completed", "done"}:
+        raw_status = str(item.get("status") or "")
+        if raw_status == "completed":
             status = "ok"
-        elif raw_status in {"failed", "error"}:
+        elif raw_status in {"failed", "cancelled", "interrupted"}:
             status = "error"
         else:
             status = "active"
-        title = condense(str(payload.get("title") or activity.get("summary") or "Step"), 48)
-        detail = str(payload.get("detail") or "")
-        if detail.lower() in {title.lower(), "bash: {}"}:
-            detail = ""
-        row = {"title": title, "detail": condense(detail, 64) or None, "status": status, "trailing": None}
-        if key not in rows:
-            order.append(key)
-        else:
-            order.remove(key)
-            order.append(key)
-        rows[key] = row
-    return [rows[key] for key in order[-4:]]
+        if status == "ok" and kind == "command_execution" and (
+            item.get("exitCode") not in {None, 0} or item.get("outputIndicatesFailure") is True
+        ):
+            status = "error"
+        detail = {
+            "command_execution": item.get("input"),
+            "file_change": item.get("fileName"),
+            "file_search": item.get("pattern"),
+            "dynamic_tool": item.get("toolName"),
+            "subagent": item.get("progress"),
+        }.get(kind)
+        if kind == "web_search" and isinstance(item.get("patterns"), list) and item["patterns"]:
+            detail = item["patterns"][0]
+        title = condense(str(item.get("title") or _STEP_TYPES[kind]), 48)
+        detail_text = str(detail) if isinstance(detail, str) else ""
+        if detail_text.lower() == title.lower():
+            detail_text = ""
+        rows.append({"title": title, "detail": condense(detail_text, 64) or None, "status": status, "trailing": None})
+    return rows[-4:]
+
+
+def _sealed(token: str, environment_id: str | None) -> str:
+    return json.dumps({"token": token, "environmentId": environment_id}, separators=(",", ":"))
+
+
+def _capabilities(descriptor: dict[str, object]) -> dict[str, object]:
+    value = descriptor.get("capabilities")
+    return dict(value) if isinstance(value, dict) else {}

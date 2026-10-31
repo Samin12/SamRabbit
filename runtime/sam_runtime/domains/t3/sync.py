@@ -1,14 +1,16 @@
 """Background T3 shell poller.
 
-Polls every 2 s while a turn runs, starts (including one this R1 just requested)
-or waits on the user; every 5 s while threads are only background-live (T3's
-"Background work": no running session, nothing pending, so nothing to announce);
-and every 15 s when nothing is working or pending. Each poll fetches and parses
-the whole shell, so the slower tiers matter for the R1's battery: a parent
-session with background tasks can stay background-live around the clock.
-Network failures back off (5, 10, 20, 40, 60 s). A rejected credential stops
-polling until the user pairs again. Any write or pairing wakes the poller
-immediately so screens see the change within a moment.
+Polls every 2 s while a run is live (including one this R1 just requested) or a
+request waits on the user; every 5 s while threads are only held by background
+work (T3's "Background work": a subagent or awaited task outlives the run, or a
+run waits on another thread, so nothing to announce yet); and every 15 s when
+nothing is working or pending. Each poll fetches and parses the whole shell, so
+the slower tiers matter for the R1's battery: a parent with background tasks can
+stay held around the clock. Network failures back off (5, 10, 20, 40, 60 s);
+each failed poll may also look for T3 on a nearby port (``T3Service``, rate
+limited on its own). A rejected credential stops polling until the user pairs
+again. Any write or pairing wakes the poller immediately so screens see the
+change within a moment.
 """
 
 from __future__ import annotations

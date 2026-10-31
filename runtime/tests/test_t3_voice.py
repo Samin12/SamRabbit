@@ -60,8 +60,8 @@ class T3VoiceInstructionTest(unittest.TestCase):
             try:
                 context = T3VoiceContext(service)
                 self.assertEqual("", context.render())
-                threads = [thread(f"busy-{index}", f"Busy {index}", session_status="running", turn_state="running") for index in range(7)]
-                threads += [thread("ask", "Approve deploy", approvals=True), thread("done", "Finished one")]
+                threads = [thread(f"busy-{index}", f"Busy {index}", status="running") for index in range(7)]
+                threads += [thread("ask", "Approve deploy", request="command"), thread("done", "Finished one")]
                 fake.set_threads(threads)
                 service.connect(fake.url, PAIRING_CODE)
                 text = context.render()

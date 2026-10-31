@@ -21,68 +21,63 @@ from t3_fixtures import (
 )
 
 
-NOW = "2026-10-07T12:00:00.000Z"
-
-
 def _builder() -> T3CommandBuilder:
-    return T3CommandBuilder(new_id=FixedIds(), now=lambda: NOW)
+    return T3CommandBuilder(new_id=FixedIds())
 
 
 def _id(n: int) -> str:
     return f"00000000-0000-4000-8000-{n:012d}"
 
 
+def _without_ids(value: dict[str, object]) -> dict[str, object]:
+    return {key: item for key, item in value.items() if key not in {"commandId", "messageId"}}
+
+
 class T3CommandShapeTest(unittest.TestCase):
-    def test_create_thread_shape(self) -> None:
-        command = _builder().create_thread(
-            thread_id="thread-1", project_id="project-1", title="Check the build",
+    def test_launch_thread_shape(self) -> None:
+        payload = _builder().launch_thread(
+            thread_id="thread-1", project_id="project-1", title="Check the build", text="Check the build",
             model_selection={"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
             runtime_mode="full-access",
         )
         self.assertEqual(
-            {"type": "thread.create", "commandId": _id(1), "threadId": "thread-1", "projectId": "project-1",
-             "title": "Check the build", "modelSelection": {"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
-             "runtimeMode": "full-access", "interactionMode": "default", "branch": None, "worktreePath": None,
-             "createdAt": NOW},
-            command,
-        )
-
-    def test_turn_start_shape(self) -> None:
-        command = _builder().turn_start(
-            thread_id="thread-1", text="Run the tests", runtime_mode="approval-required",
-            model_selection={"instanceId": "claudeAgent", "model": "claude-opus-5-5"}, title_seed="Run the tests",
-        )
-        self.assertEqual(
-            {"type": "thread.turn.start", "commandId": _id(1), "threadId": "thread-1",
-             "message": {"messageId": _id(2), "role": "user", "text": "Run the tests", "attachments": []},
+            {"commandId": _id(1), "creationSource": "mobile", "threadId": "thread-1", "projectId": "project-1",
+             "title": "Check the build", "generateTitle": True,
              "modelSelection": {"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
-             "titleSeed": "Run the tests", "runtimeMode": "approval-required", "interactionMode": "default",
-             "createdAt": NOW},
-            command,
+             "runtimeMode": "full-access", "interactionMode": "default", "workspaceStrategy": {"type": "root"},
+             "initialMessage": {"messageId": _id(2), "text": "Check the build", "attachments": []}},
+            payload,
         )
-        plain = _builder().turn_start(thread_id="thread-1", text="More", runtime_mode="full-access")
-        self.assertNotIn("modelSelection", plain)
-        self.assertNotIn("titleSeed", plain)
 
-    def test_respond_interrupt_and_archive_shapes(self) -> None:
+    def test_message_dispatch_shape(self) -> None:
+        resolved = _builder().message(thread_id="thread-1", text="Run the tests")
+        self.assertEqual(
+            {"type": "message.dispatch", "commandId": _id(1), "createdBy": "user", "creationSource": "mobile",
+             "threadId": "thread-1", "messageId": _id(2), "text": "Run the tests", "attachments": [],
+             "deliveryIntent": "auto", "dispatchMode": {"type": "start_immediately"}},
+            resolved,
+        )
+        older = _builder().message(thread_id="thread-1", text="More", server_resolved=False, run_live=True)
+        self.assertNotIn("deliveryIntent", older)
+        self.assertEqual({"type": "queue_after_active"}, older["dispatchMode"])
+        idle = _builder().message(thread_id="thread-1", text="More", server_resolved=False, run_live=False)
+        self.assertEqual({"type": "start_immediately"}, idle["dispatchMode"])
+
+    def test_respond_stop_interrupt_and_archive_shapes(self) -> None:
         builder = _builder()
         self.assertEqual(
-            {"type": "thread.approval.respond", "commandId": _id(1), "threadId": "t", "requestId": "r",
-             "decision": "accept", "createdAt": NOW},
+            {"type": "runtime-request.respond", "commandId": _id(1), "threadId": "t", "requestId": "r", "decision": "accept"},
             builder.approval_respond(thread_id="t", request_id="r", decision="accept"),
         )
         self.assertEqual(
-            {"type": "thread.user-input.respond", "commandId": _id(2), "threadId": "t", "requestId": "q",
-             "answers": {"0": "Use SQLite"}, "createdAt": NOW},
+            {"type": "runtime-request.respond", "commandId": _id(2), "threadId": "t", "requestId": "q",
+             "answers": {"0": "Use SQLite"}},
             builder.user_input_respond(thread_id="t", request_id="q", answers={"0": "Use SQLite"}),
         )
+        self.assertEqual({"type": "thread.stop", "commandId": _id(3), "threadId": "t"}, builder.stop(thread_id="t"))
         self.assertEqual(
-            {"type": "thread.turn.interrupt", "commandId": _id(3), "threadId": "t", "turnId": "turn-9", "createdAt": NOW},
-            builder.interrupt(thread_id="t", turn_id="turn-9"),
-        )
-        self.assertEqual(
-            {"type": "thread.turn.interrupt", "commandId": _id(4), "threadId": "t", "createdAt": NOW},
-            builder.interrupt(thread_id="t"),
+            {"type": "run.interrupt", "commandId": _id(4), "threadId": "t", "runId": "run-9", "holdQueue": True},
+            builder.interrupt(thread_id="t", run_id="run-9"),
         )
         self.assertEqual({"type": "thread.archive", "commandId": _id(5), "threadId": "t"}, builder.archive(thread_id="t"))
         with self.assertRaises(ValueError):
@@ -109,77 +104,81 @@ class T3ServiceCommandTest(unittest.TestCase):
             thread("scratch", "Scratch", project_id=PROJECT_SCRATCH, completed_at="2026-10-07T11:50:00.000Z"),
         ])
         created = self.service.create_thread("Add a dark mode toggle to settings")
-        create, turn = self.fake.dispatched
+        self.assertEqual([], self.fake.dispatched, "one launchThread call, no separate create + turn")
+        (launch,) = self.fake.launched
         thread_id = created["threadId"]
         self.assertEqual("Orbit Lab", created["projectTitle"])
         self.assertEqual(
-            {"type": "thread.create", "threadId": thread_id, "projectId": PROJECT_SIDE,
-             "title": "Add a dark mode toggle to settings",
+            {"creationSource": "mobile", "threadId": thread_id, "projectId": PROJECT_SIDE,
+             "title": "Add a dark mode toggle to settings", "generateTitle": True,
              "modelSelection": {"instanceId": "claudeAgent", "model": "claude-sonnet-5", "options": [{"id": "effort", "value": "high"}]},
-             "runtimeMode": "approval-required", "interactionMode": "default", "branch": None, "worktreePath": None,
-             "createdAt": NOW},
-            {key: value for key, value in create.items() if key != "commandId"},
+             "runtimeMode": "approval-required", "interactionMode": "default", "workspaceStrategy": {"type": "root"},
+             "initialMessage": {"text": "Add a dark mode toggle to settings", "attachments": []}},
+            {**_without_ids(launch), "initialMessage": _without_ids(launch["initialMessage"])},
         )
-        self.assertEqual("thread.turn.start", turn["type"])
-        self.assertEqual(thread_id, turn["threadId"])
-        self.assertEqual("Add a dark mode toggle to settings", turn["message"]["text"])
-        self.assertEqual([], turn["message"]["attachments"])
-        self.assertEqual("approval-required", turn["runtimeMode"])
-        self.assertEqual(create["modelSelection"], turn["modelSelection"])
-        self.assertNotEqual(create["commandId"], turn["commandId"])
 
     def test_create_falls_back_to_default_model_and_named_project(self) -> None:
         self._connect([thread("recent", "Recent", project_id=PROJECT_SIDE)])
         created = self.service.create_thread("Write release notes", title="Release notes", project="workbench", runtime_mode="approval-required")
-        create = self.fake.dispatched[0]
+        create = self.fake.launched[0]
         self.assertEqual(PROJECT_MAIN, created["projectId"])
         self.assertEqual({"instanceId": "claudeAgent", "model": "claude-opus-5-5"}, create["modelSelection"])
         self.assertEqual("approval-required", create["runtimeMode"])
         self.assertEqual("Release notes", create["title"])
+        self.assertFalse(create["generateTitle"], "a title the user gave is kept")
         with self.assertRaises(T3InvalidRequest):
             self.service.create_thread("x", project="nonexistent galaxy")
         with self.assertRaises(T3InvalidRequest):
             self.service.create_thread("   ")
 
-    def test_failed_first_turn_reports_created_thread(self) -> None:
+    def test_failed_launch_is_reported(self) -> None:
         self._connect([thread("recent", "Recent")])
-        self.fake.fail_dispatch_types.add("thread.turn.start")
-        with self.assertRaises(T3DispatchFailed) as caught:
+        self.fake.fail_dispatch_types.add("launchThread")
+        with self.assertRaises(T3DispatchFailed):
             self.service.create_thread("Do it")
-        self.assertIsNotNone(caught.exception.thread_id)
 
-    def test_send_message_keeps_thread_modes(self) -> None:
-        self._connect([thread("t-1", "Recent", runtime_mode="auto-accept-edits")])
-        self.service.send_message("t-1", "Also update the docs")
-        command = self.fake.dispatched[-1]
+    def test_send_message_lets_t3_choose_steer_or_queue(self) -> None:
+        self._connect([thread("t-1", "Recent", runtime_mode="auto-accept-edits"), thread("busy", "Busy", status="running")])
+        self.assertFalse(self.service.send_message("t-1", "Also update the docs")["wasWorking"])
         self.assertEqual(
-            {"type": "thread.turn.start", "threadId": "t-1",
-             "message": {"role": "user", "text": "Also update the docs", "attachments": []},
-             "runtimeMode": "auto-accept-edits", "interactionMode": "default", "createdAt": NOW},
-            {**{key: value for key, value in command.items() if key not in {"commandId", "message"}},
-             "message": {key: value for key, value in command["message"].items() if key != "messageId"}},
+            {"type": "message.dispatch", "createdBy": "user", "creationSource": "mobile", "threadId": "t-1",
+             "text": "Also update the docs", "attachments": [], "deliveryIntent": "auto",
+             "dispatchMode": {"type": "start_immediately"}},
+            _without_ids(self.fake.dispatched[-1]),
         )
+        self.assertTrue(self.service.send_message("busy", "Steer it")["wasWorking"])
+        # A server without serverResolvedCommandContext gets an explicit queue for a live run.
+        self.service._capabilities = {}
+        self.service.send_message("busy", "Queue it")
+        self.assertEqual({"type": "queue_after_active"}, self.fake.dispatched[-1]["dispatchMode"])
+        self.assertNotIn("deliveryIntent", self.fake.dispatched[-1])
 
-    def test_interrupt_uses_active_turn_and_skips_idle_threads(self) -> None:
+    def test_interrupt_stops_live_threads_and_skips_idle_ones(self) -> None:
         self._connect([
-            thread("busy", "Busy", session_status="running", turn_state="running", active_turn="turn-active"),
+            thread("busy", "Busy", status="running", run_id="run-active"),
+            thread("held", "Held", background=[{"taskId": "s", "kind": "subagent"}]),
             thread("idle", "Idle"),
         ])
         self.assertTrue(self.service.interrupt("busy")["wasWorking"])
-        self.assertEqual({"type": "thread.turn.interrupt", "threadId": "busy", "turnId": "turn-active", "createdAt": NOW},
-                         {key: value for key, value in self.fake.dispatched[-1].items() if key != "commandId"})
+        self.assertEqual({"type": "thread.stop", "threadId": "busy"}, _without_ids(self.fake.dispatched[-1]))
+        self.assertTrue(self.service.interrupt("held")["wasWorking"])
         count = len(self.fake.dispatched)
         self.assertFalse(self.service.interrupt("idle")["wasWorking"])
         self.assertEqual(count, len(self.fake.dispatched))
+        # Without the threadStop capability the live run is interrupted.
+        self.service._capabilities = {}
+        self.service.interrupt("busy")
+        self.assertEqual({"type": "run.interrupt", "threadId": "busy", "runId": "run-active", "holdQueue": True},
+                         _without_ids(self.fake.dispatched[-1]))
 
     def test_approval_and_input_responses_are_validated_against_pending(self) -> None:
-        shell_thread = thread("ask", "Ask", approvals=True)
+        shell_thread = thread("ask", "Ask", request="command")
         self._connect([shell_thread])
-        self.fake.set_detail("ask", detail(shell_thread, activities=[approval_requested("req-1"), input_requested("q-1")]))
+        self.fake.set_detail("ask", detail(shell_thread, requests=[approval_requested("req-1"), input_requested("q-1")]))
         self.service.respond_approval("ask", "req-1", "accept")
         self.assertEqual(
-            {"type": "thread.approval.respond", "threadId": "ask", "requestId": "req-1", "decision": "accept", "createdAt": NOW},
-            {key: value for key, value in self.fake.dispatched[-1].items() if key != "commandId"},
+            {"type": "runtime-request.respond", "threadId": "ask", "requestId": "req-1", "decision": "accept"},
+            _without_ids(self.fake.dispatched[-1]),
         )
         with self.assertRaises(T3RequestNotPending):
             self.service.respond_approval("ask", "req-gone", "accept")
@@ -191,9 +190,9 @@ class T3ServiceCommandTest(unittest.TestCase):
         self.assertEqual({"0": "Something custom"}, self.fake.dispatched[-1]["answers"])
 
     def test_multi_select_and_closed_questions(self) -> None:
-        shell_thread = thread("ask", "Ask", user_input=True)
+        shell_thread = thread("ask", "Ask", request="user_input")
         self._connect([shell_thread])
-        self.fake.set_detail("ask", detail(shell_thread, activities=[
+        self.fake.set_detail("ask", detail(shell_thread, requests=[
             input_requested("multi", options=("Red", "Green", "Blue"), multi=True, allow_custom=False),
         ]))
         self.service.respond_input("ask", "multi", {"0": ["red", "Blue"]})
@@ -203,7 +202,7 @@ class T3ServiceCommandTest(unittest.TestCase):
 
     def test_live_snapshot_is_not_terminal_before_a_requested_turn_starts(self) -> None:
         # genui stops polling a live card once a snapshot says terminal.
-        self._connect([thread("done", "Finished", turn_id="turn-1"), thread("blank", "Blank", session_status=None, turn_state=None)])
+        self._connect([thread("done", "Finished", run_id="run-1"), thread("blank", "Blank", status="idle")])
         self.assertEqual(("ok", True), tuple(self.service.live_view("done")[key] for key in ("status", "terminal")))
         self.assertEqual(("idle", False), tuple(self.service.live_view("blank")[key] for key in ("status", "terminal")))
 
@@ -214,22 +213,22 @@ class T3ServiceCommandTest(unittest.TestCase):
             self.service._invalidate("done")
             self.assertTrue(self.service.live_view("done")["terminal"])
         self.service.send_message("done", "And another")
-        self.fake.set_threads([thread("done", "Finished", turn_id="turn-2", completed_at="2026-10-07T12:05:00.000Z")])
+        self.fake.set_threads([thread("done", "Finished", run_id="run-2", completed_at="2026-10-07T12:05:00.000Z")])
         self.service.sync_once()
         self.service._invalidate("done")
         self.assertEqual(("ok", True), tuple(self.service.live_view("done")[key] for key in ("status", "terminal")))
 
         created = self.service.create_thread("Write the release notes")["threadId"]
-        self.fake.set_detail(created, detail(thread(created, "Write the release notes", session_status=None, turn_state=None)))
+        self.fake.set_detail(created, detail(thread(created, "Write the release notes", status="idle")))
         live = self.service.live_view(created)
         self.assertEqual(("active", False), (live["status"], live["terminal"]))
 
     def test_live_snapshot_stays_live_after_an_async_answer_starts_a_turn(self) -> None:
-        asking = thread("ask", "Ask", user_input=True, turn_id="turn-a")
+        asking = thread("ask", "Ask", request="user_input", run_id="run-a")
         self._connect([asking])
-        self.fake.set_detail("ask", detail(asking, activities=[input_requested("q-async", message_mode=True)]))
+        self.fake.set_detail("ask", detail(asking, requests=[input_requested("q-async", message_mode=True)]))
         self.service.respond_input("ask", "q-async", {"0": "Use SQLite"})
-        answered = thread("ask", "Ask", turn_id="turn-a")
+        answered = thread("ask", "Ask", run_id="run-a")
         self.fake.set_threads([answered])
         self.fake.set_detail("ask", detail(answered))
         self.service.sync_once()
@@ -238,14 +237,14 @@ class T3ServiceCommandTest(unittest.TestCase):
         self.assertEqual(("active", False), (live["status"], live["terminal"]))
 
     def test_answers_send_option_values_and_keep_the_users_own_words(self) -> None:
-        shell_thread = thread("ask", "Ask", user_input=True)
+        shell_thread = thread("ask", "Ask", request="user_input")
         self._connect([shell_thread])
         valued = input_requested("pick", options=("Allow once", "Always allow"), allow_custom=False)
-        valued["payload"]["questions"][0]["options"] = [
-            {"label": "Allow once", "description": "", "value": "opt-once"},
-            {"label": "Always allow", "description": "", "value": "opt-always"},
+        valued["item"]["questions"][0]["options"] = [
+            {"label": "Allow once", "description": "Once", "value": "opt-once"},
+            {"label": "Always allow", "description": "Always", "value": "opt-always"},
         ]
-        self.fake.set_detail("ask", detail(shell_thread, activities=[
+        self.fake.set_detail("ask", detail(shell_thread, requests=[
             valued,
             input_requested("count", options=("1", "3", "5")),
             input_requested("confirm", options=("Yes", "No")),

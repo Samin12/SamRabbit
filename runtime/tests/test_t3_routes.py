@@ -18,6 +18,7 @@ from t3_fixtures import (
     PAIRING_CODE,
     FakeT3Server,
     approval_requested,
+    command_item,
     detail,
     input_requested,
     make_service,
@@ -83,7 +84,7 @@ class T3RouteTest(unittest.TestCase):
         browser = self._browser()
         status, body = self._call("GET", "/v1/management/t3", browser=browser)
         self.assertEqual(200, status)
-        self.assertEqual("http://192.168.1.183:3773", body["defaultServerUrl"])
+        self.assertEqual("http://192.168.1.183:3774", body["defaultServerUrl"])
         self.assertFalse(body["connected"])
         connect = {"serverUrl": self.fake.url, "pairingCode": PAIRING_CODE}
         self.assertEqual(403, self._call("POST", "/v1/management/t3/connect", connect, browser=browser, csrf=False)[0])
@@ -110,19 +111,20 @@ class T3RouteTest(unittest.TestCase):
         status, body = self._call("GET", "/v1/live/t3-thread/abc")
         self.assertEqual(409, status)
 
-        asking = thread("ask", "Approval thread", approvals=True, session_status="running", turn_state="running",
-                        completed_at=None, active_turn="turn-ask")
+        asking = thread("ask", "Approval thread", request="command", status="running", completed_at=None, run_id="run-ask")
         self.fake.set_threads([asking, thread("done", "Finished thread")])
         self.fake.set_detail("ask", detail(asking, messages=[
+            message("u0", "user", "An older request"),
+            message("a0", "assistant", "An older answer"),
             message("u1", "user", "Please run the tests"),
-            {**message("r1", "system", "private reasoning"), "id": "reasoning:summary:x"},
+            message("r1", "system", "private reasoning"),
             message("assistant:1", "assistant", "I need to run the test suite.", streaming=True),
-        ], activities=[
+        ], requests=[
             approval_requested("req-1"),
             input_requested("q-1"),
-            {"id": "tool-1", "kind": "tool.started", "summary": "Command run started", "turnId": "turn-ask",
-             "createdAt": "2026-10-07T11:59:41.000Z",
-             "payload": {"toolCallId": "c1", "status": "inProgress", "title": "Command run", "detail": "Bash: npm test"}},
+        ], items=[
+            command_item("c0", "git status", status="completed"),
+            command_item("c1", "npm test"),
         ]))
         self.service.connect(self.fake.url, PAIRING_CODE)
 
@@ -137,23 +139,28 @@ class T3RouteTest(unittest.TestCase):
         self.assertEqual({"connected", "revision", "updatedAt", "counts", "projects", "threads"}, set(body))
         self.assertEqual(["ask"], [item["id"] for item in body["threads"]])
 
-        status, body = self._call("GET", "/v1/t3/threads/ask?turns=2")
+        status, body = self._call("GET", "/v1/t3/threads/ask?turns=1")
         self.assertEqual(200, status)
         self.assertEqual(["user", "assistant"], [item["role"] for item in body["messages"]])
         self.assertTrue(body["messages"][1]["streaming"])
         self.assertEqual("needs-approval", body["thread"]["status"])
-        self.assertEqual("turn-ask", body["activeTurnId"])
+        self.assertEqual("run-ask", body["activeTurnId"])
         self.assertEqual("req-1", body["pending"]["approvals"][0]["requestId"])
         self.assertEqual({"requestId", "kind", "detail", "options"}, set(body["pending"]["approvals"][0]))
         self.assertEqual("q-1", body["pending"]["inputs"][0]["requestId"])
-        self.assertEqual("/api/orchestration/threads/ask?turnLimit=2", self.fake.requests[-1]["path"])
+        self.assertEqual("/api/orchestration/threads/ask/bounded", self.fake.requests[-1]["path"])
+        status, body = self._call("GET", "/v1/t3/threads/ask?turns=3")
+        self.assertEqual(["user", "assistant", "user", "assistant"], [item["role"] for item in body["messages"]])
 
         status, body = self._call("GET", "/v1/live/t3-thread/ask")
         self.assertEqual(200, status)
         self.assertEqual("warn", body["status"])
         self.assertFalse(body["terminal"])
         self.assertEqual("Run the unit tests", body["phase"])
-        self.assertEqual([{"title": "Command run", "detail": "Bash: npm test", "status": "active", "trailing": None}], body["items"])
+        self.assertEqual([
+            {"title": "Command run", "detail": "git status", "status": "ok", "trailing": None},
+            {"title": "Command run", "detail": "npm test", "status": "active", "trailing": None},
+        ], body["items"])
         self.assertEqual({"status", "terminal", "subtitle", "phase", "progress", "items", "text", "updatedAt", "nextPollMs"}, set(body))
 
         status, body = self._call("GET", "/v1/t3/threads/missing")
@@ -162,7 +169,7 @@ class T3RouteTest(unittest.TestCase):
         status, body = self._call("POST", "/v1/t3/threads", {"text": "Add a changelog", "project": "orbit"})
         self.assertEqual(202, status)
         self.assertEqual("Orbit Lab", body["projectTitle"])
-        self.assertEqual(["thread.create", "thread.turn.start"], [item["type"] for item in self.fake.dispatched[-2:]])
+        self.assertEqual(body["threadId"], self.fake.launched[-1]["threadId"])
         status, body = self._call("POST", "/v1/t3/threads/ask/messages", {"text": "Use the fast suite"})
         self.assertEqual((202, True), (status, body["ok"]))
         status, body = self._call("POST", "/v1/t3/threads/ask/approvals/req-1", {"decision": "accept"})
@@ -173,8 +180,8 @@ class T3RouteTest(unittest.TestCase):
         self.assertEqual((200, True), (status, body["ok"]))
         status, body = self._call("POST", "/v1/t3/threads/ask/interrupt")
         self.assertEqual((200, True), (status, body["ok"]))
-        self.assertEqual({"type": "thread.turn.interrupt", "threadId": "ask", "turnId": "turn-ask"},
-                         {key: self.fake.dispatched[-1][key] for key in ("type", "threadId", "turnId")})
+        self.assertEqual({"type": "thread.stop", "threadId": "ask"},
+                         {key: self.fake.dispatched[-1][key] for key in ("type", "threadId")})
         status, body = self._call("POST", "/v1/t3/threads/done/seen")
         self.assertEqual((200, {"ok": True}), (status, body))
         self.assertEqual(400, self._call("POST", "/v1/t3/threads/ask/messages", {"text": "  "})[0])

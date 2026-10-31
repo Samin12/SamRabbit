@@ -13,7 +13,7 @@ const counts=view.counts;if(connected&&counts){const bits=[];if(counts.needsYou)
 document.querySelector("#t3-detail").textContent=view.detail||(parts.length?parts.join(" · "):"Not connected. Pair once with a code from T3 Code on your Mac.");
 if(health==="ready")setState("Connected","ready");else if(health==="failed")setState("Unreachable","error");else if(health==="reauth")setState("Pair again","error");else setState("Not connected","");
 disconnect.hidden=!paired;repair.hidden=!connected;form.hidden=connected&&!form.dataset.open;
-if(!server.value)server.value=view.serverUrl||view.defaultServerUrl||"http://192.168.1.183:3773"}
+if(!server.value)server.value=view.serverUrl||view.defaultServerUrl||"http://192.168.1.183:3774"}
 async function load(){try{render(await api("/v1/management/t3"))}catch(error){document.querySelector("#t3-detail").textContent=error.message;setState("Unavailable","error")}}
 form.addEventListener("submit",async event=>{event.preventDefault();message.textContent="";connectButton.disabled=true;connectButton.textContent="Connecting…";try{const body=await api("/v1/management/t3/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({serverUrl:server.value.trim(),pairingCode:code.value.trim()})});code.value="";delete form.dataset.open;render(body);message.className="support";message.textContent="Connected. The R1 now follows your T3 threads."}catch(error){message.className="error";message.textContent=error.message}finally{connectButton.disabled=false;connectButton.textContent="Connect T3 Code"}});
 repair.onclick=()=>{form.dataset.open="1";form.hidden=false;message.textContent="";code.focus()};
